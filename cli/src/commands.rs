@@ -1141,14 +1141,10 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                     usage: "clipboard write <text>",
                 })?;
                 let text = rest[1..].join(" ");
-                Ok(
-                    json!({ "id": id, "action": "clipboard", "operation": "write", "text": text }),
-                )
+                Ok(json!({ "id": id, "action": "clipboard", "operation": "write", "text": text }))
             }
             Some("copy") => Ok(json!({ "id": id, "action": "clipboard", "operation": "copy" })),
-            Some("paste") => {
-                Ok(json!({ "id": id, "action": "clipboard", "operation": "paste" }))
-            }
+            Some("paste") => Ok(json!({ "id": id, "action": "clipboard", "operation": "paste" })),
             Some(sub) => Err(ParseError::UnknownSubcommand {
                 subcommand: sub.to_string(),
                 valid_options: &["read", "write", "copy", "paste"],
@@ -2804,8 +2800,11 @@ mod tests {
 
     #[test]
     fn test_wait_text_with_timeout() {
-        let cmd =
-            parse_command(&args("wait --text Welcome --timeout 5000"), &default_flags()).unwrap();
+        let cmd = parse_command(
+            &args("wait --text Welcome --timeout 5000"),
+            &default_flags(),
+        )
+        .unwrap();
         assert_eq!(cmd["action"], "wait");
         assert_eq!(cmd["text"], "Welcome");
         assert_eq!(cmd["timeout"], 5000);

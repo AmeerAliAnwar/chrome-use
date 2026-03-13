@@ -956,8 +956,7 @@ async function handleWait(command: WaitCommand, browser: BrowserManager): Promis
 
   if (command.text) {
     await page.waitForFunction(
-      (t: string) => (document.body.innerText || '').includes(t),
-      command.text,
+      `(document.body.innerText || '').includes(${JSON.stringify(command.text)})`,
       { timeout: command.timeout }
     );
   } else if (command.selector) {
