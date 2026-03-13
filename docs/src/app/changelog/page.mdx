@@ -4,6 +4,46 @@ export const metadata = pageMetadata("changelog")
 
 # Changelog
 
+## v0.19.0
+
+<p className="text-[#888] text-sm">March 2026</p>
+
+### New Features
+
+- **Browserless.io provider** -- Added browserless.io as a browser provider, supported in both Node.js and native daemon paths. Connect to remote Browserless instances using the `--provider browserless` flag or `AGENT_BROWSER_PROVIDER=browserless` environment variable.
+
+```bash
+export BROWSERLESS_API_KEY="your-api-key"
+agent-browser --provider browserless open example.com
+agent-browser --provider browserless screenshot ./page.png
+```
+
+- **`clipboard` command** -- Read from and write to the browser clipboard. Supports `read`, `write`, `copy` (simulates Ctrl+C), and `paste` (simulates Ctrl+V) operations.
+
+```bash
+agent-browser clipboard read
+agent-browser clipboard write "Hello, World!"
+agent-browser clipboard copy
+agent-browser clipboard paste
+```
+
+- **Screenshot output configuration** -- New global flags for persistent screenshot settings: `--screenshot-dir`, `--screenshot-quality`, and `--screenshot-format`. Also available as environment variables `AGENT_BROWSER_SCREENSHOT_DIR`, `AGENT_BROWSER_SCREENSHOT_QUALITY`, and `AGENT_BROWSER_SCREENSHOT_FORMAT`.
+
+```bash
+agent-browser screenshot --screenshot-dir ./shots
+agent-browser screenshot --screenshot-format jpeg --screenshot-quality 80
+```
+
+### Bug Fixes
+
+- Fixed `wait --text` not working in native daemon path
+- Fixed `BrowserManager.navigate()` and package entry point
+- Fixed extensions not being loaded from `config.json`
+- Fixed scroll on page load
+- Fixed HTML retrieval by using `browser.getLocator()` for selector operations
+
+---
+
 ## v0.18.0
 
 <p className="text-[#888] text-sm">March 2026</p>
