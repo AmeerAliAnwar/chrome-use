@@ -104,7 +104,7 @@ pub fn to_ai_friendly_error(error: &str) -> String {
         return "Operation timed out. The page may still be loading or the element may not exist."
             .to_string();
     }
-    if lower.contains("not found") || lower.contains("no element") {
+    if lower.contains("element not found") || lower.contains("no element") {
         return "Element not found. Verify the selector is correct and the element exists in the DOM."
             .to_string();
     }
@@ -1236,5 +1236,19 @@ mod tests {
     fn test_to_ai_friendly_error_unknown() {
         let msg = "Some custom error message";
         assert_eq!(to_ai_friendly_error(msg), msg);
+    }
+
+    /// Errors containing "not found" but NOT "element" should pass through unchanged.
+    #[test]
+    fn test_to_ai_friendly_error_ignores_non_element_not_found() {
+        let err = "Chrome not found. Install Chrome or use --executable-path.";
+        assert_eq!(to_ai_friendly_error(err), err);
+    }
+
+    #[test]
+    fn test_to_ai_friendly_error_catches_no_element() {
+        let mapped =
+            "Element not found. Verify the selector is correct and the element exists in the DOM.";
+        assert_eq!(to_ai_friendly_error("No element found for css 'x'"), mapped);
     }
 }
