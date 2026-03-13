@@ -57,6 +57,7 @@ pub struct ScreenshotOptions {
     pub format: String,
     pub quality: Option<i32>,
     pub annotate: bool,
+    pub output_dir: Option<String>,
 }
 
 impl Default for ScreenshotOptions {
@@ -68,6 +69,7 @@ impl Default for ScreenshotOptions {
             format: "png".to_string(),
             quality: None,
             annotate: false,
+            output_dir: None,
         }
     }
 }
@@ -145,7 +147,12 @@ pub async fn take_screenshot(
     } else {
         "png"
     };
-    let path = save_screenshot(&base64, options.path.as_deref(), ext)?;
+    let path = save_screenshot(
+        &base64,
+        options.path.as_deref(),
+        ext,
+        options.output_dir.as_deref(),
+    )?;
 
     Ok(ScreenshotResult {
         path,
@@ -479,11 +486,15 @@ fn save_screenshot(
     base64_data: &str,
     explicit_path: Option<&str>,
     ext: &str,
+    output_dir: Option<&str>,
 ) -> Result<String, String> {
     let save_path = match explicit_path {
         Some(path) => path.to_string(),
         None => {
-            let dir = get_screenshot_dir();
+            let dir = match output_dir {
+                Some(d) => PathBuf::from(d),
+                None => get_screenshot_dir(),
+            };
             let _ = std::fs::create_dir_all(&dir);
             let timestamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

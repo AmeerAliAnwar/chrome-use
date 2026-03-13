@@ -115,6 +115,8 @@ agent-browser drag <src> <tgt>        # Drag and drop
 agent-browser upload <sel> <files>    # Upload files
 agent-browser screenshot [path]       # Take screenshot (--full for full page, saves to a temporary directory if no path)
 agent-browser screenshot --annotate   # Annotated screenshot with numbered element labels
+agent-browser screenshot --screenshot-dir ./shots    # Save to custom directory
+agent-browser screenshot --screenshot-format jpeg --screenshot-quality 80
 agent-browser pdf <path>              # Save as PDF
 agent-browser snapshot                # Accessibility tree with refs (best for AI)
 agent-browser eval <js>               # Run JavaScript (-b for base64, --stdin for piped input)
@@ -179,13 +181,26 @@ agent-browser find nth 2 "a" text
 ```bash
 agent-browser wait <selector>         # Wait for element to be visible
 agent-browser wait <ms>               # Wait for time (milliseconds)
-agent-browser wait --text "Welcome"   # Wait for text to appear
+agent-browser wait --text "Welcome"   # Wait for text to appear (substring match)
 agent-browser wait --url "**/dash"    # Wait for URL pattern
 agent-browser wait --load networkidle # Wait for load state
 agent-browser wait --fn "window.ready === true"  # Wait for JS condition
+
+# Wait for text/element to disappear
+agent-browser wait --fn "!document.body.innerText.includes('Loading...')"
+agent-browser wait "#spinner" --state hidden
 ```
 
 **Load states:** `load`, `domcontentloaded`, `networkidle`
+
+### Clipboard
+
+```bash
+agent-browser clipboard read                      # Read text from clipboard
+agent-browser clipboard write "Hello, World!"     # Write text to clipboard
+agent-browser clipboard copy                      # Copy current selection (Ctrl+C)
+agent-browser clipboard paste                     # Paste from clipboard (Ctrl+V)
+```
 
 ### Mouse Control
 
@@ -532,6 +547,9 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--json` | JSON output (for agents) |
 | `--full, -f` | Full page screenshot |
 | `--annotate` | Annotated screenshot with numbered element labels (or `AGENT_BROWSER_ANNOTATE` env) |
+| `--screenshot-dir <path>` | Default screenshot output directory (or `AGENT_BROWSER_SCREENSHOT_DIR` env) |
+| `--screenshot-quality <n>` | JPEG quality 0-100 (or `AGENT_BROWSER_SCREENSHOT_QUALITY` env) |
+| `--screenshot-format <fmt>` | Screenshot format: `png`, `jpeg` (or `AGENT_BROWSER_SCREENSHOT_FORMAT` env) |
 | `--headed` | Show browser window (not headless) (or `AGENT_BROWSER_HEADED` env) |
 | `--cdp <port\|url>` | Connect via Chrome DevTools Protocol (port or WebSocket URL) |
 | `--auto-connect` | Auto-discover and connect to running Chrome (or `AGENT_BROWSER_AUTO_CONNECT` env) |

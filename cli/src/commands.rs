@@ -391,7 +391,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 return Ok(json!({ "id": id, "action": "waitforfunction", "expression": expr }));
             }
 
-            // Check for --text flag: wait --text "Welcome"
+            // Check for --text flag: wait --text "Welcome" [--timeout ms]
             if let Some(idx) = rest.iter().position(|&s| s == "--text" || s == "-t") {
                 let text = rest
                     .get(idx + 1)
@@ -399,10 +399,13 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                         context: "wait --text".to_string(),
                         usage: "wait --text <text>",
                     })?;
-                // Use getByText locator to wait for text to appear
-                return Ok(
-                    json!({ "id": id, "action": "wait", "selector": format!("text={}", text) }),
-                );
+                let mut cmd = json!({ "id": id, "action": "wait", "text": text });
+                if let Some(t_idx) = rest.iter().position(|&s| s == "--timeout") {
+                    if let Some(Ok(ms)) = rest.get(t_idx + 1).map(|s| s.parse::<u64>()) {
+                        cmd["timeout"] = json!(ms);
+                    }
+                }
+                return Ok(cmd);
             }
 
             // Check for --download flag: wait --download [path] [--timeout ms]
@@ -474,9 +477,27 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 }
                 _ => (None, None),
             };
-            Ok(
-                json!({ "id": id, "action": "screenshot", "path": path, "selector": selector, "fullPage": flags.full, "annotate": flags.annotate }),
-            )
+            let mut cmd = json!({
+                "id": id, "action": "screenshot",
+                "path": path, "selector": selector,
+                "fullPage": flags.full, "annotate": flags.annotate
+            });
+            if let Some(ref fmt) = flags.screenshot_format {
+                cmd["format"] = json!(fmt);
+            }
+            if let Some(q) = flags.screenshot_quality {
+                cmd["quality"] = json!(q);
+                if flags.screenshot_format.as_deref() != Some("jpeg") {
+                    eprintln!(
+                        "{} --screenshot-quality is ignored for PNG; use --screenshot-format jpeg",
+                        color::warning_indicator()
+                    );
+                }
+            }
+            if let Some(ref dir) = flags.screenshot_dir {
+                cmd["screenshotDir"] = json!(dir);
+            }
+            Ok(cmd)
         }
         "pdf" => {
             let path = rest.first().ok_or_else(|| ParseError::MissingArguments {
@@ -1108,6 +1129,31 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             })?;
             Ok(json!({ "id": id, "action": "highlight", "selector": sel }))
         }
+
+        // === Clipboard ===
+        "clipboard" => match rest.first().copied() {
+            Some("read") | None => {
+                Ok(json!({ "id": id, "action": "clipboard", "operation": "read" }))
+            }
+            Some("write") => {
+                rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                    context: "clipboard write".to_string(),
+                    usage: "clipboard write <text>",
+                })?;
+                let text = rest[1..].join(" ");
+                Ok(
+                    json!({ "id": id, "action": "clipboard", "operation": "write", "text": text }),
+                )
+            }
+            Some("copy") => Ok(json!({ "id": id, "action": "clipboard", "operation": "copy" })),
+            Some("paste") => {
+                Ok(json!({ "id": id, "action": "clipboard", "operation": "paste" }))
+            }
+            Some(sub) => Err(ParseError::UnknownSubcommand {
+                subcommand: sub.to_string(),
+                valid_options: &["read", "write", "copy", "paste"],
+            }),
+        },
 
         // === State ===
         "state" => {
@@ -2133,6 +2179,9 @@ mod tests {
             confirm_interactive: false,
             native: false,
             engine: None,
+            screenshot_dir: None,
+            screenshot_quality: None,
+            screenshot_format: None,
         }
     }
 
@@ -2749,7 +2798,75 @@ mod tests {
     fn test_wait_text() {
         let cmd = parse_command(&args("wait --text Welcome"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "wait");
-        assert_eq!(cmd["selector"], "text=Welcome");
+        assert_eq!(cmd["text"], "Welcome");
+        assert!(cmd.get("timeout").is_none());
+    }
+
+    #[test]
+    fn test_wait_text_with_timeout() {
+        let cmd =
+            parse_command(&args("wait --text Welcome --timeout 5000"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "wait");
+        assert_eq!(cmd["text"], "Welcome");
+        assert_eq!(cmd["timeout"], 5000);
+    }
+
+    // === Clipboard Tests ===
+
+    #[test]
+    fn test_clipboard_read_default() {
+        let cmd = parse_command(&args("clipboard"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "clipboard");
+        assert_eq!(cmd["operation"], "read");
+    }
+
+    #[test]
+    fn test_clipboard_read_explicit() {
+        let cmd = parse_command(&args("clipboard read"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "clipboard");
+        assert_eq!(cmd["operation"], "read");
+    }
+
+    #[test]
+    fn test_clipboard_write() {
+        let cmd = parse_command(&args("clipboard write hello"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "clipboard");
+        assert_eq!(cmd["operation"], "write");
+        assert_eq!(cmd["text"], "hello");
+    }
+
+    #[test]
+    fn test_clipboard_write_multi_word() {
+        let cmd = parse_command(&args("clipboard write hello world"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "clipboard");
+        assert_eq!(cmd["operation"], "write");
+        assert_eq!(cmd["text"], "hello world");
+    }
+
+    #[test]
+    fn test_clipboard_copy() {
+        let cmd = parse_command(&args("clipboard copy"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "clipboard");
+        assert_eq!(cmd["operation"], "copy");
+    }
+
+    #[test]
+    fn test_clipboard_paste() {
+        let cmd = parse_command(&args("clipboard paste"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "clipboard");
+        assert_eq!(cmd["operation"], "paste");
+    }
+
+    #[test]
+    fn test_clipboard_write_missing_text() {
+        let result = parse_command(&args("clipboard write"), &default_flags());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_clipboard_unknown_subcommand() {
+        let result = parse_command(&args("clipboard clear"), &default_flags());
+        assert!(result.is_err());
     }
 
     // === Unknown command ===

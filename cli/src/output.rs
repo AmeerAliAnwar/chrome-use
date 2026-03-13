@@ -1313,11 +1313,17 @@ Modes:
   --url <pattern>      Wait for URL to match pattern
   --load <state>       Wait for load state (load, domcontentloaded, networkidle)
   --fn <expression>    Wait for JavaScript expression to be truthy
-  --text <text>        Wait for text to appear on page
+  --text <text>        Wait for text to appear on page (substring match)
   --download [path]    Wait for a download to complete (optionally save to path)
 
 Download Options (with --download):
   --timeout <ms>       Timeout in milliseconds for download to start
+
+Wait for text to disappear:
+  Use --fn or --state hidden to wait for text or elements to go away:
+  wait --fn "!document.body.innerText.includes('Loading...')"
+  wait "#spinner" --state hidden
+  wait @e5 --state detached
 
 Global Options:
   --json               Output as JSON
@@ -1332,6 +1338,7 @@ Examples:
   agent-browser wait --text "Welcome back"
   agent-browser wait --download ./file.pdf
   agent-browser wait --download ./report.xlsx --timeout 30000
+  agent-browser wait --fn "!document.body.innerText.includes('Loading...')"
 "##
         }
 
@@ -1340,7 +1347,7 @@ Examples:
             r##"
 agent-browser screenshot - Take a screenshot
 
-Usage: agent-browser screenshot [path]
+Usage: agent-browser screenshot [selector] [path]
 
 Captures a screenshot of the current page. If no path is provided,
 saves to a temporary directory with a generated filename.
@@ -1353,6 +1360,12 @@ Options:
                        With --json, annotations are included in the response.
                        In native mode, this is currently supported on the
                        CDP-backed browser path (Chromium/Lightpanda).
+  --screenshot-dir <path>  Default output directory for screenshots
+                       (or AGENT_BROWSER_SCREENSHOT_DIR env)
+  --screenshot-quality <0-100>  JPEG quality (0-100, only applies to jpeg format)
+                       (or AGENT_BROWSER_SCREENSHOT_QUALITY env)
+  --screenshot-format <fmt>  Image format: png (default) or jpeg
+                       (or AGENT_BROWSER_SCREENSHOT_FORMAT env)
 
 Global Options:
   --json               Output as JSON
@@ -1365,6 +1378,8 @@ Examples:
   agent-browser screenshot --annotate              # Labeled screenshot + legend
   agent-browser screenshot --annotate ./page.png   # Save annotated screenshot
   agent-browser screenshot --annotate --json       # JSON output with annotations
+  agent-browser screenshot --screenshot-dir ./shots # Save to custom directory
+  agent-browser screenshot --screenshot-format jpeg --screenshot-quality 80
 "##
         }
         "pdf" => {
@@ -2097,6 +2112,33 @@ Examples:
 "##
         }
 
+        // === Clipboard ===
+        "clipboard" => {
+            r##"
+agent-browser clipboard - Read and write clipboard
+
+Usage: agent-browser clipboard <operation> [text]
+
+Read from or write to the browser clipboard.
+
+Operations:
+  read                 Read text from clipboard
+  write <text>         Write text to clipboard
+  copy                 Copy current selection (simulates Ctrl+C)
+  paste                Paste from clipboard (simulates Ctrl+V)
+
+Global Options:
+  --json               Output as JSON
+  --session <name>     Use specific session
+
+Examples:
+  agent-browser clipboard read
+  agent-browser clipboard write "Hello, World!"
+  agent-browser clipboard copy
+  agent-browser clipboard paste
+"##
+        }
+
         // === State ===
         "state" => {
             r##"
@@ -2434,6 +2476,7 @@ Debug:
   errors [--clear]           View page errors
   highlight <sel>            Highlight element
   inspect                    Open Chrome DevTools for the active page
+  clipboard <op> [text]      Read/write clipboard (read, write, copy, paste)
 
 Auth Vault:
   auth save <name> [opts]    Save auth profile (--url, --username, --password/--password-stdin)
@@ -2489,6 +2532,9 @@ Options:
   --json                     JSON output
   --full, -f                 Full page screenshot
   --annotate                 Annotated screenshot with numbered labels and legend
+  --screenshot-dir <path>    Default screenshot output directory (or AGENT_BROWSER_SCREENSHOT_DIR)
+  --screenshot-quality <n>   JPEG quality 0-100; ignored for PNG (or AGENT_BROWSER_SCREENSHOT_QUALITY)
+  --screenshot-format <fmt>  Screenshot format: png, jpeg (or AGENT_BROWSER_SCREENSHOT_FORMAT)
   --headed                   Show browser window (not headless) (or AGENT_BROWSER_HEADED env)
   --cdp <port>               Connect via CDP (Chrome DevTools Protocol)
   --color-scheme <scheme>    Color scheme: dark, light, no-preference (or AGENT_BROWSER_COLOR_SCHEME)
@@ -2558,6 +2604,9 @@ Environment:
   AGENT_BROWSER_CONFIRM_INTERACTIVE Enable interactive confirmation prompts
   AGENT_BROWSER_ENGINE           Browser engine: chrome (default), lightpanda
   AGENT_BROWSER_NATIVE           Use native Rust daemon (experimental, no Node.js/Playwright)
+  AGENT_BROWSER_SCREENSHOT_DIR   Default screenshot output directory
+  AGENT_BROWSER_SCREENSHOT_QUALITY JPEG quality 0-100
+  AGENT_BROWSER_SCREENSHOT_FORMAT Screenshot format: png, jpeg
 
 Install (recommended, fastest - native Rust CLI):
   npm install -g agent-browser

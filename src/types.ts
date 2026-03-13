@@ -707,7 +707,7 @@ export interface TapCommand extends BaseCommand {
 // Clipboard
 export interface ClipboardCommand extends BaseCommand {
   action: 'clipboard';
-  operation: 'copy' | 'paste' | 'read';
+  operation: 'copy' | 'paste' | 'read' | 'write';
   text?: string;
 }
 
@@ -826,6 +826,7 @@ export interface ScreenshotCommand extends BaseCommand {
   format?: 'png' | 'jpeg';
   quality?: number;
   annotate?: boolean;
+  screenshotDir?: string;
 }
 
 export interface SnapshotCommand extends BaseCommand {
@@ -841,6 +842,7 @@ export interface EvaluateCommand extends BaseCommand {
 export interface WaitCommand extends BaseCommand {
   action: 'wait';
   selector?: string;
+  text?: string;
   timeout?: number;
   state?: 'attached' | 'detached' | 'visible' | 'hidden';
 }

@@ -741,7 +741,7 @@ async function handleScreenshot(
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
       const random = Math.random().toString(36).substring(2, 8);
       const filename = `screenshot-${timestamp}-${random}.${ext}`;
-      const screenshotDir = path.join(getAppDir(), 'tmp', 'screenshots');
+      const screenshotDir = command.screenshotDir ?? path.join(getAppDir(), 'tmp', 'screenshots');
       mkdirSync(screenshotDir, { recursive: true });
       savePath = path.join(screenshotDir, filename);
     }
@@ -954,7 +954,13 @@ async function handleEvaluate(
 async function handleWait(command: WaitCommand, browser: BrowserManager): Promise<Response> {
   const page = browser.getPage();
 
-  if (command.selector) {
+  if (command.text) {
+    await page.waitForFunction(
+      (t: string) => (document.body.innerText || '').includes(t),
+      command.text,
+      { timeout: command.timeout }
+    );
+  } else if (command.selector) {
     await page.waitForSelector(command.selector, {
       state: command.state ?? 'visible',
       timeout: command.timeout,
@@ -962,7 +968,6 @@ async function handleWait(command: WaitCommand, browser: BrowserManager): Promis
   } else if (command.timeout) {
     await page.waitForTimeout(command.timeout);
   } else {
-    // Default: wait for load state
     await page.waitForLoadState('load');
   }
 
@@ -2119,14 +2124,22 @@ async function handleClipboard(
 
   switch (command.operation) {
     case 'copy':
-      await page.keyboard.press('Control+c');
+      await page.keyboard.press('ControlOrMeta+c');
       return successResponse(command.id, { copied: true });
     case 'paste':
-      await page.keyboard.press('Control+v');
+      await page.keyboard.press('ControlOrMeta+v');
       return successResponse(command.id, { pasted: true });
-    case 'read':
+    case 'read': {
       const text = await page.evaluate('navigator.clipboard.readText()');
       return successResponse(command.id, { text });
+    }
+    case 'write': {
+      if (!command.text) {
+        return errorResponse(command.id, "Missing 'text' parameter for clipboard write");
+      }
+      await page.evaluate(`navigator.clipboard.writeText(${JSON.stringify(command.text)})`);
+      return successResponse(command.id, { written: command.text });
+    }
     default:
       return errorResponse(command.id, 'Unknown clipboard operation');
   }

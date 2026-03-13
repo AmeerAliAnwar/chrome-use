@@ -1415,6 +1415,10 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
             .and_then(|v| v.as_i64())
             .map(|q| q as i32),
         annotate,
+        output_dir: cmd
+            .get("screenshotDir")
+            .and_then(|v| v.as_str())
+            .map(String::from),
     };
 
     if annotate {
@@ -1641,6 +1645,11 @@ async fn handle_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     let session_id = mgr.active_session_id()?.to_string();
     let timeout_ms = cmd.get("timeout").and_then(|v| v.as_u64()).unwrap_or(30000);
 
+    if let Some(text) = cmd.get("text").and_then(|v| v.as_str()) {
+        wait_for_text(&mgr.client, &session_id, text, timeout_ms).await?;
+        return Ok(json!({ "waited": "text", "text": text }));
+    }
+
     if let Some(selector) = cmd.get("selector").and_then(|v| v.as_str()) {
         let state_str = cmd
             .get("state")
@@ -1653,11 +1662,6 @@ async fn handle_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     if let Some(url_pattern) = cmd.get("url").and_then(|v| v.as_str()) {
         wait_for_url(&mgr.client, &session_id, url_pattern, timeout_ms).await?;
         return Ok(json!({ "waited": "url", "url": url_pattern }));
-    }
-
-    if let Some(text) = cmd.get("text").and_then(|v| v.as_str()) {
-        wait_for_text(&mgr.client, &session_id, text, timeout_ms).await?;
-        return Ok(json!({ "waited": "text", "text": text }));
     }
 
     if let Some(fn_str) = cmd.get("function").and_then(|v| v.as_str()) {
@@ -3107,8 +3111,13 @@ async fn handle_clipboard(cmd: &Value, state: &DaemonState) -> Result<Value, Str
         .and_then(|v| v.as_str())
         .unwrap_or("read");
 
+    let session_id = mgr.active_session_id()?.to_string();
+
+    // cfg! is compile-time; assumes the browser runs on the same OS as the CLI binary.
+    let modifier: i32 = if cfg!(target_os = "macos") { 4 } else { 2 };
+
     match action {
-        "write" | "copy" => {
+        "write" => {
             let text = cmd
                 .get("text")
                 .or_else(|| cmd.get("value"))
@@ -3119,7 +3128,17 @@ async fn handle_clipboard(cmd: &Value, state: &DaemonState) -> Result<Value, Str
                 serde_json::to_string(text).unwrap_or_default()
             );
             mgr.evaluate(&js, None).await?;
-            Ok(json!({ "copied": text }))
+            Ok(json!({ "written": text }))
+        }
+        "copy" => {
+            interaction::press_key_with_modifiers(&mgr.client, &session_id, "c", Some(modifier))
+                .await?;
+            Ok(json!({ "copied": true }))
+        }
+        "paste" => {
+            interaction::press_key_with_modifiers(&mgr.client, &session_id, "v", Some(modifier))
+                .await?;
+            Ok(json!({ "pasted": true }))
         }
         _ => {
             let result = mgr.evaluate("navigator.clipboard.readText()", None).await?;
@@ -4190,6 +4209,7 @@ async fn handle_diff_screenshot(cmd: &Value, state: &DaemonState) -> Result<Valu
         format: "png".to_string(),
         quality: None,
         annotate: false,
+        output_dir: None,
     };
 
     let result =
