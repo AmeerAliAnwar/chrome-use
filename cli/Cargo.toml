@@ -4,6 +4,11 @@ version = "0.19.0"
 edition = "2021"
 description = "Fast browser automation CLI for AI agents"
 license = "Apache-2.0"
+repository = "https://github.com/vercel-labs/agent-browser"
+homepage = "https://agent-browser.dev"
+readme = "../README.md"
+keywords = ["browser", "automation", "ai", "cdp", "chrome"]
+categories = ["command-line-utilities", "web-programming"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
