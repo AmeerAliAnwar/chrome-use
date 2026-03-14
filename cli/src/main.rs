@@ -27,9 +27,6 @@ use output::{
     print_command_help, print_help, print_response_with_opts, print_version, OutputOptions,
 };
 
-use std::path::PathBuf;
-use std::process::Command as ProcessCommand;
-
 fn serialize_json_value(value: &serde_json::Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| {
         r#"{"success":false,"error":"Failed to serialize JSON response"}"#.to_string()
@@ -53,110 +50,6 @@ fn print_json_error_with_type(message: impl AsRef<str>, error_type: &str) {
         "error": message.as_ref(),
         "type": error_type,
     }));
-}
-
-/// Run a local auth command (auth_save/list/show/delete) via node auth-cli.js.
-/// These commands don't need a browser, so we handle them directly to avoid
-/// sending passwords through the daemon's Unix socket channel.
-fn run_auth_cli(cmd: &serde_json::Value, json_mode: bool) -> ! {
-    let exe_path = env::current_exe().unwrap_or_default();
-    let exe_path = exe_path.canonicalize().unwrap_or(exe_path);
-    #[cfg(windows)]
-    let exe_path = {
-        let p = exe_path.to_string_lossy();
-        if let Some(stripped) = p.strip_prefix(r"\\?\") {
-            PathBuf::from(stripped)
-        } else {
-            exe_path
-        }
-    };
-    let exe_dir = exe_path.parent().unwrap_or(std::path::Path::new("."));
-
-    let mut script_paths = vec![
-        exe_dir.join("auth-cli.js"),
-        exe_dir.join("../dist/auth-cli.js"),
-        PathBuf::from("dist/auth-cli.js"),
-    ];
-
-    if let Ok(home) = env::var("AGENT_BROWSER_HOME") {
-        let home_path = PathBuf::from(&home);
-        script_paths.insert(0, home_path.join("dist/auth-cli.js"));
-        script_paths.insert(1, home_path.join("auth-cli.js"));
-    }
-
-    let script_path = match script_paths.iter().find(|p| p.exists()) {
-        Some(p) => p.clone(),
-        None => {
-            if json_mode {
-                print_json_error("auth-cli.js not found");
-            } else {
-                eprintln!(
-                    "{} auth-cli.js not found. Set AGENT_BROWSER_HOME or run from project directory.",
-                    color::error_indicator()
-                );
-            }
-            exit(1);
-        }
-    };
-
-    let cmd_json = serde_json::to_string(cmd).unwrap_or_default();
-
-    match ProcessCommand::new("node")
-        .arg(&script_path)
-        .arg(&cmd_json)
-        .output()
-    {
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if !stderr.is_empty() {
-                eprint!("{}", stderr);
-            }
-
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stdout = stdout.trim();
-
-            if stdout.is_empty() {
-                if json_mode {
-                    print_json_error("No response from auth-cli");
-                } else {
-                    eprintln!("{} No response from auth-cli", color::error_indicator());
-                }
-                exit(1);
-            }
-
-            if json_mode {
-                println!("{}", stdout);
-            } else {
-                // Parse the JSON response and use the standard output formatter
-                match serde_json::from_str::<connection::Response>(stdout) {
-                    Ok(resp) => {
-                        let action = cmd.get("action").and_then(|v| v.as_str());
-                        let opts = OutputOptions {
-                            json: false,
-                            content_boundaries: false,
-                            max_output: None,
-                        };
-                        print_response_with_opts(&resp, action, &opts);
-                        if !resp.success {
-                            exit(1);
-                        }
-                    }
-                    Err(_) => {
-                        println!("{}", stdout);
-                    }
-                }
-            }
-            exit(output.status.code().unwrap_or(0));
-        }
-        Err(e) => {
-            if json_mode {
-                print_json_error(format!("Failed to run auth-cli: {}", e));
-            } else {
-                eprintln!("{} Failed to run auth-cli: {}", color::error_indicator(), e);
-            }
-            exit(1);
-        }
-    }
 }
 
 fn parse_proxy(proxy_str: &str) -> serde_json::Value {
@@ -299,12 +192,8 @@ fn main() {
     }
 
     let args: Vec<String> = env::args().skip(1).collect();
-    let mut flags = parse_flags(&args);
+    let flags = parse_flags(&args);
     let clean = clean_args(&args);
-
-    if flags.engine.is_some() && !flags.native {
-        flags.native = true;
-    }
 
     let has_help = args.iter().any(|a| a == "--help" || a == "-h");
     let has_version = args.iter().any(|a| a == "--version" || a == "-V");
@@ -392,17 +281,6 @@ fn main() {
         }
     }
 
-    // Handle local auth commands without starting the daemon.
-    // These don't need a browser, so we avoid sending passwords through the socket.
-    if let Some(action) = cmd.get("action").and_then(|v| v.as_str()) {
-        if matches!(
-            action,
-            "auth_save" | "auth_list" | "auth_show" | "auth_delete"
-        ) {
-            run_auth_cli(&cmd, flags.json);
-        }
-    }
-
     // Validate session name before starting daemon
     if let Some(ref name) = flags.session_name {
         if !validation::is_valid_session_name(name) {
@@ -436,7 +314,6 @@ fn main() {
         allowed_domains: flags.allowed_domains.as_deref(),
         action_policy: flags.action_policy.as_deref(),
         confirm_actions: flags.confirm_actions.as_deref(),
-        native: flags.native,
         engine: flags.engine.as_deref(),
     };
     let daemon_result = match ensure_daemon(&flags.session, &daemon_opts) {
@@ -495,7 +372,6 @@ fn main() {
             flags.ignore_https_errors.then_some("--ignore-https-errors"),
             flags.cli_allow_file_access.then_some("--allow-file-access"),
             flags.cli_download_path.then_some("--download-path"),
-            flags.cli_native.then_some("--native"),
             flags.cli_headed.then_some("--headed"),
         ]
         .into_iter()

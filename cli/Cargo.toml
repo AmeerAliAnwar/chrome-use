@@ -22,6 +22,7 @@ sha2 = "0.10"
 aes-gcm = "0.10"
 async-trait = "0.1"
 similar = "2"
+zip = { version = "8.2.0", default-features = false, features = ["deflate"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

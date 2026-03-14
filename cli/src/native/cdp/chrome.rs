@@ -190,7 +190,7 @@ pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
     let chrome_path = match &options.executable_path {
         Some(p) => PathBuf::from(p),
         None => {
-            find_chrome().ok_or("Chrome not found. Install Chrome or use --executable-path.")?
+            find_chrome().ok_or("Chrome not found. Run `agent-browser install` to download Chrome, or use --executable-path.")?
         }
     };
 
@@ -320,6 +320,12 @@ fn chrome_launch_error(message: &str, stderr_lines: &[String]) -> String {
 }
 
 pub fn find_chrome() -> Option<PathBuf> {
+    // 1. Check Chrome downloaded by `agent-browser install`
+    if let Some(p) = crate::install::find_installed_chrome() {
+        return Some(p);
+    }
+
+    // 2. Check system-installed Chrome
     #[cfg(target_os = "macos")]
     {
         let candidates = [
@@ -332,10 +338,6 @@ pub fn find_chrome() -> Option<PathBuf> {
             if p.exists() {
                 return Some(p);
             }
-        }
-
-        if let Some(p) = find_playwright_chromium() {
-            return Some(p);
         }
     }
 
@@ -357,10 +359,6 @@ pub fn find_chrome() -> Option<PathBuf> {
                 }
             }
         }
-
-        if let Some(p) = find_playwright_chromium() {
-            return Some(p);
-        }
     }
 
     #[cfg(target_os = "windows")]
@@ -381,6 +379,11 @@ pub fn find_chrome() -> Option<PathBuf> {
                 return Some(p);
             }
         }
+    }
+
+    // 3. Fallback: check Playwright's browser cache (for existing installs)
+    if let Some(p) = find_playwright_chromium() {
+        return Some(p);
     }
 
     None
@@ -500,7 +503,7 @@ fn should_disable_sandbox(existing_args: &[String]) -> bool {
 }
 
 /// Search Playwright's browser cache for a Chromium binary.
-/// This is where `agent-browser install` (via `npx playwright install chromium`) puts it.
+/// Legacy fallback for users who previously installed Chromium via Playwright.
 fn find_playwright_chromium() -> Option<PathBuf> {
     let mut search_dirs = Vec::new();
 

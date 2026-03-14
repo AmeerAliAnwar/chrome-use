@@ -1389,8 +1389,7 @@ Options:
                        Each label [N] corresponds to ref @eN from snapshot.
                        Prints a legend mapping labels to element roles/names.
                        With --json, annotations are included in the response.
-                       In native mode, this is currently supported on the
-                       CDP-backed browser path (Chromium/Lightpanda).
+                       Supported on Chromium and Lightpanda.
   --screenshot-dir <path>  Default output directory for screenshots
                        (or AGENT_BROWSER_SCREENSHOT_DIR env)
   --screenshot-quality <0-100>  JPEG quality (0-100, only applies to jpeg format)
@@ -1986,7 +1985,7 @@ agent-browser trace - Record execution trace
 
 Usage: agent-browser trace <operation> [path]
 
-Record a trace for debugging with Playwright Trace Viewer.
+Record a Chrome DevTools trace for debugging.
 
 Operations:
   start [path]         Start recording trace
@@ -2053,7 +2052,7 @@ Usage: agent-browser record start <path.webm> [url]
        agent-browser record stop
        agent-browser record restart <path.webm> [url]
 
-Record the browser to a WebM video file using Playwright's native recording.
+Record the browser to a WebM video file.
 Creates a fresh browser context but preserves cookies and localStorage.
 If no URL is provided, automatically navigates to your current page.
 
@@ -2499,7 +2498,7 @@ Diff:
   diff url <u1> <u2>         Compare two pages
 
 Debug:
-  trace start|stop [path]    Record Playwright trace
+  trace start|stop [path]    Record Chrome DevTools trace
   profiler start|stop [path] Record Chrome DevTools profile
   record start <path> [url]  Start video recording (WebM)
   record stop                Stop and save video
@@ -2576,8 +2575,7 @@ Options:
   --action-policy <path>     Action policy JSON file (or AGENT_BROWSER_ACTION_POLICY)
   --confirm-actions <list>   Categories requiring confirmation (or AGENT_BROWSER_CONFIRM_ACTIONS)
   --confirm-interactive      Interactive confirmation prompts; auto-denies if stdin is not a TTY (or AGENT_BROWSER_CONFIRM_INTERACTIVE)
-  --engine <name>            Browser engine: chrome (default), lightpanda; implies --native (or AGENT_BROWSER_ENGINE)
-  --native                   [Experimental] Use native Rust daemon instead of Node.js (or AGENT_BROWSER_NATIVE)
+  --engine <name>            Browser engine: chrome (default), lightpanda (or AGENT_BROWSER_ENGINE)
   --config <path>            Use a custom config file (or AGENT_BROWSER_CONFIG env)
   --debug                    Debug output
   --version, -V              Show version
@@ -2620,11 +2618,12 @@ Environment:
   AGENT_BROWSER_ALLOW_FILE_ACCESS Allow file:// URLs to access local files
   AGENT_BROWSER_COLOR_SCHEME     Color scheme preference (dark, light, no-preference)
   AGENT_BROWSER_DOWNLOAD_PATH    Default download directory for browser downloads
-  AGENT_BROWSER_DEFAULT_TIMEOUT  Default Playwright timeout in ms (default: 25000)
+  AGENT_BROWSER_DEFAULT_TIMEOUT  Default action timeout in ms (default: 25000)
   AGENT_BROWSER_SESSION_NAME     Auto-save/load state persistence name
   AGENT_BROWSER_STATE_EXPIRE_DAYS Auto-delete saved states older than N days (default: 30)
   AGENT_BROWSER_ENCRYPTION_KEY   64-char hex key for AES-256-GCM session encryption
   AGENT_BROWSER_STREAM_PORT      Enable WebSocket streaming on port (e.g., 9223)
+  AGENT_BROWSER_IDLE_TIMEOUT_MS  Auto-shutdown daemon after N ms of inactivity (disabled by default)
   AGENT_BROWSER_IOS_DEVICE       Default iOS device name
   AGENT_BROWSER_IOS_UDID         Default iOS device UDID
   AGENT_BROWSER_CONTENT_BOUNDARIES Wrap page output in boundary markers
@@ -2634,17 +2633,13 @@ Environment:
   AGENT_BROWSER_CONFIRM_ACTIONS  Action categories requiring confirmation
   AGENT_BROWSER_CONFIRM_INTERACTIVE Enable interactive confirmation prompts
   AGENT_BROWSER_ENGINE           Browser engine: chrome (default), lightpanda
-  AGENT_BROWSER_NATIVE           Use native Rust daemon (experimental, no Node.js/Playwright)
   AGENT_BROWSER_SCREENSHOT_DIR   Default screenshot output directory
   AGENT_BROWSER_SCREENSHOT_QUALITY JPEG quality 0-100
   AGENT_BROWSER_SCREENSHOT_FORMAT Screenshot format: png, jpeg
 
-Install (recommended, fastest - native Rust CLI):
+Install:
   npm install -g agent-browser
-  agent-browser install                  # Download Chromium (first time)
-
-Try without installing (slower, routes through Node.js):
-  npx agent-browser open example.com
+  agent-browser install                  # Download Chrome (first time)
 
 Examples:
   agent-browser open example.com

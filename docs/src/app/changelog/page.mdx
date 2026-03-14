@@ -50,7 +50,7 @@ agent-browser screenshot --screenshot-format jpeg --screenshot-quality 80
 
 ### New Features
 
-- **`inspect` command** -- Opens Chrome DevTools for the active page by launching a local proxy server that forwards the DevTools frontend to the browser's CDP WebSocket. Agent commands continue to work while DevTools is open. Implemented in both Node.js and native daemon paths.
+- **`inspect` command** -- Opens Chrome DevTools for the active page by launching a local proxy server that forwards the DevTools frontend to the browser's CDP WebSocket. Agent commands continue to work while DevTools is open.
 
 ```bash
 agent-browser open example.com
@@ -64,7 +64,7 @@ agent-browser click "Submit"   # commands still work while DevTools is open
 agent-browser get cdp-url
 ```
 
-- **Native screenshot annotate** -- The `--annotate` flag for screenshots now works in the native Rust daemon, bringing full parity with the Node.js path.
+- **Screenshot annotate** -- The `--annotate` flag overlays numbered labels on interactive elements in screenshots.
 
 ### Improvements
 

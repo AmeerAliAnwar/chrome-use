@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio_tungstenite::tungstenite::Message;
 
 use super::cdp::client::CdpClient;
@@ -47,6 +47,27 @@ impl StreamServer {
         client: Arc<CdpClient>,
         session_id: String,
     ) -> Result<Self, String> {
+        let client_slot = Arc::new(RwLock::new(Some(client)));
+        let (server, _) = Self::start_inner(preferred_port, client_slot, session_id).await?;
+        Ok(server)
+    }
+
+    /// Start the stream server without a CDP client (e.g. at daemon startup before browser launch).
+    /// Returns the server and a shared slot to set the client when the browser launches.
+    /// Input messages are ignored until the client is set.
+    pub async fn start_without_client(
+        preferred_port: u16,
+        session_id: String,
+    ) -> Result<(Self, Arc<RwLock<Option<Arc<CdpClient>>>>), String> {
+        let client_slot = Arc::new(RwLock::new(None::<Arc<CdpClient>>));
+        Self::start_inner(preferred_port, client_slot, session_id).await
+    }
+
+    async fn start_inner(
+        preferred_port: u16,
+        client_slot: Arc<RwLock<Option<Arc<CdpClient>>>>,
+        session_id: String,
+    ) -> Result<(Self, Arc<RwLock<Option<Arc<CdpClient>>>>), String> {
         let addr = format!("127.0.0.1:{}", preferred_port);
         let listener = TcpListener::bind(&addr)
             .await
@@ -62,23 +83,27 @@ impl StreamServer {
 
         let frame_tx_clone = frame_tx.clone();
         let client_count_clone = client_count.clone();
+        let client_slot_clone = client_slot.clone();
 
         tokio::spawn(async move {
             accept_loop(
                 listener,
                 frame_tx_clone,
                 client_count_clone,
-                client,
+                client_slot_clone,
                 session_id,
             )
             .await;
         });
 
-        Ok(Self {
-            port,
-            frame_tx,
-            client_count,
-        })
+        Ok((
+            Self {
+                port,
+                frame_tx,
+                client_count,
+            },
+            client_slot,
+        ))
     }
 
     pub fn port(&self) -> u16 {
@@ -140,17 +165,17 @@ async fn accept_loop(
     listener: TcpListener,
     frame_tx: broadcast::Sender<String>,
     client_count: Arc<Mutex<usize>>,
-    cdp_client: Arc<CdpClient>,
+    client_slot: Arc<RwLock<Option<Arc<CdpClient>>>>,
     session_id: String,
 ) {
     while let Ok((stream, addr)) = listener.accept().await {
         let frame_rx = frame_tx.subscribe();
         let client_count = client_count.clone();
-        let cdp = cdp_client.clone();
+        let client_slot = client_slot.clone();
         let sid = session_id.clone();
 
         tokio::spawn(async move {
-            handle_ws_client(stream, addr, frame_rx, client_count, cdp, sid).await;
+            handle_ws_client(stream, addr, frame_rx, client_count, client_slot, sid).await;
         });
     }
 }
@@ -161,10 +186,9 @@ async fn handle_ws_client(
     _addr: SocketAddr,
     mut frame_rx: broadcast::Receiver<String>,
     client_count: Arc<Mutex<usize>>,
-    cdp_client: Arc<CdpClient>,
+    client_slot: Arc<RwLock<Option<Arc<CdpClient>>>>,
     session_id: String,
 ) {
-    // Origin checking on WebSocket handshake
     let callback =
         |req: &tokio_tungstenite::tungstenite::handshake::server::Request,
          resp: tokio_tungstenite::tungstenite::handshake::server::Response| {
@@ -211,7 +235,10 @@ async fn handle_ws_client(
             msg = ws_rx.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        handle_client_message(&text, &cdp_client, &session_id).await;
+                        let guard = client_slot.read().await;
+                        if let Some(ref client) = *guard {
+                            handle_client_message(&text, client.as_ref(), &session_id).await;
+                        }
                     }
                     Some(Ok(Message::Close(_))) | None => break,
                     _ => {}

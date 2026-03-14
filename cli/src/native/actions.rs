@@ -1,10 +1,12 @@
 use serde_json::{json, Value};
 use std::env;
-use tokio::sync::broadcast;
+use std::sync::Arc;
+use tokio::sync::{broadcast, RwLock};
 
 use super::auth;
 use super::browser::{BrowserManager, WaitUntil};
 use super::cdp::chrome::LaunchOptions;
+use super::cdp::client::CdpClient;
 use super::cdp::types::{
     AttachToTargetParams, AttachToTargetResult, CdpEvent, ConsoleApiCalledEvent,
     CreateTargetResult, ExceptionThrownEvent, TargetCreatedEvent, TargetDestroyedEvent,
@@ -102,6 +104,8 @@ pub struct DaemonState {
     pub tracked_requests: Vec<TrackedRequest>,
     pub request_tracking: bool,
     pub active_frame_id: Option<String>,
+    /// Shared slot for stream server to receive CDP client when browser launches.
+    pub stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>>,
 }
 
 impl DaemonState {
@@ -134,12 +138,30 @@ impl DaemonState {
             tracked_requests: Vec::new(),
             request_tracking: false,
             active_frame_id: None,
+            stream_client: None,
         }
+    }
+
+    /// Create state with an optional stream client slot (for daemon startup with stream server).
+    pub fn new_with_stream_client(
+        stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>>,
+    ) -> Self {
+        let mut s = Self::new();
+        s.stream_client = stream_client;
+        s
     }
 
     fn subscribe_to_browser_events(&mut self) {
         if let Some(ref browser) = self.browser {
             self.event_rx = Some(browser.client.subscribe());
+        }
+    }
+
+    /// Update the stream server's CDP client slot when browser is set or cleared.
+    pub async fn update_stream_client(&self) {
+        if let Some(ref slot) = self.stream_client {
+            let mut guard = slot.write().await;
+            *guard = self.browser.as_ref().map(|m| Arc::clone(&m.client));
         }
     }
 
@@ -540,6 +562,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                     let _ = mgr.close().await;
                 }
                 state.browser = None;
+                state.update_stream_client().await;
             }
             if let Err(e) = auto_launch(state).await {
                 return error_response(&id, &format!("Auto-launch failed: {}", e));
@@ -739,6 +762,7 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
         let mgr = BrowserManager::connect_cdp(&cdp).await?;
         state.browser = Some(mgr);
         state.subscribe_to_browser_events();
+        state.update_stream_client().await;
         try_auto_restore_state(state).await;
         return Ok(());
     }
@@ -747,6 +771,7 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
         let mgr = BrowserManager::connect_auto().await?;
         state.browser = Some(mgr);
         state.subscribe_to_browser_events();
+        state.update_stream_client().await;
         try_auto_restore_state(state).await;
         return Ok(());
     }
@@ -754,6 +779,7 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
     let mgr = BrowserManager::launch(options, engine.as_deref()).await?;
     state.browser = Some(mgr);
     state.subscribe_to_browser_events();
+    state.update_stream_client().await;
     try_auto_restore_state(state).await;
     Ok(())
 }
@@ -857,6 +883,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         if let Some(ref mut b) = state.browser {
             b.close().await?;
             state.browser = None;
+            state.update_stream_client().await;
         }
     } else {
         return Ok(json!({ "launched": true, "reused": true }));
@@ -894,18 +921,21 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     if let Some(url) = cdp_url {
         state.browser = Some(BrowserManager::connect_cdp(url).await?);
         state.subscribe_to_browser_events();
+        state.update_stream_client().await;
         return Ok(json!({ "launched": true }));
     }
 
     if let Some(port) = cdp_port {
         state.browser = Some(BrowserManager::connect_cdp(&port.to_string()).await?);
         state.subscribe_to_browser_events();
+        state.update_stream_client().await;
         return Ok(json!({ "launched": true }));
     }
 
     if auto_connect {
         state.browser = Some(BrowserManager::connect_auto().await?);
         state.subscribe_to_browser_events();
+        state.update_stream_client().await;
         return Ok(json!({ "launched": true }));
     }
 
@@ -923,6 +953,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
                     Ok(mgr) => {
                         state.browser = Some(mgr);
                         state.subscribe_to_browser_events();
+                        state.update_stream_client().await;
                         return Ok(json!({ "launched": true, "provider": provider }));
                     }
                     Err(e) => {
@@ -1008,6 +1039,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 
     state.browser = Some(BrowserManager::launch(options, engine.as_deref()).await?);
     state.subscribe_to_browser_events();
+    state.update_stream_client().await;
 
     if let Some(ref filter) = state.domain_filter {
         if let Some(ref mgr) = state.browser {
@@ -1287,6 +1319,7 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
         mgr.close().await?;
     }
     state.browser = None;
+    state.update_stream_client().await;
 
     // Close WebDriver sessions
     if let Some(ref mut wb) = state.webdriver_backend {
@@ -1462,6 +1495,44 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
+
+    let new_tab = cmd.get("newTab").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    if new_tab {
+        use super::element::resolve_element_object_id;
+        let object_id =
+            resolve_element_object_id(&mgr.client, &session_id, &state.ref_map, selector).await?;
+        let call_params = json!({
+            "objectId": object_id,
+            "functionDeclaration": "function() { var h = this.getAttribute('href'); if (!h) return null; try { return new URL(h, document.baseURI).toString(); } catch(e) { return null; } }",
+            "returnByValue": true
+        });
+        let call_result = mgr
+            .client
+            .send_command(
+                "Runtime.callFunctionOn",
+                Some(call_params),
+                Some(&session_id),
+            )
+            .await?;
+        let href = call_result
+            .get("result")
+            .and_then(|r| r.get("value"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                format!(
+                    "Element '{}' does not have an href attribute. --new-tab only works on links.",
+                    selector
+                )
+            })?
+            .to_string();
+
+        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+        state.ref_map.clear();
+        mgr.tab_new(Some(&href)).await?;
+
+        return Ok(json!({ "clicked": selector, "newTab": true, "url": href }));
+    }
 
     let button = cmd.get("button").and_then(|v| v.as_str()).unwrap_or("left");
     let click_count = cmd.get("clickCount").and_then(|v| v.as_i64()).unwrap_or(1) as i32;
@@ -5334,6 +5405,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_credentials_roundtrip_via_actions() {
+        let _lock = crate::native::auth::AUTH_TEST_MUTEX.lock().unwrap();
+        let key_var = "AGENT_BROWSER_ENCRYPTION_KEY";
+        let original = std::env::var(key_var).ok();
+        // SAFETY: AUTH_TEST_MUTEX serializes all test access so no concurrent mutation.
+        unsafe { std::env::set_var(key_var, "a".repeat(64)) };
+
         let mut state = DaemonState::new();
 
         let set_cmd = json!({
@@ -5366,6 +5443,12 @@ mod tests {
         });
         let result = execute_command(&del_cmd, &mut state).await;
         assert_eq!(result["success"], true);
+
+        // SAFETY: AUTH_TEST_MUTEX serializes all test access so no concurrent mutation.
+        match original {
+            Some(val) => unsafe { std::env::set_var(key_var, val) },
+            None => unsafe { std::env::remove_var(key_var) },
+        }
     }
 
     #[tokio::test]

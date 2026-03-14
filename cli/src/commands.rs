@@ -1061,7 +1061,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             }
         }
 
-        // === Recording (Playwright native video recording) ===
+        // === Recording (browser video recording) ===
         "record" => {
             const VALID: &[&str] = &["start", "stop", "restart"];
             match rest.first().copied() {
@@ -2167,7 +2167,6 @@ mod tests {
             cli_allow_file_access: false,
             cli_annotate: false,
             cli_download_path: false,
-            cli_native: false,
             cli_headed: false,
             annotate: false,
             color_scheme: None,
@@ -2178,7 +2177,6 @@ mod tests {
             action_policy: None,
             confirm_actions: None,
             confirm_interactive: false,
-            native: false,
             engine: None,
             screenshot_dir: None,
             screenshot_quality: None,

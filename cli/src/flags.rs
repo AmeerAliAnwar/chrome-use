@@ -41,7 +41,6 @@ pub struct Config {
     pub action_policy: Option<String>,
     pub confirm_actions: Option<String>,
     pub confirm_interactive: Option<bool>,
-    pub native: Option<bool>,
     pub engine: Option<String>,
     pub screenshot_dir: Option<String>,
     pub screenshot_quality: Option<u32>,
@@ -87,7 +86,6 @@ impl Config {
             action_policy: other.action_policy.or(self.action_policy),
             confirm_actions: other.confirm_actions.or(self.confirm_actions),
             confirm_interactive: other.confirm_interactive.or(self.confirm_interactive),
-            native: other.native.or(self.native),
             engine: other.engine.or(self.engine),
             screenshot_dir: other.screenshot_dir.or(self.screenshot_dir),
             screenshot_quality: other.screenshot_quality.or(self.screenshot_quality),
@@ -247,7 +245,6 @@ pub struct Flags {
     pub action_policy: Option<String>,
     pub confirm_actions: Option<String>,
     pub confirm_interactive: bool,
-    pub native: bool,
     pub engine: Option<String>,
     pub screenshot_dir: Option<String>,
     pub screenshot_quality: Option<u32>,
@@ -266,7 +263,6 @@ pub struct Flags {
     pub cli_allow_file_access: bool,
     pub cli_annotate: bool,
     pub cli_download_path: bool,
-    pub cli_native: bool,
     pub cli_headed: bool,
 }
 
@@ -358,7 +354,6 @@ pub fn parse_flags(args: &[String]) -> Flags {
             .or(config.confirm_actions),
         confirm_interactive: env_var_is_truthy("AGENT_BROWSER_CONFIRM_INTERACTIVE")
             || config.confirm_interactive.unwrap_or(false),
-        native: env_var_is_truthy("AGENT_BROWSER_NATIVE") || config.native.unwrap_or(false),
         engine: env::var("AGENT_BROWSER_ENGINE").ok().or(config.engine),
         screenshot_dir: env::var("AGENT_BROWSER_SCREENSHOT_DIR")
             .ok()
@@ -382,7 +377,6 @@ pub fn parse_flags(args: &[String]) -> Flags {
         cli_allow_file_access: false,
         cli_annotate: false,
         cli_download_path: false,
-        cli_native: false,
         cli_headed: false,
     };
 
@@ -604,14 +598,6 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
-            "--native" => {
-                let (val, consumed) = parse_bool_arg(args, i);
-                flags.native = val;
-                flags.cli_native = true;
-                if consumed {
-                    i += 1;
-                }
-            }
             "--screenshot-dir" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.screenshot_dir = Some(s.clone());
@@ -675,7 +661,6 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--annotate",
         "--content-boundaries",
         "--confirm-interactive",
-        "--native",
     ];
     // Global flags that always take a value (need to skip the next arg too)
     const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &[

@@ -160,7 +160,7 @@ impl BrowserProcess {
 }
 
 pub struct BrowserManager {
-    pub client: CdpClient,
+    pub client: Arc<CdpClient>,
     browser_process: Option<BrowserProcess>,
     ws_url: String,
     pages: Vec<PageInfo>,
@@ -226,7 +226,7 @@ impl BrowserManager {
         let manager = if engine == "lightpanda" {
             initialize_lightpanda_manager(ws_url, process).await?
         } else {
-            let client = CdpClient::connect(&ws_url).await?;
+            let client = Arc::new(CdpClient::connect(&ws_url).await?);
             let mut manager = Self {
                 client,
                 browser_process: Some(process),
@@ -290,7 +290,7 @@ impl BrowserManager {
 
     pub async fn connect_cdp(url: &str) -> Result<Self, String> {
         let ws_url = resolve_cdp_url(url).await?;
-        let client = CdpClient::connect(&ws_url).await?;
+        let client = Arc::new(CdpClient::connect(&ws_url).await?);
         let mut manager = Self {
             client,
             browser_process: None,
@@ -1173,7 +1173,7 @@ async fn initialize_lightpanda_manager(
         };
 
         let mut manager = BrowserManager {
-            client,
+            client: Arc::new(client),
             browser_process: None,
             ws_url: ws_url.clone(),
             pages: Vec::new(),

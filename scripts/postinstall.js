@@ -80,7 +80,7 @@ async function main() {
     // On global installs, fix npm's bin entry to use native binary directly
     await fixGlobalInstallBin();
     
-    showPlaywrightReminder();
+    showInstallReminder();
     return;
   }
 
@@ -102,8 +102,7 @@ async function main() {
     
     console.log(`✓ Downloaded native binary: ${binaryName}`);
   } catch (err) {
-    console.log(`⚠ Could not download native binary: ${err.message}`);
-    console.log(`  The CLI will use Node.js fallback (slightly slower startup)`);
+    console.log(`Could not download native binary: ${err.message}`);
     console.log('');
     console.log('To build the native binary locally:');
     console.log('  1. Install Rust: https://rustup.rs');
@@ -114,21 +113,19 @@ async function main() {
   // This avoids the /bin/sh error on Windows and provides zero-overhead execution
   await fixGlobalInstallBin();
 
-  showPlaywrightReminder();
+  showInstallReminder();
 }
 
-function showPlaywrightReminder() {
+function showInstallReminder() {
   console.log('');
-  console.log('╔═══════════════════════════════════════════════════════════════════════════╗');
-  console.log('║ To download browser binaries, run:                                        ║');
-  console.log('║                                                                           ║');
-  console.log('║     npx playwright install chromium                                       ║');
-  console.log('║                                                                           ║');
-  console.log('║ On Linux, include system dependencies with:                               ║');
-  console.log('║                                                                           ║');
-  console.log('║     npx playwright install --with-deps chromium                           ║');
-  console.log('║                                                                           ║');
-  console.log('╚═══════════════════════════════════════════════════════════════════════════╝');
+  console.log('  To download Chrome, run:');
+  console.log('');
+  console.log('    agent-browser install');
+  console.log('');
+  console.log('  On Linux, include system dependencies with:');
+  console.log('');
+  console.log('    agent-browser install --with-deps');
+  console.log('');
 }
 
 /**

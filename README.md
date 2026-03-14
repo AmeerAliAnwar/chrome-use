@@ -1,30 +1,17 @@
 # agent-browser
 
-Headless browser automation CLI for AI agents. Fast Rust CLI with Node.js fallback.
+Headless browser automation CLI for AI agents. Fast native Rust CLI.
 
 ## Installation
 
 ### Global Installation (recommended)
 
-Installs the native Rust binary for maximum performance:
+Installs the native Rust binary:
 
 ```bash
 npm install -g agent-browser
-agent-browser install  # Download Chromium
+agent-browser install  # Download Chrome from Chrome for Testing (first time only)
 ```
-
-This is the fastest option -- commands run through the native Rust CLI directly with sub-millisecond parsing overhead.
-
-### Quick Start (no install)
-
-Run directly with `npx` if you want to try it without installing globally:
-
-```bash
-npx agent-browser install   # Download Chromium (first time only)
-npx agent-browser open example.com
-```
-
-> **Note:** `npx` routes through Node.js before reaching the Rust CLI, so it is noticeably slower than a global install. For regular use, install globally.
 
 ### Project Installation (local dependency)
 
@@ -32,20 +19,16 @@ For projects that want to pin the version in `package.json`:
 
 ```bash
 npm install agent-browser
-npx agent-browser install
+agent-browser install
 ```
 
-Then use via `npx` or `package.json` scripts:
-
-```bash
-npx agent-browser open example.com
-```
+Then use via `package.json` scripts or by invoking `agent-browser` directly.
 
 ### Homebrew (macOS)
 
 ```bash
 brew install agent-browser
-agent-browser install  # Download Chromium
+agent-browser install  # Download Chrome from Chrome for Testing (first time only)
 ```
 
 ### From Source
@@ -66,8 +49,12 @@ On Linux, install system dependencies:
 
 ```bash
 agent-browser install --with-deps
-# or manually: npx playwright install-deps chromium
 ```
+
+### Requirements
+
+- **Chrome** - Run `agent-browser install` to download Chrome from [Chrome for Testing](https://developer.chrome.com/blog/chrome-for-testing/) (Google's official automation channel). No Playwright or Node.js required for the daemon.
+- **Rust** - Only needed when building from source (see From Source above).
 
 ## Quick Start
 
@@ -322,7 +309,7 @@ agent-browser reload                  # Reload page
 ### Setup
 
 ```bash
-agent-browser install                 # Download Chromium browser
+agent-browser install                 # Download Chrome from Chrome for Testing (Google's official automation channel)
 agent-browser install --with-deps     # Also install system deps (Linux)
 ```
 
@@ -506,7 +493,7 @@ The `-C` flag is useful for modern web apps that use custom clickable elements (
 
 The `--annotate` flag overlays numbered labels on interactive elements in the screenshot. Each label `[N]` corresponds to ref `@eN`, so the same refs work for both visual and text-based workflows.
 
-In native mode, annotated screenshots are supported on the CDP-backed browser path (`--native` with Chromium/Lightpanda). The Safari/WebDriver backend does not yet support `--annotate`.
+Annotated screenshots are supported on the CDP-backed browser path (Chrome/Lightpanda). The Safari/WebDriver backend does not yet support `--annotate`.
 
 ```bash
 agent-browser screenshot --annotate
@@ -561,8 +548,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--action-policy <path>` | Path to action policy JSON file (or `AGENT_BROWSER_ACTION_POLICY` env) |
 | `--confirm-actions <list>` | Action categories requiring confirmation (or `AGENT_BROWSER_CONFIRM_ACTIONS` env) |
 | `--confirm-interactive` | Interactive confirmation prompts; auto-denies if stdin is not a TTY (or `AGENT_BROWSER_CONFIRM_INTERACTIVE` env) |
-| `--engine <name>` | Browser engine: `chrome` (default), `lightpanda`; implies `--native` (or `AGENT_BROWSER_ENGINE` env) |
-| `--native` | [Experimental] Use native Rust daemon instead of Node.js (or `AGENT_BROWSER_NATIVE` env) |
+| `--engine <name>` | Browser engine: `chrome` (default), `lightpanda` (or `AGENT_BROWSER_ENGINE` env) |
 | `--config <path>` | Use a custom config file (or `AGENT_BROWSER_CONFIG` env) |
 | `--debug` | Debug output |
 
@@ -606,7 +592,7 @@ Auto-discovered config files that are missing are silently ignored. If `--config
 
 ## Default Timeout
 
-The default Playwright timeout for standard operations (clicks, waits, fills, etc.) is 25 seconds. This is intentionally below the CLI's 30-second IPC read timeout so that Playwright returns a proper error instead of the CLI timing out with EAGAIN.
+The default timeout for standard operations (clicks, waits, fills, etc.) is 25 seconds. This is intentionally below the CLI's 30-second IPC read timeout so that the daemon returns a proper error instead of the CLI timing out with EAGAIN.
 
 Override the default timeout via environment variable:
 
@@ -615,11 +601,11 @@ Override the default timeout via environment variable:
 export AGENT_BROWSER_DEFAULT_TIMEOUT=45000
 ```
 
-> **Note:** Setting this above 30000 (30s) may cause EAGAIN errors on slow operations because the CLI's read timeout will expire before Playwright responds. The CLI retries transient errors automatically, but response times will increase.
+> **Note:** Setting this above 30000 (30s) may cause EAGAIN errors on slow operations because the CLI's read timeout will expire before the daemon responds. The CLI retries transient errors automatically, but response times will increase.
 
-| Variable                        | Description                                       |
-| ------------------------------- | ------------------------------------------------- |
-| `AGENT_BROWSER_DEFAULT_TIMEOUT` | Default Playwright timeout in ms (default: 25000) |
+| Variable                        | Description                              |
+| ------------------------------- | ---------------------------------------- |
+| `AGENT_BROWSER_DEFAULT_TIMEOUT` | Default operation timeout in ms (default: 25000) |
 
 ## Selectors
 
@@ -1009,61 +995,22 @@ await browser.stopScreencast();
 
 agent-browser uses a client-daemon architecture:
 
-1. **Rust CLI** (fast native binary) - Parses commands, communicates with daemon
-2. **Node.js Daemon** (default) - Manages Playwright browser instance
-3. **Native Daemon** (experimental, `--native`) - Pure Rust daemon using direct CDP, no Node.js required
-4. **Fallback** - If native binary unavailable, uses Node.js directly
+1. **Rust CLI** - Parses commands, communicates with daemon
+2. **Rust Daemon** - Pure Rust daemon using direct CDP, no Node.js required
 
-The daemon starts automatically on first command and persists between commands for fast subsequent operations.
+The daemon starts automatically on first command and persists between commands for fast subsequent operations. To auto-shutdown the daemon after a period of inactivity, set `AGENT_BROWSER_IDLE_TIMEOUT_MS` (value in milliseconds). When set, the daemon closes the browser and exits after receiving no commands for the specified duration.
 
-**Browser Engine:** Uses Chromium by default. The default Node.js daemon also supports Firefox and WebKit via Playwright. The experimental native daemon speaks Chrome DevTools Protocol (CDP) directly and supports Chromium-based browsers and Safari (via WebDriver).
-
-## Experimental: Native Mode
-
-The native daemon is a pure Rust implementation that communicates with Chrome directly via CDP, eliminating the Node.js and Playwright dependencies. It is currently **experimental** and opt-in.
-
-### Enabling Native Mode
-
-```bash
-# Via flag
-agent-browser --native open example.com
-
-# Via environment variable (recommended for persistent use)
-export AGENT_BROWSER_NATIVE=1
-agent-browser open example.com
-```
-
-Or add to your config file (`agent-browser.json`):
-
-```json
-{ "native": true }
-```
-
-### What's Different
-
-|                     | Default (Node.js)           | Native (`--native`)              |
-| ------------------- | --------------------------- | -------------------------------- |
-| **Runtime**         | Node.js + Playwright        | Pure Rust binary                 |
-| **Protocol**        | Playwright protocol         | Direct CDP / WebDriver           |
-| **Install size**    | Larger (Node.js + npm deps) | Smaller (single binary)          |
-| **Browser support** | Chromium, Firefox, WebKit   | Chromium, Safari (via WebDriver) |
-| **Stability**       | Stable                      | Experimental                     |
-
-### Known Limitations
-
-- Firefox and WebKit are not yet supported (Chromium and Safari only)
-- Some Playwright-specific features (tracing format, HAR export) are not available
-- The native daemon and Node.js daemon share the same session socket, so you cannot run both simultaneously for the same session. Use `agent-browser close` before switching modes.
+**Browser Engine:** Uses Chrome (from Chrome for Testing) by default. The `--engine` flag selects between `chrome` and `lightpanda`. Supported browsers: Chromium/Chrome (via CDP) and Safari (via WebDriver for iOS).
 
 ## Platforms
 
-| Platform    | Binary      | Fallback |
-| ----------- | ----------- | -------- |
-| macOS ARM64 | Native Rust | Node.js  |
-| macOS x64   | Native Rust | Node.js  |
-| Linux ARM64 | Native Rust | Node.js  |
-| Linux x64   | Native Rust | Node.js  |
-| Windows x64 | Native Rust | Node.js  |
+| Platform    | Binary      |
+| ----------- | ----------- |
+| macOS ARM64 | Native Rust |
+| macOS x64   | Native Rust |
+| Linux ARM64 | Native Rust |
+| Linux x64   | Native Rust |
+| Windows x64 | Native Rust |
 
 ## Usage with AI Agents
 

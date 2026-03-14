@@ -342,6 +342,7 @@ mod tests {
         socket.write_all(response.as_bytes()).await.unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn waits_for_ready_without_logs() {
         let port = unused_port();
@@ -369,6 +370,7 @@ mod tests {
         let _ = child.wait();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn child_exit_surfaces_logs() {
         let port = unused_port();
@@ -389,6 +391,7 @@ mod tests {
         assert!(err.contains("boom"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn timeout_reports_last_probe_error() {
         let port = unused_port();
