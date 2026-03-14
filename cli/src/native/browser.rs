@@ -609,10 +609,15 @@ impl BrowserManager {
     }
 
     pub async fn close(&mut self) -> Result<(), String> {
-        let _ = self
-            .client
-            .send_command_no_params("Browser.close", None)
-            .await;
+        if self.browser_process.is_some() {
+            // Only send Browser.close when we launched the browser ourselves.
+            // For external connections (--auto-connect, --cdp) we just disconnect
+            // without shutting down the user's browser.
+            let _ = self
+                .client
+                .send_command_no_params("Browser.close", None)
+                .await;
+        }
 
         if let Some(mut process) = self.browser_process.take() {
             let timeout = std::time::Duration::from_secs(5);

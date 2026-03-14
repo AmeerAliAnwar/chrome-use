@@ -872,9 +872,9 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 
     // Relaunch logic: check if we can reuse the existing connection
     let needs_relaunch = if let Some(ref mgr) = state.browser {
-        let has_cdp_arg = cdp_url.is_some() || cdp_port.is_some();
-        let was_cdp = mgr.is_cdp_connection();
-        has_cdp_arg != was_cdp || !mgr.is_connection_alive().await
+        let is_external = cdp_url.is_some() || cdp_port.is_some() || auto_connect;
+        let was_external = mgr.is_cdp_connection();
+        is_external != was_external || !mgr.is_connection_alive().await
     } else {
         true
     };
