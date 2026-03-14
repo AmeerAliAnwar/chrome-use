@@ -4,6 +4,67 @@ export const metadata = pageMetadata("changelog")
 
 # Changelog
 
+## v0.20.0
+
+<p className="text-[#888] text-sm">March 2026</p>
+
+### Full Native Rust
+
+agent-browser is now 100% native Rust. The Node.js/Playwright daemon has been completely removed -- no Node.js runtime or Playwright dependency is required to run the daemon. The Rust native daemon is now the only implementation.
+
+<table>
+  <thead>
+    <tr>
+      <th>Metric</th>
+      <th>Node.js</th>
+      <th>Rust</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Cold start</td>
+      <td>1002ms</td>
+      <td>617ms</td>
+      <td>1.6x faster</td>
+    </tr>
+    <tr>
+      <td>Daemon memory</td>
+      <td>143 MB</td>
+      <td>8 MB</td>
+      <td>18x less</td>
+    </tr>
+    <tr>
+      <td>Install size</td>
+      <td>710 MB</td>
+      <td>7 MB</td>
+      <td>99x smaller</td>
+    </tr>
+  </tbody>
+</table>
+
+```bash
+npm install -g agent-browser      # 7 MB install
+agent-browser install              # download Chrome
+agent-browser open example.com
+agent-browser snapshot
+```
+
+### Improvements
+
+- **Benchmarks** -- Added benchmark suite for comparing native vs Node.js daemon performance across cold start, warm start, memory, and install size.
+- **Chromium installer hardened** -- Fixed zip path traversal vulnerability in Chrome for Testing installer.
+
+### Bug Fixes
+
+- Fixed `--headed false` flag not being respected in CLI
+- Fixed "not found" error pattern in `to_ai_friendly_error` incorrectly catching non-element errors
+- Fixed storage local key lookup parsing and text output
+- Fixed Lightpanda engine launch with release binaries
+- Hardened Lightpanda startup timeouts
+
+---
+
 ## v0.19.0
 
 <p className="text-[#888] text-sm">March 2026</p>
