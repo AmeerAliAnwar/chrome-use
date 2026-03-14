@@ -2638,7 +2638,9 @@ Environment:
   AGENT_BROWSER_SCREENSHOT_FORMAT Screenshot format: png, jpeg
 
 Install:
-  npm install -g agent-browser
+  npm install -g agent-browser           # npm
+  brew install agent-browser             # Homebrew
+  cargo install agent-browser            # Cargo
   agent-browser install                  # Download Chrome (first time)
 
 Examples:
