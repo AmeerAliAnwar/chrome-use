@@ -1,5 +1,6 @@
 use serde_json::{json, Value};
 use std::env;
+use std::io::Write;
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 
@@ -1247,7 +1248,7 @@ fn open_url_in_browser(url: &str) {
         "unsupported platform",
     ));
     if let Err(e) = result {
-        eprintln!("[inspect] Failed to open browser: {}", e);
+        let _ = writeln!(std::io::stderr(), "[inspect] Failed to open browser: {}", e);
     }
 }
 

@@ -1,4 +1,4 @@
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -47,7 +47,10 @@ impl Drop for ChromeProcess {
                         std::thread::sleep(Duration::from_millis(100));
                     }
                     Err(e) => {
-                        eprintln!(
+                        // Use write! instead of eprintln! to avoid panicking
+                        // if the daemon's stderr pipe is broken (parent dropped it).
+                        let _ = writeln!(
+                            std::io::stderr(),
                             "Warning: failed to clean up temp profile {}: {}",
                             dir.display(),
                             e
@@ -207,9 +210,13 @@ pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
             Err(e) => {
                 last_err = e;
                 if attempt < max_attempts {
-                    eprintln!(
+                    // Use write! instead of eprintln! to avoid panicking
+                    // if the daemon's stderr pipe is broken (parent dropped it).
+                    let _ = writeln!(
+                        std::io::stderr(),
                         "[chrome] Launch attempt {}/{} failed, retrying in 500ms...",
-                        attempt, max_attempts
+                        attempt,
+                        max_attempts
                     );
                     std::thread::sleep(Duration::from_millis(500));
                 }
