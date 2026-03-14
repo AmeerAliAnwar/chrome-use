@@ -73,22 +73,18 @@ pub fn recording_stop(state: &mut RecordingState) -> Result<Value, String> {
 
     let output = &state.output_path;
 
-    // Encode with ffmpeg
+    let codec_args: &[&str] = if output.ends_with(".webm") {
+        &["-c:v", "libvpx-vp9", "-crf", "30", "-b:v", "0"]
+    } else {
+        &["-c:v", "libx264", "-preset", "fast"]
+    };
+
     let result = Command::new("ffmpeg")
-        .args([
-            "-y",
-            "-framerate",
-            "30",
-            "-i",
-            &frame_pattern,
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            "-preset",
-            "fast",
-            output,
-        ])
+        .args(["-y", "-framerate", "30", "-i", &frame_pattern])
+        .args(["-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2"])
+        .args(codec_args)
+        .args(["-pix_fmt", "yuv420p"])
+        .arg(output)
         .output();
 
     let _ = std::fs::remove_dir_all(&state.temp_dir);
