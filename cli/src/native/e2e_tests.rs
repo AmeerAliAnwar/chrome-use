@@ -1803,3 +1803,182 @@ async fn e2e_click_stale_ref_falls_back_to_role_name() {
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
 }
+
+// ---------------------------------------------------------------------------
+// Regression: Material Design checkbox/radio (#832)
+//
+// Material Design controls hide the native <input> off-screen and place
+// overlay elements (ripple, touch-target) on top.  Coordinate-based CDP
+// clicks may therefore miss the actual input.  The check/uncheck actions
+// must detect this and fall back to a JS .click() — matching the behaviour
+// that Playwright provided in v0.19.0.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn e2e_material_checkbox_check_uncheck() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Inline HTML that reproduces the Material Design DOM pattern:
+    // - Native <input> is visually hidden (position:absolute, opacity:0, off-screen)
+    // - A ripple overlay sits on top with pointer-events:all, intercepting coordinate clicks
+    // - An ARIA-only checkbox uses role="checkbox" + aria-checked (no native input)
+    let html = concat!(
+        "data:text/html,<html><body>",
+        // -- Native baseline --
+        "<input id='native' type='checkbox'>",
+        // -- Material-style hidden-input checkbox --
+        "<div id='mat' style='position:relative;padding:12px'>",
+          "<input id='mat-input' type='checkbox' style='position:absolute;opacity:0;width:1px;height:1px;top:-9999px;left:-9999px;pointer-events:none'>",
+          "<div style='position:absolute;top:0;left:0;width:48px;height:48px;pointer-events:all;z-index:10'></div>",
+          "<span>Material CB</span>",
+        "</div>",
+        // -- ARIA-only checkbox (no native input) --
+        "<div id='aria' role='checkbox' aria-checked='false' tabindex='0'>ARIA CB</div>",
+        "<script>",
+          "document.getElementById('aria').addEventListener('click',function(){",
+            "var c=this.getAttribute('aria-checked')==='true';",
+            "this.setAttribute('aria-checked',String(!c));",
+          "});",
+        "</script>",
+        "</body></html>"
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // ---- Native checkbox (sanity baseline) ----
+    let resp = execute_command(
+        &json!({ "id": "10", "action": "ischecked", "selector": "#native" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["checked"], false);
+
+    let resp = execute_command(
+        &json!({ "id": "11", "action": "check", "selector": "#native" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "12", "action": "ischecked", "selector": "#native" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["checked"], true, "native check failed");
+
+    // ---- Material checkbox (hidden input + overlay) ----
+    // ischecked on the wrapper should detect the nested hidden input's state
+    let resp = execute_command(
+        &json!({ "id": "20", "action": "ischecked", "selector": "#mat" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["checked"], false);
+
+    let resp = execute_command(
+        &json!({ "id": "21", "action": "check", "selector": "#mat" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "22", "action": "ischecked", "selector": "#mat" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["checked"],
+        true,
+        "Material checkbox should be checked after check action (#832)"
+    );
+
+    // Idempotency: check again should be a no-op
+    let resp = execute_command(
+        &json!({ "id": "23", "action": "check", "selector": "#mat" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "24", "action": "ischecked", "selector": "#mat" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["checked"],
+        true,
+        "Material checkbox should stay checked on redundant check"
+    );
+
+    // Uncheck
+    let resp = execute_command(
+        &json!({ "id": "25", "action": "uncheck", "selector": "#mat" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "26", "action": "ischecked", "selector": "#mat" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["checked"],
+        false,
+        "Material checkbox should be unchecked after uncheck action"
+    );
+
+    // ---- ARIA-only checkbox ----
+    let resp = execute_command(
+        &json!({ "id": "30", "action": "ischecked", "selector": "#aria" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["checked"], false);
+
+    let resp = execute_command(
+        &json!({ "id": "31", "action": "check", "selector": "#aria" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "32", "action": "ischecked", "selector": "#aria" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["checked"],
+        true,
+        "ARIA checkbox should be checked after check action"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
