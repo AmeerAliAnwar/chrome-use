@@ -794,15 +794,15 @@ See the [environments example](examples/environments/) for a working demo with a
 
 ```typescript
 import chromium from '@sparticuz/chromium';
-import { BrowserManager } from 'agent-browser';
+import { execSync } from 'child_process';
 
 export async function handler() {
-  const browser = new BrowserManager();
-  await browser.launch({
-    executablePath: await chromium.executablePath(),
-    headless: true,
-  });
-  // ... use browser
+  const executablePath = await chromium.executablePath();
+  const result = execSync(
+    `AGENT_BROWSER_EXECUTABLE_PATH=${executablePath} agent-browser open https://example.com && agent-browser snapshot -i --json`,
+    { encoding: 'utf-8' }
+  );
+  return JSON.parse(result);
 }
 ```
 
@@ -951,51 +951,6 @@ Connect to `ws://localhost:9223` to receive frames and send input:
   "eventType": "touchStart",
   "touchPoints": [{ "x": 100, "y": 200 }]
 }
-```
-
-### Programmatic API
-
-For advanced use, control streaming directly via the protocol:
-
-```typescript
-import { BrowserManager } from 'agent-browser';
-
-const browser = new BrowserManager();
-await browser.launch({ headless: true });
-await browser.navigate('https://example.com');
-
-// Start screencast
-await browser.startScreencast(
-  (frame) => {
-    // frame.data is base64-encoded image
-    // frame.metadata contains viewport info
-    console.log('Frame received:', frame.metadata.deviceWidth, 'x', frame.metadata.deviceHeight);
-  },
-  {
-    format: 'jpeg',
-    quality: 80,
-    maxWidth: 1280,
-    maxHeight: 720,
-  }
-);
-
-// Inject mouse events
-await browser.injectMouseEvent({
-  type: 'mousePressed',
-  x: 100,
-  y: 200,
-  button: 'left',
-});
-
-// Inject keyboard events
-await browser.injectKeyboardEvent({
-  type: 'keyDown',
-  key: 'Enter',
-  code: 'Enter',
-});
-
-// Stop when done
-await browser.stopScreencast();
 ```
 
 ## Architecture
