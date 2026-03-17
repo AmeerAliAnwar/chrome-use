@@ -2042,8 +2042,9 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     }
 }
 
+/// Parse network interception, request inspection, and HAR recording commands.
 fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
-    const VALID: &[&str] = &["route", "unroute", "requests"];
+    const VALID: &[&str] = &["route", "unroute", "requests", "har"];
 
     match rest.first().copied() {
         Some("route") => {
@@ -2073,13 +2074,34 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
             }
             Ok(cmd)
         }
+        Some("har") => {
+            const HAR_VALID: &[&str] = &["start", "stop"];
+            match rest.get(1).copied() {
+                Some("start") => Ok(json!({ "id": id, "action": "har_start" })),
+                Some("stop") => {
+                    let mut cmd = json!({ "id": id, "action": "har_stop" });
+                    if let Some(path) = rest.get(2) {
+                        cmd["path"] = json!(path);
+                    }
+                    Ok(cmd)
+                }
+                Some(sub) => Err(ParseError::UnknownSubcommand {
+                    subcommand: sub.to_string(),
+                    valid_options: HAR_VALID,
+                }),
+                None => Err(ParseError::MissingArguments {
+                    context: "network har".to_string(),
+                    usage: "network har <start|stop> [path]",
+                }),
+            }
+        }
         Some(sub) => Err(ParseError::UnknownSubcommand {
             subcommand: sub.to_string(),
             valid_options: VALID,
         }),
         None => Err(ParseError::MissingArguments {
             context: "network".to_string(),
-            usage: "network <route|unroute|requests> [args...]",
+            usage: "network <route|unroute|requests|har> [args...]",
         }),
     }
 }
@@ -2657,6 +2679,34 @@ mod tests {
     fn test_tab_close() {
         let cmd = parse_command(&args("tab close"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "tab_close");
+    }
+
+    // === Network ===
+
+    #[test]
+    fn test_network_har_start() {
+        let cmd = parse_command(&args("network har start"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "har_start");
+    }
+
+    #[test]
+    fn test_network_har_stop_with_path() {
+        let cmd = parse_command(&args("network har stop ./capture.har"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "har_stop");
+        assert_eq!(cmd["path"], "./capture.har");
+    }
+
+    #[test]
+    fn test_network_har_stop_without_path() {
+        let cmd = parse_command(&args("network har stop"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "har_stop");
+        assert!(cmd.get("path").is_none());
+    }
+
+    #[test]
+    fn test_network_har_requires_subcommand() {
+        let result = parse_command(&args("network har"), &default_flags());
+        assert!(matches!(result, Err(ParseError::MissingArguments { .. })));
     }
 
     // === Screenshot ===
