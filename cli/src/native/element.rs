@@ -263,11 +263,8 @@ pub async fn resolve_element_object_id(
             .ok_or_else(|| format!("No objectId for ref {}", ref_id));
     }
 
-    // CSS selector fallback
-    let js = format!(
-        "document.querySelector({})",
-        serde_json::to_string(selector_or_ref).unwrap_or_default()
-    );
+    // Selector fallback (CSS or XPath)
+    let js = build_find_element_js(selector_or_ref);
     let result: EvaluateResult = client
         .send_command_typed(
             "Runtime.evaluate",
@@ -347,20 +344,54 @@ fn extract_ax_string(value: &Option<AXValue>) -> String {
     }
 }
 
+/// Build a JS expression that finds a DOM element by CSS selector or XPath.
+fn build_find_element_js(selector: &str) -> String {
+    if let Some(xpath) = selector.strip_prefix("xpath=") {
+        format!(
+            "document.evaluate({}, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue",
+            serde_json::to_string(xpath).unwrap_or_default()
+        )
+    } else {
+        format!(
+            "document.querySelector({})",
+            serde_json::to_string(selector).unwrap_or_default()
+        )
+    }
+}
+
+/// Build a JS expression that counts matching DOM elements by CSS selector or XPath.
+fn build_count_elements_js(selector: &str) -> String {
+    if let Some(xpath) = selector.strip_prefix("xpath=") {
+        format!(
+            "document.evaluate({}, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null).snapshotLength",
+            serde_json::to_string(xpath).unwrap_or_default()
+        )
+    } else {
+        format!(
+            "document.querySelectorAll({}).length",
+            serde_json::to_string(selector).unwrap_or_default()
+        )
+    }
+}
+
+fn build_selector_js(selector: &str) -> String {
+    let find_expr = build_find_element_js(selector);
+    format!(
+        r#"(() => {{
+            const el = {find_expr};
+            if (!el) return null;
+            const rect = el.getBoundingClientRect();
+            return {{ x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }};
+        }})()"#,
+    )
+}
+
 async fn resolve_by_selector(
     client: &CdpClient,
     session_id: &str,
     selector: &str,
 ) -> Result<(f64, f64), String> {
-    let js = format!(
-        r#"(() => {{
-            const el = document.querySelector({sel});
-            if (!el) return null;
-            const rect = el.getBoundingClientRect();
-            return {{ x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }};
-        }})()"#,
-        sel = serde_json::to_string(selector).unwrap_or_default(),
-    );
+    let js = build_selector_js(selector);
 
     let result: EvaluateResult = client
         .send_command_typed(
@@ -739,10 +770,7 @@ pub async fn get_element_count(
     session_id: &str,
     selector: &str,
 ) -> Result<i64, String> {
-    let js = format!(
-        "document.querySelectorAll({}).length",
-        serde_json::to_string(selector).unwrap_or_default()
-    );
+    let js = build_count_elements_js(selector);
 
     let result: EvaluateResult = client
         .send_command_typed(
@@ -847,6 +875,47 @@ mod tests {
         assert!(map.get("e1").is_some());
         assert_eq!(map.get("e1").unwrap().role, "button");
         assert!(map.get("e2").is_none());
+    }
+
+    #[test]
+    fn test_build_selector_js_css() {
+        let js = build_selector_js("#submit-btn");
+        assert!(js.contains("document.querySelector(\"#submit-btn\")"));
+        assert!(!js.contains("document.evaluate"));
+    }
+
+    #[test]
+    fn test_build_selector_js_xpath() {
+        let js = build_selector_js("xpath=//button[@id='ok']");
+        assert!(js.contains("document.evaluate(\"//button[@id='ok']\", document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null)"));
+        assert!(!js.contains("document.querySelector"));
+    }
+
+    #[test]
+    fn test_build_selector_js_xpath_empty() {
+        let js = build_selector_js("xpath=");
+        assert!(js.contains("document.evaluate"));
+    }
+
+    #[test]
+    fn test_build_selector_js_not_xpath_prefix() {
+        // "xpath" without "=" should be treated as CSS selector
+        let js = build_selector_js("xpath//div");
+        assert!(js.contains("document.querySelector"));
+    }
+
+    #[test]
+    fn test_build_count_elements_js_css() {
+        let js = build_count_elements_js(".item");
+        assert!(js.contains("document.querySelectorAll(\".item\").length"));
+        assert!(!js.contains("document.evaluate"));
+    }
+
+    #[test]
+    fn test_build_count_elements_js_xpath() {
+        let js = build_count_elements_js("xpath=//li");
+        assert!(js.contains("document.evaluate(\"//li\", document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null).snapshotLength"));
+        assert!(!js.contains("querySelectorAll"));
     }
 
     #[test]
