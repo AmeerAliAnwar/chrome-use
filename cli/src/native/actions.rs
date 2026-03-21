@@ -339,7 +339,8 @@ impl DaemonState {
             // Broadcast connection status change to WebSocket clients
             let connected = self.browser.is_some();
             let sc = server.is_screencasting().await;
-            server.broadcast_status(connected, sc, 1280, 720);
+            let (vw, vh) = server.viewport().await;
+            server.broadcast_status(connected, sc, vw, vh);
             // Notify the background CDP event loop that the client changed
             server.notify_client_changed();
         }
@@ -2992,6 +2993,12 @@ async fn handle_viewport(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
     let mobile = cmd.get("mobile").and_then(|v| v.as_bool()).unwrap_or(false);
 
     mgr.set_viewport(width, height, scale, mobile).await?;
+
+    // Update stream server viewport so status messages and screencast use the new dimensions
+    if let Some(ref server) = state.stream_server {
+        server.set_viewport(width as u32, height as u32).await;
+    }
+
     Ok(json!({ "width": width, "height": height, "deviceScaleFactor": scale, "mobile": mobile }))
 }
 
@@ -3831,6 +3838,11 @@ async fn handle_device(cmd: &Value, state: &DaemonState) -> Result<Value, String
     mgr.set_viewport(width, height, scale, mobile).await?;
     mgr.set_user_agent(ua).await?;
 
+    // Update stream server viewport so status messages and screencast use the new dimensions
+    if let Some(ref server) = state.stream_server {
+        server.set_viewport(width as u32, height as u32).await;
+    }
+
     Ok(json!({
         "device": name,
         "width": width,
@@ -3852,10 +3864,22 @@ async fn handle_screencast_start(cmd: &Value, state: &mut DaemonState) -> Result
         return Err("Screencast already active".to_string());
     }
 
+    // Use stored viewport as default for screencast dimensions
+    let (default_w, default_h) = if let Some(ref server) = state.stream_server {
+        server.viewport().await
+    } else {
+        (1280, 720)
+    };
     let format = cmd.get("format").and_then(|v| v.as_str()).unwrap_or("jpeg");
     let quality = cmd.get("quality").and_then(|v| v.as_i64()).unwrap_or(80) as i32;
-    let max_width = cmd.get("maxWidth").and_then(|v| v.as_i64()).unwrap_or(1280) as i32;
-    let max_height = cmd.get("maxHeight").and_then(|v| v.as_i64()).unwrap_or(720) as i32;
+    let max_width = cmd
+        .get("maxWidth")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(default_w as i64) as i32;
+    let max_height = cmd
+        .get("maxHeight")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(default_h as i64) as i32;
 
     stream::start_screencast(
         &mgr.client,
@@ -3887,7 +3911,8 @@ async fn handle_screencast_stop(state: &mut DaemonState) -> Result<Value, String
     state.screencasting = false;
 
     if let Some(ref server) = state.stream_server {
-        server.broadcast_status(true, false, 0, 0);
+        let (vw, vh) = server.viewport().await;
+        server.broadcast_status(true, false, vw, vh);
     }
 
     Ok(json!({ "stopped": true }))
@@ -4923,6 +4948,11 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
             .and_then(|v| v.as_i64())
             .unwrap_or(720) as i32;
         mgr.set_viewport(width, height, 1.0, false).await?;
+
+        // Update stream server viewport
+        if let Some(ref server) = state.stream_server {
+            server.set_viewport(width as u32, height as u32).await;
+        }
     }
 
     let total = mgr.page_count();
