@@ -303,6 +303,31 @@ fn main() {
         }
     }
 
+    // Handle state management commands locally — these are pure file operations
+    // that don't need a daemon, avoiding an unnecessary daemon startup that
+    // would lack runtime config like session_name.
+    if let Some(result) = native::state::dispatch_state_command(&cmd) {
+        let action = cmd.get("action").and_then(|v| v.as_str());
+        let resp = match result {
+            Ok(data) => connection::Response {
+                success: true,
+                data: Some(data),
+                error: None,
+            },
+            Err(e) => connection::Response {
+                success: false,
+                data: None,
+                error: Some(e),
+            },
+        };
+        let output_opts = OutputOptions::from_flags(&flags);
+        output::print_response_with_opts(&resp, action, &output_opts);
+        if !resp.success {
+            exit(1);
+        }
+        return;
+    }
+
     let daemon_opts = DaemonOptions {
         headed: flags.headed,
         debug: flags.debug,
@@ -744,11 +769,7 @@ fn main() {
         return;
     }
 
-    let output_opts = OutputOptions {
-        json: flags.json,
-        content_boundaries: flags.content_boundaries,
-        max_output: flags.max_output,
-    };
+    let output_opts = OutputOptions::from_flags(&flags);
 
     match send_command(cmd.clone(), &flags.session) {
         Ok(resp) => {
@@ -863,11 +884,7 @@ fn run_batch(flags: &Flags, bail: bool) {
         return;
     }
 
-    let output_opts = OutputOptions {
-        json: flags.json,
-        content_boundaries: flags.content_boundaries,
-        max_output: flags.max_output,
-    };
+    let output_opts = OutputOptions::from_flags(flags);
 
     let mut results: Vec<serde_json::Value> = Vec::new();
     let mut had_error = false;

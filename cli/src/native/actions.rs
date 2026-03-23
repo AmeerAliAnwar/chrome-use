@@ -947,11 +947,10 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "errors" => handle_errors(state).await,
         "state_save" => handle_state_save(cmd, state).await,
         "state_load" => handle_state_load(cmd, state).await,
-        "state_list" => handle_state_list().await,
-        "state_show" => handle_state_show(cmd).await,
-        "state_clear" => handle_state_clear(cmd).await,
-        "state_clean" => handle_state_clean(cmd).await,
-        "state_rename" => handle_state_rename(cmd).await,
+        "state_list" | "state_show" | "state_clear" | "state_clean" | "state_rename" => {
+            state::dispatch_state_command(cmd)
+                .expect("dispatch_state_command must handle all state_* actions matched here")
+        }
         "trace_start" => handle_trace_start(state).await,
         "trace_stop" => handle_trace_stop(cmd, state).await,
         "profiler_start" => handle_profiler_start(cmd, state).await,
@@ -2669,40 +2668,6 @@ async fn handle_state_load(cmd: &Value, state: &DaemonState) -> Result<Value, St
 
     state::load_state(&mgr.client, &session_id, path).await?;
     Ok(json!({ "loaded": true, "path": path }))
-}
-
-async fn handle_state_list() -> Result<Value, String> {
-    state::state_list()
-}
-
-async fn handle_state_show(cmd: &Value) -> Result<Value, String> {
-    let path = cmd
-        .get("path")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing 'path' parameter")?;
-    state::state_show(path)
-}
-
-async fn handle_state_clear(cmd: &Value) -> Result<Value, String> {
-    let path = cmd.get("path").and_then(|v| v.as_str());
-    state::state_clear(path)
-}
-
-async fn handle_state_clean(cmd: &Value) -> Result<Value, String> {
-    let days = cmd.get("days").and_then(|v| v.as_u64()).unwrap_or(30);
-    state::state_clean(days)
-}
-
-async fn handle_state_rename(cmd: &Value) -> Result<Value, String> {
-    let path = cmd
-        .get("path")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing 'path' parameter")?;
-    let name = cmd
-        .get("name")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing 'name' parameter")?;
-    state::state_rename(path, name)
 }
 
 // ---------------------------------------------------------------------------

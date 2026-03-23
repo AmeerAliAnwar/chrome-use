@@ -23,6 +23,16 @@ pub struct OutputOptions {
     pub max_output: Option<usize>,
 }
 
+impl OutputOptions {
+    pub fn from_flags(flags: &crate::flags::Flags) -> Self {
+        Self {
+            json: flags.json,
+            content_boundaries: flags.content_boundaries,
+            max_output: flags.max_output,
+        }
+    }
+}
+
 fn truncate_if_needed(content: &str, max: Option<usize>) -> String {
     let Some(limit) = max else {
         return content.to_string();
