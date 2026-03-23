@@ -1734,7 +1734,6 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
             .get("maxDepth")
             .and_then(|v| v.as_u64())
             .map(|d| d as usize),
-        cursor: cmd.get("cursor").and_then(|v| v.as_bool()).unwrap_or(false),
     };
 
     state.ref_map.clear();
@@ -1846,7 +1845,6 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
             &session_id,
             &SnapshotOptions {
                 interactive: true,
-                cursor: true,
                 ..SnapshotOptions::default()
             },
             &mut state.ref_map,

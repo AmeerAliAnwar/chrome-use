@@ -65,13 +65,21 @@ const STRUCTURAL_ROLES: &[&str] = &[
     "RootWebArea",
 ];
 
+const INVISIBLE_CHARS: &[char] = &[
+    '\u{FEFF}', // BOM / Zero Width No-Break Space
+    '\u{200B}', // Zero Width Space
+    '\u{200C}', // Zero Width Non-Joiner
+    '\u{200D}', // Zero Width Joiner
+    '\u{2060}', // Word Joiner
+    '\u{00A0}', // Non-Breaking Space (&nbsp;)
+];
+
 #[derive(Default)]
 pub struct SnapshotOptions {
     pub selector: Option<String>,
     pub interactive: bool,
     pub compact: bool,
     pub depth: Option<usize>,
-    pub cursor: bool,
 }
 
 struct TreeNode {
@@ -90,8 +98,51 @@ struct TreeNode {
     has_ref: bool,
     ref_id: Option<String>,
     depth: usize,
-    /// Cursor-interactive information (only set when options.cursor is true)
-    cursor_info: Option<CursorElementInfo>,
+    cursor_info: Option<CursorElementInfo>, // cursor-interactive information
+}
+
+impl TreeNode {
+    // Create an empty node
+    fn empty() -> Self {
+        Self {
+            role: String::new(),
+            name: String::new(),
+            level: None,
+            checked: None,
+            expanded: None,
+            selected: None,
+            disabled: None,
+            required: None,
+            value_text: None,
+            backend_node_id: None,
+            children: Vec::new(),
+            parent_idx: None,
+            has_ref: false,
+            ref_id: None,
+            depth: 0,
+            cursor_info: None,
+        }
+    }
+
+    // Clear node content
+    fn clear(&mut self) {
+        self.role = String::new();
+        self.name = String::new();
+        self.level = None;
+        self.checked = None;
+        self.expanded = None;
+        self.selected = None;
+        self.disabled = None;
+        self.required = None;
+        self.value_text = None;
+        self.backend_node_id = None;
+        self.children.clear();
+        self.parent_idx = None;
+        self.has_ref = false;
+        self.ref_id = None;
+        self.depth = 0;
+        self.cursor_info = None;
+    }
 }
 
 /// Information about a cursor-interactive element (elements with cursor:pointer, onclick, tabindex, etc.)
@@ -263,29 +314,29 @@ pub async fn take_snapshot(
 
     let mut nodes_with_refs: Vec<(usize, usize)> = Vec::new();
 
-    // When cursor mode is enabled, pre-collect cursor-interactive elements
-    // so we can mark them with refs during tree building
-    let cursor_elements: HashMap<i64, CursorElementInfo> = if options.cursor {
+    // Pre-collect cursor-interactive elements so we can mark them with refs during tree building
+    let cursor_elements: HashMap<i64, CursorElementInfo> =
         find_cursor_interactive_elements(client, session_id)
             .await
-            .unwrap_or_default()
-    } else {
-        HashMap::new()
-    };
+            .unwrap_or_default();
 
     for (idx, node) in tree_nodes.iter().enumerate() {
         let role = node.role.as_str();
-        let should_ref = if INTERACTIVE_ROLES.contains(&role) {
+        let mut should_ref = if INTERACTIVE_ROLES.contains(&role) {
             true
         } else if CONTENT_ROLES.contains(&role) {
             !node.name.is_empty()
-        } else if options.cursor {
-            // In cursor mode, also ref elements that are cursor-interactive
-            node.backend_node_id
-                .is_some_and(|bid| cursor_elements.contains_key(&bid))
         } else {
             false
         };
+
+        if node
+            .backend_node_id
+            .is_some_and(|bid| cursor_elements.contains_key(&bid))
+        {
+            // ref elements that are cursor-interactive
+            should_ref = true;
+        }
 
         if should_ref {
             let nth = tracker.track(role, &node.name, idx);
@@ -321,13 +372,11 @@ pub async fn take_snapshot(
         tree_nodes[*idx].ref_id = Some(ref_id);
     }
 
-    // Populate cursor_info for ref-bearing nodes when cursor mode is enabled
-    if options.cursor {
-        for (idx, _) in &nodes_with_refs {
-            if let Some(bid) = tree_nodes[*idx].backend_node_id {
-                if let Some(cursor_info) = cursor_elements.get(&bid) {
-                    tree_nodes[*idx].cursor_info = Some((*cursor_info).clone());
-                }
+    // Populate cursor_info for ref-bearing nodes
+    for (idx, _) in &nodes_with_refs {
+        if let Some(bid) = tree_nodes[*idx].backend_node_id {
+            if let Some(cursor_info) = cursor_elements.get(&bid) {
+                tree_nodes[*idx].cursor_info = Some((*cursor_info).clone());
             }
         }
     }
@@ -726,24 +775,7 @@ fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
             extract_properties(&node.properties);
 
         if (node.ignored.unwrap_or(false) && role != "RootWebArea") || role == "InlineTextBox" {
-            tree_nodes.push(TreeNode {
-                role: String::new(),
-                name: String::new(),
-                level: None,
-                checked: None,
-                expanded: None,
-                selected: None,
-                disabled: None,
-                required: None,
-                value_text: None,
-                backend_node_id: None,
-                children: Vec::new(),
-                parent_idx: None,
-                has_ref: false,
-                ref_id: None,
-                depth: 0,
-                cursor_info: None,
-            });
+            tree_nodes.push(TreeNode::empty());
             id_to_idx.insert(node.node_id.clone(), i);
             continue;
         }
@@ -778,6 +810,58 @@ fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
                     tree_nodes[child_idx].parent_idx = Some(i);
                 }
             }
+        }
+    }
+
+    // Process StaticText aggregation
+    for i in 0..tree_nodes.len() {
+        if tree_nodes[i].role.is_empty() || tree_nodes[i].children.is_empty() {
+            continue;
+        }
+
+        let children_indices: Vec<usize> = tree_nodes[i].children.clone();
+
+        // Continuous StaticText nodes at the same level are an artifact of HTML structure rather than semantic meaning.
+        // They typically represent a single continuous piece of text on the page that was split due to inline elements, formatting tags, or other structural reasons.
+        // Thus, continuous StaticText children are aggregated into the first one.
+        let mut start = 0;
+        while start < children_indices.len() {
+            // Skip non-StaticText nodes
+            if tree_nodes[children_indices[start]].role != "StaticText" {
+                start += 1;
+                continue;
+            }
+
+            // Find the end of the current StaticText sequence
+            let mut end = start + 1;
+            while end < children_indices.len()
+                && tree_nodes[children_indices[end]].role == "StaticText"
+            {
+                end += 1;
+            }
+
+            // If we have a sequence of at least two StaticText
+            if end > start + 1 {
+                // Collect and aggregate all names from the sequence
+                let aggregated_name: String = (start..end)
+                    .map(|idx| tree_nodes[children_indices[idx]].name.clone())
+                    .collect();
+                // Always aggregate into the first node of the sequence
+                tree_nodes[children_indices[start]].name = aggregated_name;
+                // Clear the rest of the nodes in the sequence (from start+1 to end-1)
+                for j in (start + 1)..end {
+                    tree_nodes[children_indices[j]].clear();
+                }
+            }
+            start = end;
+        }
+
+        // Deduplicate redundant StaticText
+        if children_indices.len() == 1
+            && tree_nodes[children_indices[0]].role == "StaticText"
+            && tree_nodes[i].name == tree_nodes[children_indices[0]].name
+        {
+            tree_nodes[children_indices[0]].clear();
         }
     }
 
@@ -820,7 +904,11 @@ fn render_tree(
 ) {
     let node = &nodes[idx];
 
-    if node.role.is_empty() {
+    // Reduce unnecessary indentation and rendering
+    if node.role.is_empty()
+        || (node.role == "generic" && !node.has_ref && node.children.len() <= 1)
+        || (node.role == "StaticText" && node.name.replace(INVISIBLE_CHARS, "").is_empty())
+    {
         // Ignored node -- still render children
         for &child in &node.children {
             render_tree(nodes, child, indent, output, options);
@@ -855,16 +943,22 @@ fn render_tree(
     let prefix = "  ".repeat(indent);
     let mut line = format!("{}- {}", prefix, role);
 
-    // Use ARIA name if available, otherwise fall back to cursor-interactive textContent
-    let display_name = if !node.name.is_empty() {
+    // Use ARIA name if available, only fall back to cursor-interactive textContent in interactive mode since their visible text in child nodes is filtered out
+    let unescaped_display_name = if !node.name.is_empty() {
         &node.name
-    } else if let Some(ref ci) = node.cursor_info {
-        &ci.text
+    } else if options.interactive {
+        if let Some(ref ci) = node.cursor_info {
+            &ci.text
+        } else {
+            &node.name
+        }
     } else {
         &node.name
     };
-    if !display_name.is_empty() {
-        line.push_str(&format!(" \"{}\"", display_name));
+    if !unescaped_display_name.is_empty() {
+        if let Ok(display_name) = serde_json::to_string(&unescaped_display_name) {
+            line.push_str(&format!(" {}", display_name.replace(INVISIBLE_CHARS, "")));
+        }
     }
 
     // Properties

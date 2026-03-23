@@ -1459,7 +1459,6 @@ Designed for AI agents to understand page structure.
 
 Options:
   -i, --interactive    Only include interactive elements
-  -C, --cursor         Include cursor-interactive elements (cursor:pointer, onclick, tabindex)
   -c, --compact        Remove empty structural elements
   -d, --depth <n>      Limit tree depth
   -s, --selector <sel> Scope snapshot to CSS selector
@@ -1471,7 +1470,6 @@ Global Options:
 Examples:
   agent-browser snapshot
   agent-browser snapshot -i
-  agent-browser snapshot -i -C         # Interactive + cursor-interactive elements
   agent-browser snapshot --compact --depth 5
   agent-browser snapshot -s "#main-content"
 "##
