@@ -313,11 +313,13 @@ fn main() {
                 success: true,
                 data: Some(data),
                 error: None,
+                warning: None,
             },
             Err(e) => connection::Response {
                 success: false,
                 data: None,
                 error: Some(e),
+                warning: None,
             },
         };
         let output_opts = OutputOptions::from_flags(&flags);

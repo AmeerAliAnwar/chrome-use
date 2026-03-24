@@ -14,8 +14,8 @@ use super::cdp::chrome::LaunchOptions;
 use super::cdp::client::CdpClient;
 use super::cdp::types::{
     AttachToTargetParams, AttachToTargetResult, CdpEvent, ConsoleApiCalledEvent,
-    CreateTargetResult, DispatchMouseEventParams, ExceptionThrownEvent, TargetCreatedEvent,
-    TargetDestroyedEvent, TargetInfoChangedEvent,
+    CreateTargetResult, DispatchMouseEventParams, ExceptionThrownEvent,
+    JavascriptDialogOpeningEvent, TargetCreatedEvent, TargetDestroyedEvent, TargetInfoChangedEvent,
 };
 use super::cookies;
 use super::diff;
@@ -136,6 +136,14 @@ pub enum BackendType {
     WebDriver,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct PendingDialog {
+    pub dialog_type: String,
+    pub message: String,
+    pub url: String,
+    pub default_prompt: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MouseState {
     pub x: f64,
@@ -192,6 +200,8 @@ pub struct DaemonState {
     /// without deadlocking navigation/evaluate.
     fetch_handler_task: Option<tokio::task::JoinHandle<()>>,
     pub mouse_state: MouseState,
+    /// Tracks the currently open JavaScript dialog (alert/confirm/prompt), if any.
+    pub pending_dialog: Option<PendingDialog>,
     /// Shared slot for stream server to receive CDP client when browser launches.
     pub stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>>,
     /// Stream server instance kept alive so the broadcast channel remains open.
@@ -234,6 +244,7 @@ impl DaemonState {
             origin_headers: Arc::new(RwLock::new(HashMap::new())),
             fetch_handler_task: None,
             mouse_state: MouseState::default(),
+            pending_dialog: None,
             stream_client: None,
             stream_server: None,
         }
@@ -718,6 +729,23 @@ impl DaemonState {
                                 }
                             }
                         }
+                        "Page.javascriptDialogOpening" => {
+                            if let Ok(dialog_event) =
+                                serde_json::from_value::<JavascriptDialogOpeningEvent>(
+                                    event.params.clone(),
+                                )
+                            {
+                                self.pending_dialog = Some(PendingDialog {
+                                    dialog_type: dialog_event.dialog_type,
+                                    message: dialog_event.message,
+                                    url: dialog_event.url,
+                                    default_prompt: dialog_event.default_prompt,
+                                });
+                            }
+                        }
+                        "Page.javascriptDialogClosed" => {
+                            self.pending_dialog = None;
+                        }
                         // Fetch.requestPaused is handled by the background
                         // fetch_handler_task — no need to collect here.
                         _ => {}
@@ -1114,10 +1142,27 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         _ => Err(format!("Not yet implemented: {}", action)),
     };
 
-    match result {
+    let mut resp = match result {
         Ok(data) => success_response(&id, data),
         Err(e) => error_response(&id, &super::browser::to_ai_friendly_error(&e)),
+    };
+
+    // Auto-report pending JavaScript dialog so agents know why commands may hang
+    if action != "dialog" {
+        if let Some(ref dialog) = state.pending_dialog {
+            if let Some(obj) = resp.as_object_mut() {
+                obj.insert(
+                    "warning".to_string(),
+                    json!(format!(
+                        "A JavaScript {} dialog is blocking the page: \"{}\" — use `dialog accept` or `dialog dismiss` to resolve it",
+                        dialog.dialog_type, dialog.message
+                    )),
+                );
+            }
+        }
     }
+
+    resp
 }
 
 // ---------------------------------------------------------------------------
@@ -3805,17 +3850,36 @@ async fn handle_permissions(cmd: &Value, state: &DaemonState) -> Result<Value, S
     Ok(json!({ "granted": permissions }))
 }
 
-async fn handle_dialog(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+async fn handle_dialog(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let response = cmd.get("response").and_then(|v| v.as_str());
+
+    // dialog status — return pending dialog info
+    if response == Some("status") {
+        return Ok(match &state.pending_dialog {
+            Some(dialog) => {
+                let mut obj = json!({
+                    "hasDialog": true,
+                    "type": dialog.dialog_type,
+                    "message": dialog.message,
+                });
+                if let Some(ref prompt) = dialog.default_prompt {
+                    obj["defaultPrompt"] = json!(prompt);
+                }
+                obj
+            }
+            None => json!({ "hasDialog": false }),
+        });
+    }
+
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let accept = cmd
-        .get("response")
-        .and_then(|v| v.as_str())
+    let accept = response
         .map(|r| r == "accept")
         .or_else(|| cmd.get("accept").and_then(|v| v.as_bool()))
         .unwrap_or(true);
     let prompt_text = cmd.get("promptText").and_then(|v| v.as_str());
 
     mgr.handle_dialog(accept, prompt_text).await?;
+    state.pending_dialog = None;
     Ok(json!({ "handled": true, "accepted": accept }))
 }
 

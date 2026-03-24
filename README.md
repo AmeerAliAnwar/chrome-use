@@ -300,7 +300,10 @@ agent-browser frame main              # Back to main frame
 ```bash
 agent-browser dialog accept [text]    # Accept (with optional prompt text)
 agent-browser dialog dismiss          # Dismiss
+agent-browser dialog status           # Check if a dialog is currently open
 ```
+
+When a JavaScript dialog is pending, all command responses include a `warning` field with the dialog type and message.
 
 ### Diff
 
