@@ -430,6 +430,11 @@ fn install_linux_deps() {
             ("libcups2", Some("libcups2t64")),
             ("libxshmfence1", None),
             ("libgbm1", None),
+            // Fonts: without actual font files, pages render with missing glyphs
+            // (tofu). This is especially visible for CJK and emoji characters.
+            ("fonts-noto-color-emoji", None),
+            ("fonts-noto-cjk", None),
+            ("fonts-freefont-ttf", None),
         ]
         .into_iter()
         .map(|(base, t64_variant)| {
@@ -469,6 +474,10 @@ fn install_linux_deps() {
                 "libXi",
                 "gtk3",
                 "cairo-gobject",
+                // Fonts
+                "google-noto-cjk-fonts",
+                "google-noto-emoji-color-fonts",
+                "liberation-fonts",
             ],
         )
     } else if which_exists("yum") {
@@ -488,6 +497,9 @@ fn install_linux_deps() {
                 "pango",
                 "alsa-lib",
                 "libxkbcommon",
+                // Fonts
+                "google-noto-cjk-fonts",
+                "liberation-fonts",
             ],
         )
     } else {
