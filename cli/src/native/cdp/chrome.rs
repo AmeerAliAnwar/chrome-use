@@ -17,6 +17,17 @@ impl ChromeProcess {
         let _ = self.child.wait();
     }
 
+    /// Returns the OS process ID of the Chrome child process.
+    pub fn id(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// Non-blocking check whether Chrome has exited.
+    /// Returns `true` if the process has exited (and reaps it), `false` if still running.
+    pub fn has_exited(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(Some(_)) | Err(_))
+    }
+
     /// Wait for Chrome to exit on its own (after Browser.close CDP command),
     /// falling back to kill() if it doesn't exit within the timeout.
     /// This allows Chrome to flush cookies and other state to the user-data-dir.

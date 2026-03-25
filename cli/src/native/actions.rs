@@ -993,9 +993,11 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
             | "device_list"
     );
     if !skip_launch {
-        // Check if existing connection is stale and needs re-launch
-        let needs_launch = if let Some(ref mgr) = state.browser {
-            !mgr.is_connection_alive().await
+        // Check if existing connection is stale and needs re-launch.
+        // First do a fast, non-blocking check: did the browser process crash/exit?
+        // This avoids a 3-second CDP timeout when Chrome is already dead.
+        let needs_launch = if let Some(ref mut mgr) = state.browser {
+            mgr.has_process_exited() || !mgr.is_connection_alive().await
         } else {
             true
         };
@@ -1356,11 +1358,12 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    // Relaunch logic: check if we can reuse the existing connection
-    let needs_relaunch = if let Some(ref mgr) = state.browser {
+    // Relaunch logic: check if we can reuse the existing connection.
+    // Fast process-exit check first to avoid expensive CDP timeout.
+    let needs_relaunch = if let Some(ref mut mgr) = state.browser {
         let is_external = cdp_url.is_some() || cdp_port.is_some() || auto_connect;
         let was_external = mgr.is_cdp_connection();
-        is_external != was_external || !mgr.is_connection_alive().await
+        is_external != was_external || mgr.has_process_exited() || !mgr.is_connection_alive().await
     } else {
         true
     };

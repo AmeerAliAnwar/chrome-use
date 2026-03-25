@@ -180,6 +180,14 @@ impl BrowserProcess {
             BrowserProcess::Lightpanda(p) => p.kill(),
         }
     }
+
+    /// Non-blocking check whether the browser process has exited.
+    pub fn has_exited(&mut self) -> bool {
+        match self {
+            BrowserProcess::Chrome(p) => p.has_exited(),
+            BrowserProcess::Lightpanda(_) => false,
+        }
+    }
 }
 
 pub struct BrowserManager {
@@ -640,6 +648,17 @@ impl BrowserManager {
         match result {
             Ok(Ok(_)) => true,
             Ok(Err(_)) | Err(_) => false,
+        }
+    }
+
+    /// Non-blocking check whether the locally-launched browser process has exited
+    /// (crashed or terminated). Also reaps the zombie if it has exited.
+    /// Returns false for external CDP connections (no child process to monitor).
+    pub fn has_process_exited(&mut self) -> bool {
+        if let Some(ref mut process) = self.browser_process {
+            process.has_exited()
+        } else {
+            false
         }
     }
 

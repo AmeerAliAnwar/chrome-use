@@ -109,6 +109,12 @@ async fn run_socket_server(
     let (reset_tx, mut reset_rx) = mpsc::channel::<()>(64);
     let reset_tx = idle_timeout_ms.map(|_| Arc::new(reset_tx));
 
+    // Listen for SIGCHLD to reap zombie child processes (e.g. crashed Chrome).
+    // Without this, a crashed Chrome becomes <defunct> and is never reaped until
+    // the daemon exits.
+    let mut sigchld = signal::unix::signal(signal::unix::SignalKind::child())
+        .map_err(|e| format!("Failed to install SIGCHLD handler: {}", e))?;
+
     loop {
         let sleep_future = idle_timeout_ms.map(|ms| tokio::time::sleep(Duration::from_millis(ms)));
         let mut sleep_pin = sleep_future.map(Box::pin);
@@ -127,6 +133,12 @@ async fn run_socket_server(
                         let _ = writeln!(std::io::stderr(), "Accept error: {}", e);
                     }
                 }
+            }
+            _ = sigchld.recv() => {
+                // Reap all zombie children. The browser will be re-launched
+                // automatically on the next command via the has_process_exited()
+                // check in execute_command.
+                reap_children();
             }
             _ = async {
                 if let Some(ref mut s) = sleep_pin {
@@ -155,6 +167,17 @@ async fn run_socket_server(
     }
 
     Ok(())
+}
+
+/// Reap all zombie child processes by calling waitpid(-1, WNOHANG) in a loop.
+#[cfg(unix)]
+fn reap_children() {
+    loop {
+        let result = unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) };
+        if result <= 0 {
+            break;
+        }
+    }
 }
 
 #[cfg(windows)]
