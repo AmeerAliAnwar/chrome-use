@@ -10,6 +10,8 @@ use tokio::sync::{broadcast, watch, Mutex, Notify, RwLock};
 use tokio_tungstenite::tungstenite::Message;
 
 use super::cdp::client::CdpClient;
+#[cfg(windows)]
+use crate::connection::get_port_for_session;
 use crate::connection::get_socket_dir;
 use crate::install::get_dashboard_dir;
 
@@ -1183,7 +1185,7 @@ fn extract_http_body(request: &str) -> Option<&str> {
         .or_else(|| request.find("\n\n").map(|pos| &request[pos + 2..]))
 }
 
-/// Relay a command JSON body to the daemon's Unix socket and return the response.
+/// Relay a command JSON body to the daemon and return the response.
 async fn relay_command_to_daemon(session_name: &str, body: &str) -> Result<String, String> {
     let mut cmd: Value = serde_json::from_str(body).map_err(|e| format!("Invalid JSON: {}", e))?;
 
@@ -1198,16 +1200,26 @@ async fn relay_command_to_daemon(session_name: &str, body: &str) -> Result<Strin
         cmd["id"] = json!(id);
     }
 
-    let socket_path = get_socket_dir().join(format!("{}.sock", session_name));
-
-    let stream = tokio::net::UnixStream::connect(&socket_path)
-        .await
-        .map_err(|e| format!("Failed to connect to daemon: {}", e))?;
-
-    let (reader, mut writer) = tokio::io::split(stream);
-
     let mut json_str = serde_json::to_string(&cmd).map_err(|e| e.to_string())?;
     json_str.push('\n');
+
+    #[cfg(unix)]
+    let stream = {
+        let socket_path = get_socket_dir().join(format!("{}.sock", session_name));
+        tokio::net::UnixStream::connect(&socket_path)
+            .await
+            .map_err(|e| format!("Failed to connect to daemon: {}", e))?
+    };
+
+    #[cfg(windows)]
+    let stream = {
+        let port = get_port_for_session(session_name);
+        tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .map_err(|e| format!("Failed to connect to daemon: {}", e))?
+    };
+
+    let (reader, mut writer) = tokio::io::split(stream);
 
     writer
         .write_all(json_str.as_bytes())

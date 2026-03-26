@@ -144,7 +144,7 @@ fn get_port_path(session: &str) -> PathBuf {
 }
 
 #[cfg(windows)]
-fn get_port_for_session(session: &str) -> u16 {
+pub fn get_port_for_session(session: &str) -> u16 {
     let mut hash: i32 = 0;
     for c in session.chars() {
         hash = ((hash << 5).wrapping_sub(hash)).wrapping_add(c as i32);
