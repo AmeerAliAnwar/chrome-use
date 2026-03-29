@@ -219,6 +219,7 @@ pub struct DaemonOptions<'a> {
     pub auto_connect: bool,
     pub idle_timeout: Option<&'a str>,
     pub cdp: Option<&'a str>,
+    pub no_auto_dialog: bool,
 }
 
 fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
@@ -299,6 +300,9 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     }
     if let Some(cdp) = opts.cdp {
         cmd.env("AGENT_BROWSER_CDP", cdp);
+    }
+    if opts.no_auto_dialog {
+        cmd.env("AGENT_BROWSER_NO_AUTO_DIALOG", "1");
     }
 }
 
