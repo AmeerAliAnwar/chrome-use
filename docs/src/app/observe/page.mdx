@@ -111,9 +111,12 @@ Sent when the browser logs to the console:
   "type": "console",
   "level": "log",
   "text": "Page loaded",
+  "args": [{"type": "string", "value": "Page loaded"}],
   "timestamp": 1711367000100
 }
 ```
+
+The `args` array contains the raw CDP `Runtime.consoleAPICalled` arguments for programmatic access. Object arguments include preview data (e.g. `{userId: "abc", count: 42}` instead of `"Object"`).
 
 These are in addition to the existing `frame`, `status`, and `error` message types documented on the [Streaming](/streaming) page.
 

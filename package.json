@@ -44,7 +44,7 @@
   "bugs": {
     "url": "https://github.com/vercel-labs/agent-browser/issues"
   },
-  "homepage": "https://github.com/vercel-labs/agent-browser#readme",
+  "homepage": "https://agent-browser.dev",
   "devDependencies": {
     "@changesets/cli": "^2.29.8"
   }
