@@ -626,6 +626,7 @@ The dashboard displays:
 - **Live viewport** -- real-time JPEG frames from the browser
 - **Activity feed** -- chronological command/result stream with timing and expandable details
 - **Console output** -- browser console messages (log, warn, error)
+- **Session creation** -- create new sessions from the UI with local engines (Chrome, Lightpanda) or cloud providers (Browserbase, Browserless, Browser Use, Kernel)
 
 ## Configuration
 
