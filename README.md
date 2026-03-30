@@ -1,6 +1,6 @@
 # agent-browser
 
-Headless browser automation CLI for AI agents. Fast native Rust CLI.
+Browser automation CLI for AI agents. Fast native Rust CLI.
 
 ## Installation
 
