@@ -1,5 +1,11 @@
 # agent-browser
 
+## 0.23.3
+
+### Bug Fixes
+
+- Fixed **drag and drop** not working because `mouseMoved` events during the drag omitted the `buttons` bitmask, causing the browser to see `event.buttons === 0` and never fire `dragstart`/`dragover`/`drop` (#1087)
+
 ## 0.23.2
 
 ### Patch Changes
