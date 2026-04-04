@@ -119,7 +119,7 @@ fn get_pid_path(session: &str) -> PathBuf {
 }
 
 /// Clean up stale socket and PID files for a session
-fn cleanup_stale_files(session: &str) {
+pub fn cleanup_stale_files(session: &str) {
     let pid_path = get_pid_path(session);
     let _ = fs::remove_file(&pid_path);
     let stream_path = get_socket_dir().join(format!("{}.stream", session));
@@ -429,6 +429,21 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
                     let _ = stderr.read_to_string(&mut stderr_output);
                 }
                 let stderr_trimmed = stderr_output.trim();
+
+                // If the daemon failed because another instance won the bind
+                // race ("Address already in use"), check whether that winner is
+                // now accepting connections and piggyback on it.
+                if stderr_trimmed.contains("Address already in use")
+                    || stderr_trimmed.contains("Failed to bind")
+                {
+                    thread::sleep(Duration::from_millis(200));
+                    if daemon_ready(session) {
+                        return Ok(DaemonResult {
+                            already_running: true,
+                        });
+                    }
+                }
+
                 if !stderr_trimmed.is_empty() {
                     let msg = if stderr_trimmed.len() > 500 {
                         let mut end = 500;
