@@ -3095,7 +3095,7 @@ async fn start_delayed_login_server(
 #[tokio::test]
 #[ignore]
 async fn e2e_auth_login_waits_for_delayed_spa_form_render() {
-    let (base_url, _server) = start_delayed_login_server(1200, 100).await;
+    let (base_url, _server) = start_delayed_login_server(800, 100).await;
     let mut state = DaemonState::new();
 
     let profile_name = format!(
@@ -3869,7 +3869,7 @@ async fn e2e_relaunch_on_options_change() {
         &json!({
             "id": "3",
             "action": "launch",
-            "headless": false,
+            "headless": true,
             "extensions": ["/tmp/fake-extension"]
         }),
         &mut state,
