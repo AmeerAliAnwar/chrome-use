@@ -175,10 +175,10 @@ async fn run_socket_server(
     let mut drain_interval = tokio::time::interval(Duration::from_millis(100));
     drain_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-    loop {
-        let sleep_future = idle_timeout_ms.map(|ms| tokio::time::sleep(Duration::from_millis(ms)));
-        let mut sleep_pin = sleep_future.map(Box::pin);
+    let idle_sleep = idle_timeout_ms.map(|ms| tokio::time::sleep(Duration::from_millis(ms)));
+    let mut idle_sleep_pin = idle_sleep.map(Box::pin);
 
+    loop {
         tokio::select! {
             accept_result = listener.accept() => {
                 match accept_result {
@@ -209,10 +209,9 @@ async fn run_socket_server(
                 }
             }
             _ = async {
-                if let Some(ref mut s) = sleep_pin {
-                    s.as_mut().await
-                } else {
-                    std::future::pending::<()>().await
+                match idle_sleep_pin {
+                    Some(ref mut s) => s.as_mut().await,
+                    None => std::future::pending::<()>().await,
                 }
             }, if idle_timeout_ms.is_some() => {
                 let mut s = state.lock().await;
@@ -222,6 +221,8 @@ async fn run_socket_server(
                 break;
             }
             _ = reset_rx.recv(), if idle_timeout_ms.is_some() => {
+                idle_sleep_pin = idle_timeout_ms
+                    .map(|ms| Box::pin(tokio::time::sleep(Duration::from_millis(ms))));
                 continue;
             }
             _ = shutdown_signal() => {
@@ -278,10 +279,10 @@ async fn run_socket_server(
     let (reset_tx, mut reset_rx) = mpsc::channel::<()>(64);
     let reset_tx = idle_timeout_ms.map(|_| Arc::new(reset_tx));
 
-    loop {
-        let sleep_future = idle_timeout_ms.map(|ms| tokio::time::sleep(Duration::from_millis(ms)));
-        let mut sleep_pin = sleep_future.map(Box::pin);
+    let idle_sleep = idle_timeout_ms.map(|ms| tokio::time::sleep(Duration::from_millis(ms)));
+    let mut idle_sleep_pin = idle_sleep.map(Box::pin);
 
+    loop {
         tokio::select! {
             accept_result = listener.accept() => {
                 match accept_result {
@@ -299,10 +300,9 @@ async fn run_socket_server(
                 }
             }
             _ = async {
-                if let Some(ref mut s) = sleep_pin {
-                    s.as_mut().await
-                } else {
-                    std::future::pending::<()>().await
+                match idle_sleep_pin {
+                    Some(ref mut s) => s.as_mut().await,
+                    None => std::future::pending::<()>().await,
                 }
             }, if idle_timeout_ms.is_some() => {
                 let mut s = state.lock().await;
@@ -313,6 +313,8 @@ async fn run_socket_server(
                 break;
             }
             _ = reset_rx.recv(), if idle_timeout_ms.is_some() => {
+                idle_sleep_pin = idle_timeout_ms
+                    .map(|ms| Box::pin(tokio::time::sleep(Duration::from_millis(ms))));
                 continue;
             }
             _ = shutdown_signal() => {
@@ -548,6 +550,64 @@ mod tests {
             Ok(None) => panic!("try_wait() returned None but child should have exited"),
             Err(e) => panic!("try_wait() should succeed without waitpid(-1): {}", e),
         }
+    }
+
+    /// Regression test for #1101: idle timeout must fire even while the
+    /// drain interval ticks every 500 ms.  The bug was that `sleep_future`
+    /// was created **inside** the loop, so each drain tick dropped the
+    /// in-progress sleep and replaced it with a fresh one – the timer
+    /// could never reach its deadline.
+    #[tokio::test]
+    async fn test_idle_timeout_fires_despite_drain_interval() {
+        use tokio::sync::mpsc;
+
+        let idle_timeout_ms: u64 = 1000;
+        let mut drain_interval = tokio::time::interval(Duration::from_millis(500));
+        drain_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        let (_reset_tx, mut reset_rx) = mpsc::channel::<()>(64);
+
+        let start = tokio::time::Instant::now();
+
+        let exited = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut idle_sleep_pin = Some(Box::pin(tokio::time::sleep(Duration::from_millis(
+                idle_timeout_ms,
+            ))));
+
+            loop {
+                tokio::select! {
+                    _ = drain_interval.tick() => {}
+                    _ = async {
+                        match idle_sleep_pin {
+                            Some(ref mut s) => s.as_mut().await,
+                            None => std::future::pending::<()>().await,
+                        }
+                    } => {
+                        break;
+                    }
+                    _ = reset_rx.recv() => {
+                        idle_sleep_pin = Some(Box::pin(
+                            tokio::time::sleep(Duration::from_millis(idle_timeout_ms)),
+                        ));
+                        continue;
+                    }
+                }
+            }
+        })
+        .await;
+
+        let elapsed = start.elapsed();
+
+        assert!(
+            exited.is_ok(),
+            "idle timeout never fired – loop ran for >5 s (bug #1101)"
+        );
+        assert!(
+            elapsed < Duration::from_millis(idle_timeout_ms + 500),
+            "idle timeout took too long: {:?} (expected ~{} ms)",
+            elapsed,
+            idle_timeout_ms,
+        );
     }
 
     /// Verify that `ChromeProcess::has_exited()` (which uses `Child::try_wait()`)
