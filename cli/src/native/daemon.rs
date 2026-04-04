@@ -62,6 +62,9 @@ pub async fn run_daemon(session: &str) {
     let pid_path = socket_dir.join(format!("{}.pid", session));
     let _ = fs::write(&pid_path, process::id().to_string());
 
+    let version_path = socket_dir.join(format!("{}.version", session));
+    let _ = fs::write(&version_path, env!("CARGO_PKG_VERSION"));
+
     // On Unix the daemon listens on a Unix domain socket; on Windows it uses
     // TCP, so there is no .sock file — only a .port file written by the server.
     let socket_path = socket_dir.join(format!("{}.sock", session));
@@ -134,6 +137,7 @@ pub async fn run_daemon(session: &str) {
         let _ = fs::remove_file(socket_dir.join(format!("{}.port", session)));
     }
     let _ = fs::remove_file(&pid_path);
+    let _ = fs::remove_file(&version_path);
     let _ = fs::remove_file(&stream_path);
     let _ = fs::remove_file(socket_dir.join(format!("{}.engine", session)));
     let _ = fs::remove_file(socket_dir.join(format!("{}.provider", session)));
