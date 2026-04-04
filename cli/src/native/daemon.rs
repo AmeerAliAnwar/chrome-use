@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::signal;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, Notify, RwLock};
 
 use super::actions::{execute_command, DaemonState};
 use super::cdp::client::CdpClient;
@@ -176,6 +176,11 @@ async fn run_socket_server(
     let (reset_tx, mut reset_rx) = mpsc::channel::<()>(64);
     let reset_tx = idle_timeout_ms.map(|_| Arc::new(reset_tx));
 
+    // Notifier used by handle_connection to signal the daemon loop to exit
+    // after a "close" command, instead of calling process::exit() which skips
+    // destructors and can leave Chrome processes orphaned (issue #1113).
+    let close_notify = Arc::new(Notify::new());
+
     let mut drain_interval = tokio::time::interval(Duration::from_millis(100));
     drain_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -190,8 +195,9 @@ async fn run_socket_server(
                         let state = state.clone();
                         let reset_tx = reset_tx.clone();
                         let sf = stream_file.clone();
+                        let cn = close_notify.clone();
                         tokio::spawn(async move {
-                            handle_connection(stream, state, reset_tx, sf).await;
+                            handle_connection(stream, state, reset_tx, sf, cn).await;
                         });
                     }
                     Err(e) => {
@@ -228,6 +234,12 @@ async fn run_socket_server(
                 idle_sleep_pin = idle_timeout_ms
                     .map(|ms| Box::pin(tokio::time::sleep(Duration::from_millis(ms))));
                 continue;
+            }
+            _ = close_notify.notified() => {
+                // "close" command was handled; browser already closed by
+                // handle_close(). Break to run cleanup and exit gracefully
+                // so destructors fire.
+                break;
             }
             _ = shutdown_signal() => {
                 let mut s = state.lock().await;
@@ -283,6 +295,8 @@ async fn run_socket_server(
     let (reset_tx, mut reset_rx) = mpsc::channel::<()>(64);
     let reset_tx = idle_timeout_ms.map(|_| Arc::new(reset_tx));
 
+    let close_notify = Arc::new(Notify::new());
+
     let idle_sleep = idle_timeout_ms.map(|ms| tokio::time::sleep(Duration::from_millis(ms)));
     let mut idle_sleep_pin = idle_sleep.map(Box::pin);
 
@@ -294,8 +308,9 @@ async fn run_socket_server(
                         let state = state.clone();
                         let reset_tx = reset_tx.clone();
                         let sf = stream_file.clone();
+                        let cn = close_notify.clone();
                         tokio::spawn(async move {
-                            handle_connection(stream, state, reset_tx, sf).await;
+                            handle_connection(stream, state, reset_tx, sf, cn).await;
                         });
                     }
                     Err(e) => {
@@ -321,6 +336,10 @@ async fn run_socket_server(
                     .map(|ms| Box::pin(tokio::time::sleep(Duration::from_millis(ms))));
                 continue;
             }
+            _ = close_notify.notified() => {
+                let _ = fs::remove_file(&port_path);
+                break;
+            }
             _ = shutdown_signal() => {
                 let mut s = state.lock().await;
                 if let Some(ref mut mgr) = s.browser {
@@ -340,6 +359,7 @@ async fn handle_connection<S>(
     state: std::sync::Arc<tokio::sync::Mutex<DaemonState>>,
     idle_reset_tx: Option<Arc<mpsc::Sender<()>>>,
     stream_file_cleanup: Option<PathBuf>,
+    close_notify: Arc<Notify>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -396,8 +416,12 @@ async fn handle_connection<S>(
                     if let Some(ref path) = stream_file_cleanup {
                         let _ = fs::remove_file(path);
                     }
+                    // Signal the daemon loop to exit gracefully instead of
+                    // calling process::exit(), which skips destructors and
+                    // can leave Chrome processes orphaned (issue #1113).
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                    process::exit(0);
+                    close_notify.notify_one();
+                    return;
                 }
             }
             Err(_) => break,
