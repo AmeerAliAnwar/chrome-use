@@ -826,6 +826,7 @@ fn main() {
         engine: flags.engine.as_deref(),
         auto_connect: flags.auto_connect,
         idle_timeout: flags.idle_timeout.as_deref(),
+        default_timeout: flags.default_timeout,
         cdp: flags.cdp.as_deref(),
         no_auto_dialog: flags.no_auto_dialog,
     };

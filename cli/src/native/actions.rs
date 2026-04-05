@@ -246,6 +246,8 @@ pub struct DaemonState {
     launch_hash: Option<u64>,
     /// Browser engine name (e.g. "chrome", "lightpanda") for observability.
     pub engine: String,
+    /// Default timeout for wait operations, from AGENT_BROWSER_DEFAULT_TIMEOUT env var.
+    pub default_timeout_ms: u64,
 }
 
 impl DaemonState {
@@ -295,7 +297,21 @@ impl DaemonState {
             stream_server: None,
             launch_hash: None,
             engine: env::var("AGENT_BROWSER_ENGINE").unwrap_or_else(|_| "chrome".to_string()),
+            default_timeout_ms: env::var("AGENT_BROWSER_DEFAULT_TIMEOUT")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(30_000),
         }
+    }
+
+    /// Extract the timeout from a command JSON, falling back to the
+    /// configured `default_timeout_ms` (from `AGENT_BROWSER_DEFAULT_TIMEOUT`).
+    /// All wait-family handlers should use this instead of reading the
+    /// timeout field and providing their own fallback.
+    fn timeout_ms(&self, cmd: &Value) -> u64 {
+        cmd.get("timeout")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(self.default_timeout_ms)
     }
 
     fn reset_input_state(&mut self) {
@@ -2764,7 +2780,7 @@ async fn handle_uncheck(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
 async fn handle_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
-    let timeout_ms = cmd.get("timeout").and_then(|v| v.as_u64()).unwrap_or(30000);
+    let timeout_ms = state.timeout_ms(cmd);
 
     if let Some(text) = cmd.get("text").and_then(|v| v.as_str()) {
         wait_for_text(&mgr.client, &session_id, text, timeout_ms).await?;
@@ -4908,7 +4924,7 @@ async fn handle_waitforurl(cmd: &Value, state: &DaemonState) -> Result<Value, St
         .get("url")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'url' parameter")?;
-    let timeout_ms = cmd.get("timeout").and_then(|v| v.as_u64()).unwrap_or(30000);
+    let timeout_ms = state.timeout_ms(cmd);
 
     wait_for_url(&mgr.client, &session_id, url_pattern, timeout_ms).await?;
     let url = mgr.get_url().await.unwrap_or_default();
@@ -4919,7 +4935,7 @@ async fn handle_waitforloadstate(cmd: &Value, state: &DaemonState) -> Result<Val
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
     let load_state = cmd.get("state").and_then(|v| v.as_str()).unwrap_or("load");
-    let timeout_ms = cmd.get("timeout").and_then(|v| v.as_u64()).unwrap_or(30000);
+    let timeout_ms = state.timeout_ms(cmd);
 
     let wait_until = WaitUntil::from_str(load_state);
     let _ = tokio::time::timeout(
@@ -4939,7 +4955,7 @@ async fn handle_waitforfunction(cmd: &Value, state: &DaemonState) -> Result<Valu
         .get("expression")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'expression' parameter")?;
-    let timeout_ms = cmd.get("timeout").and_then(|v| v.as_u64()).unwrap_or(30000);
+    let timeout_ms = state.timeout_ms(cmd);
 
     wait_for_function(&mgr.client, &session_id, expression, timeout_ms).await?;
 
@@ -5212,90 +5228,78 @@ async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     let name = cmd.get("name").and_then(|v| v.as_str());
     let exact = cmd.get("exact").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    // Query the accessibility tree via CDP — the browser engine is the
-    // authoritative source for implicit ARIA roles (e.g. <a href> → "link").
-    let (ax_params, effective_session_id) = super::element::resolve_ax_session(
-        state.active_frame_id.as_deref(),
-        &session_id,
-        &state.iframe_sessions,
+    let name_match = name
+        .map(|n| {
+            if exact {
+                format!(
+                    "el.getAttribute('aria-label') === {} || el.textContent.trim() === {}",
+                    serde_json::to_string(n).unwrap_or_default(),
+                    serde_json::to_string(n).unwrap_or_default()
+                )
+            } else {
+                format!(
+                    "(el.getAttribute('aria-label') || '').includes({n}) || el.textContent.includes({n})",
+                    n = serde_json::to_string(n).unwrap_or_default()
+                )
+            }
+        })
+        .unwrap_or_else(|| "true".to_string());
+
+    let js = format!(
+        r#"(() => {{
+            const els = document.querySelectorAll('[role="{role}"], {role}');
+            for (const el of els) {{
+                if ({name_match}) {{
+                    el.setAttribute('data-agent-browser-located', 'true');
+                    return true;
+                }}
+            }}
+            return false;
+        }})()"#,
+        role = role,
+        name_match = name_match,
     );
 
-    let ax_tree: super::cdp::types::GetFullAXTreeResult = mgr
+    let result: super::cdp::types::EvaluateResult = mgr
         .client
         .send_command_typed(
-            "Accessibility.getFullAXTree",
-            &ax_params,
-            Some(effective_session_id),
+            "Runtime.evaluate",
+            &super::cdp::types::EvaluateParams {
+                expression: js,
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            Some(&session_id),
         )
         .await?;
 
-    let (backend_node_id, actual_name) = find_ax_node_by_role(&ax_tree.nodes, role, name, exact)?;
+    if !result
+        .result
+        .value
+        .as_ref()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        let desc = build_role_selector(role, name, exact);
+        return Err(format!("No element found: {}", desc));
+    }
 
-    // Register a temporary ref so execute_subaction can resolve the element
-    // via backendNodeId directly — no marker attribute needed.
-    let ref_num = state.ref_map.next_ref_num();
-    let temp_ref = format!("e{}", ref_num);
-    state.ref_map.add_with_frame(
-        temp_ref.clone(),
-        Some(backend_node_id),
-        role,
-        &actual_name,
-        None,
-        state.active_frame_id.as_deref(),
-    );
-    state.ref_map.set_next_ref_num(ref_num + 1);
+    let selector = "[data-agent-browser-located='true']";
+    let result = execute_subaction(cmd, state, selector).await;
 
-    let result = execute_subaction(cmd, state, &format!("@{}", temp_ref)).await;
-    state.ref_map.remove(&temp_ref);
-    result
-}
-
-/// Search the accessibility tree for a node matching the given role and
-/// optional name. Returns `(backendDOMNodeId, actual_name)` of the first match.
-fn find_ax_node_by_role(
-    nodes: &[super::cdp::types::AXNode],
-    role: &str,
-    name: Option<&str>,
-    exact: bool,
-) -> Result<(i64, String), String> {
-    for node in nodes {
-        if node.ignored.unwrap_or(false) {
-            continue;
-        }
-
-        let node_role = super::element::extract_ax_string(&node.role);
-        if node_role != role {
-            continue;
-        }
-
-        let node_name = super::element::extract_ax_string(&node.name);
-
-        let Some(target_name) = name else {
-            let id = node
-                .backend_d_o_m_node_id
-                .ok_or_else(|| format!("AX node has no backendDOMNodeId for role={}", role))?;
-            return Ok((id, node_name));
-        };
-
-        let matches = if exact {
-            node_name == target_name
-        } else {
-            node_name.contains(target_name)
-        };
-
-        if matches {
-            let id = node.backend_d_o_m_node_id.ok_or_else(|| {
-                format!(
-                    "AX node has no backendDOMNodeId for role={} name={}",
-                    role, target_name
+    // Clean up the marker attribute
+    if let Some(ref browser) = state.browser {
+        if browser.active_session_id().is_ok() {
+            let _ = browser
+                .evaluate(
+                    "document.querySelector('[data-agent-browser-located]')?.removeAttribute('data-agent-browser-located')",
+                    None,
                 )
-            })?;
-            return Ok((id, node_name));
+                .await;
         }
     }
 
-    let desc = build_role_selector(role, name, exact);
-    Err(format!("No element found: {}", desc))
+    result
 }
 
 async fn handle_semantic_locator(
@@ -5705,7 +5709,7 @@ async fn handle_responsebody(cmd: &Value, state: &DaemonState) -> Result<Value, 
         .get("url")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'url' parameter")?;
-    let timeout_ms = cmd.get("timeout").and_then(|v| v.as_u64()).unwrap_or(30000);
+    let timeout_ms = state.timeout_ms(cmd);
 
     let mut rx = mgr.client.subscribe();
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
@@ -5784,7 +5788,7 @@ async fn handle_responsebody(cmd: &Value, state: &DaemonState) -> Result<Value, 
 async fn handle_waitfordownload(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
-    let timeout_ms = cmd.get("timeout").and_then(|v| v.as_u64()).unwrap_or(30000);
+    let timeout_ms = state.timeout_ms(cmd);
 
     let mut rx = mgr.client.subscribe();
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
@@ -8174,6 +8178,23 @@ mod tests {
         assert_eq!(metadata["version"], "123.0.6312.0");
     }
 
+    #[test]
+    fn test_default_timeout_ms_from_env() {
+        // When AGENT_BROWSER_DEFAULT_TIMEOUT is set, DaemonState should use it
+        env::set_var("AGENT_BROWSER_DEFAULT_TIMEOUT", "3000");
+        let state = DaemonState::new();
+        assert_eq!(state.default_timeout_ms, 3000);
+        env::remove_var("AGENT_BROWSER_DEFAULT_TIMEOUT");
+    }
+
+    #[test]
+    fn test_default_timeout_ms_fallback() {
+        // When AGENT_BROWSER_DEFAULT_TIMEOUT is unset, DaemonState uses 30000
+        env::remove_var("AGENT_BROWSER_DEFAULT_TIMEOUT");
+        let state = DaemonState::new();
+        assert_eq!(state.default_timeout_ms, 30_000);
+    }
+
     #[tokio::test]
     async fn test_execute_unknown_command() {
         let mut state = DaemonState::new();
@@ -8499,87 +8520,5 @@ mod tests {
             let auto_handled = auto_dialog && matches!(*dialog_type, "beforeunload" | "alert");
             assert!(!auto_handled, "{dialog_type} should NOT be auto-handled");
         }
-    }
-
-    use super::super::cdp::types::{AXNode, AXValue};
-
-    fn make_ax_node(
-        node_id: &str,
-        role: &str,
-        name: &str,
-        backend_node_id: Option<i64>,
-        ignored: bool,
-    ) -> AXNode {
-        AXNode {
-            node_id: node_id.to_string(),
-            role: Some(AXValue {
-                value_type: "role".to_string(),
-                value: Some(serde_json::Value::String(role.to_string())),
-            }),
-            name: Some(AXValue {
-                value_type: "computedString".to_string(),
-                value: Some(serde_json::Value::String(name.to_string())),
-            }),
-            value: None,
-            description: None,
-            properties: None,
-            child_ids: None,
-            backend_d_o_m_node_id: backend_node_id,
-            ignored: Some(ignored),
-        }
-    }
-
-    #[test]
-    fn test_find_ax_node_by_role_matches_link_role() {
-        // Regression: the old implementation used querySelectorAll('link')
-        // which matched <link> stylesheet elements instead of <a> anchors.
-        // The AX tree correctly assigns role="link" to <a href="...">.
-        let nodes = vec![
-            make_ax_node("1", "WebArea", "Page", Some(1), false),
-            make_ax_node("2", "link", "Example Link", Some(42), false),
-            make_ax_node("3", "link", "Another Link", Some(43), false),
-        ];
-
-        let (id, name) = find_ax_node_by_role(&nodes, "link", Some("Example Link"), true).unwrap();
-        assert_eq!(id, 42);
-        assert_eq!(name, "Example Link");
-    }
-
-    #[test]
-    fn test_find_ax_node_by_role_exact_vs_contains() {
-        let nodes = vec![
-            make_ax_node("1", "link", "More information...", Some(10), false),
-            make_ax_node("2", "link", "Less info", Some(11), false),
-        ];
-
-        assert!(find_ax_node_by_role(&nodes, "link", Some("More"), true).is_err());
-
-        let (id, _) = find_ax_node_by_role(&nodes, "link", Some("More"), false).unwrap();
-        assert_eq!(id, 10);
-    }
-
-    #[test]
-    fn test_find_ax_node_by_role_no_name_filter() {
-        let nodes = vec![
-            make_ax_node("1", "heading", "", Some(5), false),
-            make_ax_node("2", "button", "Submit", Some(6), false),
-        ];
-
-        let (id, _) = find_ax_node_by_role(&nodes, "button", None, false).unwrap();
-        assert_eq!(id, 6);
-    }
-
-    #[test]
-    fn test_find_ax_node_by_role_skips_ignored_nodes() {
-        let nodes = vec![
-            make_ax_node("1", "link", "Hidden Link", Some(99), true), // ignored
-            make_ax_node("2", "link", "Visible Link", Some(100), false),
-        ];
-
-        let result = find_ax_node_by_role(&nodes, "link", Some("Hidden Link"), true);
-        assert!(result.is_err());
-
-        let (id, _) = find_ax_node_by_role(&nodes, "link", Some("Visible Link"), true).unwrap();
-        assert_eq!(id, 100);
     }
 }

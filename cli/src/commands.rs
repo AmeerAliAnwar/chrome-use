@@ -72,6 +72,23 @@ pub fn gen_id() -> String {
 }
 
 pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError> {
+    let mut result = parse_command_inner(args, flags)?;
+
+    // Inject AGENT_BROWSER_DEFAULT_TIMEOUT into any wait-family command that
+    // doesn't already carry an explicit timeout. Centralised here so that new
+    // wait variants automatically inherit the default without per-variant wiring.
+    if let Some(action) = result.get("action").and_then(|a| a.as_str()) {
+        if action.starts_with("wait") && result.get("timeout").is_none() {
+            if let Some(t) = flags.default_timeout {
+                result["timeout"] = json!(t);
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseError> {
     if args.is_empty() {
         return Err(ParseError::MissingArguments {
             context: "".to_string(),
@@ -2324,6 +2341,7 @@ mod tests {
             screenshot_quality: None,
             screenshot_format: None,
             idle_timeout: None,
+            default_timeout: None,
             no_auto_dialog: false,
         }
     }
@@ -3576,6 +3594,77 @@ mod tests {
         let cmd = parse_command(&args("wait -d ./file.pdf"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "waitfordownload");
         assert_eq!(cmd["path"], "./file.pdf");
+    }
+
+    // === Default timeout (AGENT_BROWSER_DEFAULT_TIMEOUT) tests ===
+
+    fn flags_with_default_timeout(ms: u64) -> Flags {
+        let mut f = default_flags();
+        f.default_timeout = Some(ms);
+        f
+    }
+
+    #[test]
+    fn test_wait_selector_inherits_default_timeout() {
+        let flags = flags_with_default_timeout(3000);
+        let cmd = parse_command(&args("wait #element"), &flags).unwrap();
+        assert_eq!(cmd["action"], "wait");
+        assert_eq!(cmd["selector"], "#element");
+        assert_eq!(cmd["timeout"], 3000);
+    }
+
+    #[test]
+    fn test_wait_url_inherits_default_timeout() {
+        let flags = flags_with_default_timeout(4000);
+        let cmd = parse_command(&args("wait --url **/dashboard"), &flags).unwrap();
+        assert_eq!(cmd["action"], "waitforurl");
+        assert_eq!(cmd["timeout"], 4000);
+    }
+
+    #[test]
+    fn test_wait_load_inherits_default_timeout() {
+        let flags = flags_with_default_timeout(4000);
+        let cmd = parse_command(&args("wait --load networkidle"), &flags).unwrap();
+        assert_eq!(cmd["action"], "waitforloadstate");
+        assert_eq!(cmd["timeout"], 4000);
+    }
+
+    #[test]
+    fn test_wait_fn_inherits_default_timeout() {
+        let flags = flags_with_default_timeout(4000);
+        let cmd = parse_command(&args("wait --fn window.ready"), &flags).unwrap();
+        assert_eq!(cmd["action"], "waitforfunction");
+        assert_eq!(cmd["timeout"], 4000);
+    }
+
+    #[test]
+    fn test_wait_text_inherits_default_timeout() {
+        let flags = flags_with_default_timeout(2000);
+        let cmd = parse_command(&args("wait --text Welcome"), &flags).unwrap();
+        assert_eq!(cmd["action"], "wait");
+        assert_eq!(cmd["text"], "Welcome");
+        assert_eq!(cmd["timeout"], 2000);
+    }
+
+    #[test]
+    fn test_wait_download_inherits_default_timeout() {
+        let flags = flags_with_default_timeout(5000);
+        let cmd = parse_command(&args("wait --download"), &flags).unwrap();
+        assert_eq!(cmd["action"], "waitfordownload");
+        assert_eq!(cmd["timeout"], 5000);
+    }
+
+    #[test]
+    fn test_wait_explicit_timeout_overrides_default() {
+        let flags = flags_with_default_timeout(5000);
+        let cmd = parse_command(&args("wait --text Welcome --timeout 1000"), &flags).unwrap();
+        assert_eq!(cmd["timeout"], 1000);
+    }
+
+    #[test]
+    fn test_wait_no_default_timeout_omits_field() {
+        let cmd = parse_command(&args("wait #element"), &default_flags()).unwrap();
+        assert!(cmd.get("timeout").is_none());
     }
 
     // === Connect (CDP) tests ===
