@@ -5212,78 +5212,90 @@ async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     let name = cmd.get("name").and_then(|v| v.as_str());
     let exact = cmd.get("exact").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    let name_match = name
-        .map(|n| {
-            if exact {
-                format!(
-                    "el.getAttribute('aria-label') === {} || el.textContent.trim() === {}",
-                    serde_json::to_string(n).unwrap_or_default(),
-                    serde_json::to_string(n).unwrap_or_default()
-                )
-            } else {
-                format!(
-                    "(el.getAttribute('aria-label') || '').includes({n}) || el.textContent.includes({n})",
-                    n = serde_json::to_string(n).unwrap_or_default()
-                )
-            }
-        })
-        .unwrap_or_else(|| "true".to_string());
-
-    let js = format!(
-        r#"(() => {{
-            const els = document.querySelectorAll('[role="{role}"], {role}');
-            for (const el of els) {{
-                if ({name_match}) {{
-                    el.setAttribute('data-agent-browser-located', 'true');
-                    return true;
-                }}
-            }}
-            return false;
-        }})()"#,
-        role = role,
-        name_match = name_match,
+    // Query the accessibility tree via CDP — the browser engine is the
+    // authoritative source for implicit ARIA roles (e.g. <a href> → "link").
+    let (ax_params, effective_session_id) = super::element::resolve_ax_session(
+        state.active_frame_id.as_deref(),
+        &session_id,
+        &state.iframe_sessions,
     );
 
-    let result: super::cdp::types::EvaluateResult = mgr
+    let ax_tree: super::cdp::types::GetFullAXTreeResult = mgr
         .client
         .send_command_typed(
-            "Runtime.evaluate",
-            &super::cdp::types::EvaluateParams {
-                expression: js,
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(&session_id),
+            "Accessibility.getFullAXTree",
+            &ax_params,
+            Some(effective_session_id),
         )
         .await?;
 
-    if !result
-        .result
-        .value
-        .as_ref()
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
-        let desc = build_role_selector(role, name, exact);
-        return Err(format!("No element found: {}", desc));
-    }
+    let (backend_node_id, actual_name) = find_ax_node_by_role(&ax_tree.nodes, role, name, exact)?;
 
-    let selector = "[data-agent-browser-located='true']";
-    let result = execute_subaction(cmd, state, selector).await;
+    // Register a temporary ref so execute_subaction can resolve the element
+    // via backendNodeId directly — no marker attribute needed.
+    let ref_num = state.ref_map.next_ref_num();
+    let temp_ref = format!("e{}", ref_num);
+    state.ref_map.add_with_frame(
+        temp_ref.clone(),
+        Some(backend_node_id),
+        role,
+        &actual_name,
+        None,
+        state.active_frame_id.as_deref(),
+    );
+    state.ref_map.set_next_ref_num(ref_num + 1);
 
-    // Clean up the marker attribute
-    if let Some(ref browser) = state.browser {
-        if browser.active_session_id().is_ok() {
-            let _ = browser
-                .evaluate(
-                    "document.querySelector('[data-agent-browser-located]')?.removeAttribute('data-agent-browser-located')",
-                    None,
+    let result = execute_subaction(cmd, state, &format!("@{}", temp_ref)).await;
+    state.ref_map.remove(&temp_ref);
+    result
+}
+
+/// Search the accessibility tree for a node matching the given role and
+/// optional name. Returns `(backendDOMNodeId, actual_name)` of the first match.
+fn find_ax_node_by_role(
+    nodes: &[super::cdp::types::AXNode],
+    role: &str,
+    name: Option<&str>,
+    exact: bool,
+) -> Result<(i64, String), String> {
+    for node in nodes {
+        if node.ignored.unwrap_or(false) {
+            continue;
+        }
+
+        let node_role = super::element::extract_ax_string(&node.role);
+        if node_role != role {
+            continue;
+        }
+
+        let node_name = super::element::extract_ax_string(&node.name);
+
+        let Some(target_name) = name else {
+            let id = node
+                .backend_d_o_m_node_id
+                .ok_or_else(|| format!("AX node has no backendDOMNodeId for role={}", role))?;
+            return Ok((id, node_name));
+        };
+
+        let matches = if exact {
+            node_name == target_name
+        } else {
+            node_name.contains(target_name)
+        };
+
+        if matches {
+            let id = node.backend_d_o_m_node_id.ok_or_else(|| {
+                format!(
+                    "AX node has no backendDOMNodeId for role={} name={}",
+                    role, target_name
                 )
-                .await;
+            })?;
+            return Ok((id, node_name));
         }
     }
 
-    result
+    let desc = build_role_selector(role, name, exact);
+    Err(format!("No element found: {}", desc))
 }
 
 async fn handle_semantic_locator(
@@ -8487,5 +8499,87 @@ mod tests {
             let auto_handled = auto_dialog && matches!(*dialog_type, "beforeunload" | "alert");
             assert!(!auto_handled, "{dialog_type} should NOT be auto-handled");
         }
+    }
+
+    use super::super::cdp::types::{AXNode, AXValue};
+
+    fn make_ax_node(
+        node_id: &str,
+        role: &str,
+        name: &str,
+        backend_node_id: Option<i64>,
+        ignored: bool,
+    ) -> AXNode {
+        AXNode {
+            node_id: node_id.to_string(),
+            role: Some(AXValue {
+                value_type: "role".to_string(),
+                value: Some(serde_json::Value::String(role.to_string())),
+            }),
+            name: Some(AXValue {
+                value_type: "computedString".to_string(),
+                value: Some(serde_json::Value::String(name.to_string())),
+            }),
+            value: None,
+            description: None,
+            properties: None,
+            child_ids: None,
+            backend_d_o_m_node_id: backend_node_id,
+            ignored: Some(ignored),
+        }
+    }
+
+    #[test]
+    fn test_find_ax_node_by_role_matches_link_role() {
+        // Regression: the old implementation used querySelectorAll('link')
+        // which matched <link> stylesheet elements instead of <a> anchors.
+        // The AX tree correctly assigns role="link" to <a href="...">.
+        let nodes = vec![
+            make_ax_node("1", "WebArea", "Page", Some(1), false),
+            make_ax_node("2", "link", "Example Link", Some(42), false),
+            make_ax_node("3", "link", "Another Link", Some(43), false),
+        ];
+
+        let (id, name) = find_ax_node_by_role(&nodes, "link", Some("Example Link"), true).unwrap();
+        assert_eq!(id, 42);
+        assert_eq!(name, "Example Link");
+    }
+
+    #[test]
+    fn test_find_ax_node_by_role_exact_vs_contains() {
+        let nodes = vec![
+            make_ax_node("1", "link", "More information...", Some(10), false),
+            make_ax_node("2", "link", "Less info", Some(11), false),
+        ];
+
+        assert!(find_ax_node_by_role(&nodes, "link", Some("More"), true).is_err());
+
+        let (id, _) = find_ax_node_by_role(&nodes, "link", Some("More"), false).unwrap();
+        assert_eq!(id, 10);
+    }
+
+    #[test]
+    fn test_find_ax_node_by_role_no_name_filter() {
+        let nodes = vec![
+            make_ax_node("1", "heading", "", Some(5), false),
+            make_ax_node("2", "button", "Submit", Some(6), false),
+        ];
+
+        let (id, _) = find_ax_node_by_role(&nodes, "button", None, false).unwrap();
+        assert_eq!(id, 6);
+    }
+
+    #[test]
+    fn test_find_ax_node_by_role_skips_ignored_nodes() {
+        let nodes = vec![
+            make_ax_node("1", "link", "Hidden Link", Some(99), true), // ignored
+            make_ax_node("2", "link", "Visible Link", Some(100), false),
+        ];
+
+        let result = find_ax_node_by_role(&nodes, "link", Some("Hidden Link"), true);
+        assert!(result.is_err());
+
+        let (id, _) = find_ax_node_by_role(&nodes, "link", Some("Visible Link"), true).unwrap();
+        assert_eq!(id, 100);
     }
 }
