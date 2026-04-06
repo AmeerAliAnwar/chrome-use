@@ -1,8 +1,19 @@
 # agent-browser
 
-## 0.25.1
+## 0.25.2
 
 <!-- release:start -->
+### Bug Fixes
+
+- Fixed **Chrome being killed after ~10s idle on Linux** caused by `PR_SET_PDEATHSIG` tracking the blocking thread that spawned Chrome rather than the daemon process. When Tokio reaped the idle thread, the kernel sent SIGKILL to Chrome even though the daemon was still alive. Orphan cleanup is handled by the existing process-group kill in `ChromeProcess::kill()` (#1157, #1173)
+
+### Contributors
+
+- @ctate
+<!-- release:end -->
+
+## 0.25.1
+
 ### Improvements
 
 - **Embedded dashboard** - The observability dashboard is now bundled directly into the CLI binary using `rust-embed`, eliminating the need for `dashboard install`. The dashboard is available immediately after installing agent-browser (#1169)
@@ -10,7 +21,6 @@
 ### Contributors
 
 - @ctate
-<!-- release:end -->
 
 ## 0.25.0
 
