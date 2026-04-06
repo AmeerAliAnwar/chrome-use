@@ -639,9 +639,6 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 Monitor agent-browser sessions in real time with a local web dashboard showing a live viewport and command activity feed.
 
 ```bash
-# Install the dashboard (one time)
-agent-browser dashboard install
-
 # Start the dashboard server (runs in background on port 4848)
 agent-browser dashboard start
 agent-browser dashboard start --port 8080   # Custom port

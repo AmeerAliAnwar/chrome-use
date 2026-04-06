@@ -2,19 +2,9 @@
 
 Monitor agent-browser sessions in real time with a local web dashboard showing a live browser viewport and command activity feed.
 
-## Install
-
-Download the dashboard once:
-
-```bash
-agent-browser dashboard install
-```
-
-This downloads the dashboard to `~/.agent-browser/dashboard/` and is served directly by the daemon when streaming is enabled.
-
 ## Usage
 
-Start the dashboard server and open any session -- it appears automatically:
+The dashboard is bundled into the binary and requires no separate install. Start the server and open any session:
 
 ```bash
 agent-browser dashboard start
@@ -132,9 +122,7 @@ The dashboard is a Next.js static export (`output: 'export'`) that produces plai
 pnpm build:dashboard
 ```
 
-The built files are served by the daemon's stream server on the same port used for WebSocket connections. Plain HTTP requests serve the dashboard, while WebSocket upgrade requests are handled as before.
-
-When the dashboard is not installed, visiting the HTTP endpoint shows instructions to run `agent-browser dashboard install`.
+The dashboard is embedded into the CLI binary at compile time using `rust-embed`. Plain HTTP requests serve the embedded dashboard assets, while WebSocket upgrade requests are handled as before.
 
 ## AI Chat
 

@@ -789,9 +789,6 @@ Lightpanda does not support `--extension`, `--profile`, `--state`, or `--allow-f
 The dashboard is a standalone background server that shows live browser viewports, command activity, and console output for all sessions.
 
 ```bash
-# Install the dashboard once
-agent-browser dashboard install
-
 # Start the dashboard server (background, port 4848)
 agent-browser dashboard start
 

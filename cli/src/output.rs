@@ -2399,15 +2399,15 @@ Examples:
             r##"
 agent-browser dashboard - Observability dashboard
 
-Usage: agent-browser dashboard [start|stop|install] [options]
+Usage: agent-browser dashboard [start|stop] [options]
 
 Manage the observability dashboard, a local web UI that shows live
 browser viewports and command activity feeds for all sessions.
+The dashboard is bundled into the binary and requires no separate install.
 
 Subcommands:
   start [--port <n>]   Start the dashboard server (default port: 4848)
   stop                 Stop the dashboard server
-  install              Download and install the dashboard to ~/.agent-browser/dashboard/
 
 Running 'agent-browser dashboard' with no subcommand is equivalent to 'dashboard start'.
 
@@ -2421,7 +2421,6 @@ Global Options:
   --json               Output as JSON
 
 Examples:
-  agent-browser dashboard install
   agent-browser dashboard start
   agent-browser dashboard start --port 8080
   agent-browser dashboard stop
@@ -2842,7 +2841,7 @@ Setup:
   install                    Install browser binaries
   install --with-deps        Also install system dependencies (Linux)
   upgrade                    Upgrade to the latest version
-  dashboard install          Install the observability dashboard
+  dashboard start            Start the observability dashboard
   profiles                   List available Chrome profiles
 
 Snapshot Options:
