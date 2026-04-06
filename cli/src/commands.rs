@@ -2382,6 +2382,9 @@ mod tests {
             idle_timeout: None,
             default_timeout: None,
             no_auto_dialog: false,
+            model: None,
+            verbose: false,
+            quiet: false,
         }
     }
 

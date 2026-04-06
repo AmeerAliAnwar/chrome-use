@@ -224,6 +224,13 @@ agent-browser diff screenshot --baseline before.png  # Visual pixel diff
 agent-browser diff url <url1> <url2>                 # Compare two pages
 agent-browser diff url <url1> <url2> --wait-until networkidle  # Custom wait strategy
 agent-browser diff url <url1> <url2> --selector "#main"  # Scope to element
+
+# Chat (AI natural language control)
+agent-browser chat "open google.com and search for cats"  # Single-shot instruction
+agent-browser chat                                        # Interactive REPL mode
+agent-browser -q chat "summarize this page"               # Quiet (text only, no tool calls)
+agent-browser -v chat "fill in the login form"            # Verbose (show command output)
+agent-browser --model openai/gpt-4o chat "take a screenshot"  # Override model
 ```
 
 ## Streaming

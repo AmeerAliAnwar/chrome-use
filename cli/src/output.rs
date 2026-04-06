@@ -2679,6 +2679,40 @@ Examples:
 "##
         }
 
+        "chat" => {
+            r##"
+agent-browser chat - Natural language browser control via AI
+
+Usage:
+  agent-browser chat <message>         Single-shot: execute instruction and exit
+  agent-browser chat                   Interactive REPL (when stdin is a TTY)
+  echo "instruction" | agent-browser chat   Piped input
+
+Sends natural language instructions to an AI model that translates them
+into agent-browser commands and executes them against the active session.
+Requires AI_GATEWAY_API_KEY to be set.
+
+In interactive mode, type "quit", "exit", or "q" to leave the REPL.
+
+Chat Options:
+  --model <name>         AI model (or AI_GATEWAY_MODEL env, default: anthropic/claude-sonnet-4.6)
+  -v, --verbose          Show tool commands and their raw output
+  -q, --quiet            Show only the AI text response (hide tool calls)
+
+Global Options:
+  --json                 Structured JSON output per turn
+  --session <name>       Target session for commands
+
+Examples:
+  agent-browser chat "open google.com and search for cats"
+  agent-browser chat "take a screenshot of the current page"
+  agent-browser -q chat "summarize this page"
+  agent-browser -v chat "fill in the login form with test@example.com"
+  agent-browser --model openai/gpt-4o chat "navigate to hacker news"
+  agent-browser chat
+"##
+        }
+
         _ => return false,
     };
     println!("{}", help.trim());
@@ -2794,6 +2828,11 @@ Sessions:
   session                    Show current session name
   session list               List active sessions
 
+Chat (AI):
+  chat <message>             Send a natural language instruction (single-shot)
+  chat                       Start interactive chat (REPL mode when stdin is a TTY)
+  Options: --model <name>, -v/--verbose, -q/--quiet
+
 Dashboard:
   dashboard [start]          Start the dashboard server (default port: 4848)
   dashboard start --port <n> Start on a specific port
@@ -2856,6 +2895,9 @@ Options:
   --confirm-interactive      Interactive confirmation prompts; auto-denies if stdin is not a TTY (or AGENT_BROWSER_CONFIRM_INTERACTIVE)
   --engine <name>            Browser engine: chrome (default), lightpanda (or AGENT_BROWSER_ENGINE)
   --no-auto-dialog           Disable automatic dismissal of alert/beforeunload dialogs (or AGENT_BROWSER_NO_AUTO_DIALOG)
+  --model <name>             AI model for chat (or AI_GATEWAY_MODEL env)
+  -v, --verbose              Show tool commands and their raw output
+  -q, --quiet                Show only AI text responses (hide tool calls)
   --config <path>            Use a custom config file (or AGENT_BROWSER_CONFIG env)
   --debug                    Debug output
   --version, -V              Show version
@@ -2920,8 +2962,8 @@ Environment:
   AGENT_BROWSER_SCREENSHOT_QUALITY JPEG quality 0-100
   AGENT_BROWSER_SCREENSHOT_FORMAT Screenshot format: png, jpeg
   AI_GATEWAY_URL                 Vercel AI Gateway base URL (default: https://ai-gateway.vercel.sh)
-  AI_GATEWAY_API_KEY             API key for the AI Gateway (enables dashboard AI chat)
-  AI_GATEWAY_MODEL               Default AI model (default: anthropic/claude-sonnet-4.6)
+  AI_GATEWAY_API_KEY             API key for the AI Gateway (enables chat command and dashboard AI chat)
+  AI_GATEWAY_MODEL               Default AI model (default: anthropic/claude-sonnet-4.6, or --model flag)
 
 Install:
   npm install -g agent-browser           # npm
@@ -2948,6 +2990,9 @@ Examples:
   agent-browser --profile ~/.myapp open example.com    # Persistent custom profile
   agent-browser profiles                               # List available Chrome profiles
   agent-browser --session-name myapp open example.com  # Auto-save/restore state
+  agent-browser chat "open google.com and search for cats"  # AI chat (single-shot)
+  agent-browser chat                                        # AI chat (interactive REPL)
+  agent-browser -q chat "summarize this page"               # Quiet mode (text only)
 
 Command Chaining:
   Chain commands with && in a single shell call (browser persists via daemon):
