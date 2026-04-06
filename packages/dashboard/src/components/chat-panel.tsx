@@ -342,7 +342,7 @@ export function ChatPanel() {
   ).current;
 
   const { messages, sendMessage, stop, status, setMessages, error } = useChat({
-    chatId,
+    id: chatId,
     transport,
     onError: () => setErrorDismissed(false),
   });
