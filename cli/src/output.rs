@@ -1544,6 +1544,7 @@ Designed for AI agents to understand page structure.
 
 Options:
   -i, --interactive    Only include interactive elements
+  -u, --urls           Include href URLs for link elements
   -c, --compact        Remove empty structural elements
   -d, --depth <n>      Limit tree depth
   -s, --selector <sel> Scope snapshot to CSS selector
@@ -1555,6 +1556,7 @@ Global Options:
 Examples:
   agent-browser snapshot
   agent-browser snapshot -i
+  agent-browser snapshot -i --urls
   agent-browser snapshot --compact --depth 5
   agent-browser snapshot -s "#main-content"
 "##
@@ -2622,20 +2624,24 @@ Examples:
 
         "batch" => {
             r##"
-agent-browser batch - Execute multiple commands from stdin
+agent-browser batch - Execute multiple commands sequentially
 
-Usage: echo '<json>' | agent-browser batch [options]
+Usage: agent-browser batch [options] "<cmd1>" "<cmd2>" ...
+       echo '<json>' | agent-browser batch [options]
 
-Reads a JSON array of commands from stdin and executes them sequentially.
-Each command is an array of strings matching normal CLI arguments.
-Results are printed in order, separated by blank lines (or as a JSON array
-with --json).
+Runs multiple commands in sequence. Commands can be passed as quoted
+arguments or piped as JSON via stdin. Results are printed in order,
+separated by blank lines (or as a JSON array with --json).
 
 Options:
   --bail               Stop on first error (default: continue all commands)
   --json               Output results as a JSON array
 
-Input Format:
+Argument Mode:
+  Each quoted argument is a full command string:
+  agent-browser batch "open https://example.com" "snapshot -i" "screenshot"
+
+Stdin Mode (JSON):
   A JSON array of string arrays. Each inner array is one command:
   [
     ["open", "https://example.com"],
@@ -2646,8 +2652,9 @@ Input Format:
   ]
 
 Examples:
+  agent-browser batch "open https://example.com" "screenshot"
+  agent-browser batch --bail "open https://example.com" "click @e1" "screenshot"
   echo '[["open", "https://example.com"], ["snapshot"]]' | agent-browser batch
-  echo '[["open", "https://example.com"], ["get", "title"]]' | agent-browser batch --json
   agent-browser batch --bail < commands.json
 "##
         }
@@ -2769,8 +2776,8 @@ Streaming:
   stream status              Show streaming status and active port
 
 Batch:
-  batch [--bail]             Execute commands from stdin (JSON array of string arrays)
-                             --bail stops on first error (default: continue all)
+  batch [--bail] ["cmd" ...]  Execute multiple commands sequentially (args or stdin)
+                              --bail stops on first error (default: continue all)
 
 Auth Vault:
   auth save <name> [opts]    Save auth profile (--url, --username, --password/--password-stdin)
@@ -2912,6 +2919,9 @@ Environment:
   AGENT_BROWSER_SCREENSHOT_DIR   Default screenshot output directory
   AGENT_BROWSER_SCREENSHOT_QUALITY JPEG quality 0-100
   AGENT_BROWSER_SCREENSHOT_FORMAT Screenshot format: png, jpeg
+  AI_GATEWAY_URL                 Vercel AI Gateway base URL (default: https://ai-gateway.vercel.sh)
+  AI_GATEWAY_API_KEY             API key for the AI Gateway (enables dashboard AI chat)
+  AI_GATEWAY_MODEL               Default AI model (default: anthropic/claude-sonnet-4.6)
 
 Install:
   npm install -g agent-browser           # npm
@@ -2928,7 +2938,7 @@ Examples:
   agent-browser get text @e1
   agent-browser screenshot --full
   agent-browser screenshot --annotate    # Labeled screenshot for vision models
-  agent-browser wait --load networkidle  # Wait for slow pages to load
+  agent-browser wait 2000               # Wait for slow pages to settle
   agent-browser --cdp 9222 snapshot      # Connect via CDP port
   agent-browser --auto-connect snapshot  # Auto-discover running Chrome
   agent-browser stream enable            # Start runtime streaming on an auto-selected port
@@ -2942,9 +2952,9 @@ Examples:
 Command Chaining:
   Chain commands with && in a single shell call (browser persists via daemon):
 
-  agent-browser open example.com && agent-browser wait --load networkidle && agent-browser snapshot -i
+  agent-browser open example.com && agent-browser snapshot -i
   agent-browser fill @e1 "user@example.com" && agent-browser fill @e2 "pass" && agent-browser click @e3
-  agent-browser open example.com && agent-browser wait --load networkidle && agent-browser screenshot page.png
+  agent-browser open example.com && agent-browser screenshot
 
 iOS Simulator (requires Xcode and Appium):
   agent-browser -p ios open example.com                    # Use default iPhone

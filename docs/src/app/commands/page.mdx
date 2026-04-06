@@ -394,18 +394,22 @@ agent-browser reload                  # Reload page
 
 ## Batch execution
 
-Execute multiple commands in a single invocation by piping a JSON array of string arrays to `batch`:
+Execute multiple commands in a single invocation. Commands can be passed as quoted arguments or piped as JSON via stdin.
 
 ```bash
+# Argument mode: each quoted argument is a full command
+agent-browser batch "open https://example.com" "snapshot -i" "screenshot"
+
+# With --bail to stop on first error
+agent-browser batch --bail "open https://example.com" "click @e1" "screenshot"
+
+# Stdin mode: pipe commands as JSON
 echo '[
   ["open", "https://example.com"],
   ["snapshot", "-i"],
   ["click", "@e1"],
   ["screenshot", "result.png"]
 ]' | agent-browser batch --json
-
-# Stop on first error
-agent-browser batch --bail < commands.json
 ```
 
 <table>
