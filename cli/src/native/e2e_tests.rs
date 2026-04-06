@@ -3063,12 +3063,17 @@ async fn start_delayed_login_server(
       setTimeout(() => {{
         const root = document.getElementById('root');
         root.innerHTML = `
-          <form id="login-form" onsubmit="event.preventDefault(); window.__submitted = true;">
+          <form id="login-form">
             <input type="email" name="email" />
             <input type="password" name="password" />
             <button type="submit">Sign in</button>
           </form>
         `;
+        document.getElementById('login-form').addEventListener('submit', function(e) {{
+          e.preventDefault();
+          e.stopPropagation();
+          window.__submitted = true;
+        }});
       }}, {render_delay_ms});
     </script>
   </body>
@@ -3865,13 +3870,15 @@ async fn e2e_relaunch_on_options_change() {
         "identical options must reuse the browser"
     );
 
-    // Third launch — different options (extensions added) → must relaunch, not reuse.
+    // Third launch — different options (userAgent changed) → must relaunch, not reuse.
+    // We use userAgent instead of extensions because extensions force headed mode,
+    // which requires a display server and fails in headless CI environments.
     let resp = execute_command(
         &json!({
             "id": "3",
             "action": "launch",
             "headless": true,
-            "extensions": ["/tmp/fake-extension"]
+            "userAgent": "agent-browser-test/1.0"
         }),
         &mut state,
     )

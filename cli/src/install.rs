@@ -1029,7 +1029,9 @@ mod tests {
         // The new code should include the root cause (connection refused)
         // not just the vague "error sending request for url"
         assert!(
-            err.contains("Connection refused") || err.contains("connection refused"),
+            err.contains("Connection refused")
+                || err.contains("connection refused")
+                || err.contains("actively refused it"),
             "expected 'connection refused' in error, got: {}",
             err
         );
