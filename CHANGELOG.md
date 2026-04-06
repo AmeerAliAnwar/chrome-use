@@ -1,8 +1,19 @@
 # agent-browser
 
-## 0.25.0
+## 0.25.1
 
 <!-- release:start -->
+### Improvements
+
+- **Embedded dashboard** - The observability dashboard is now bundled directly into the CLI binary using `rust-embed`, eliminating the need for `dashboard install`. The dashboard is available immediately after installing agent-browser (#1169)
+
+### Contributors
+
+- @ctate
+<!-- release:end -->
+
+## 0.25.0
+
 ### New Features
 
 - **AI chat command** - Added `chat` command for AI-powered browser automation. Supports single-shot mode (`chat "open google.com"`) and an interactive REPL. The AI agent can execute any agent-browser command via tool calls. Requires `AI_GATEWAY_API_KEY`. Configure the model with `--model` or `AI_GATEWAY_MODEL` (#1160, #1163)
@@ -26,7 +37,6 @@
 - @ctate
 - @jin-2-kakaoent
 - @hyunjinee
-<!-- release:end -->
 
 ## 0.24.1
 
