@@ -974,6 +974,39 @@ impl BrowserManager {
                 Some(session_id),
             )
             .await?;
+
+        // Screencast captures the actual content area, not the emulated CSS
+        // viewport, so resize the content area to match.
+        if let Ok(target_id) = self.active_target_id() {
+            if let Ok(window_info) = self
+                .client
+                .send_command(
+                    "Browser.getWindowForTarget",
+                    Some(json!({ "targetId": target_id })),
+                    None,
+                )
+                .await
+            {
+                if let Some(window_id) = window_info.get("windowId").and_then(|v| v.as_i64()) {
+                    if let Err(e) = self
+                        .client
+                        .send_command(
+                            "Browser.setContentsSize",
+                            Some(json!({
+                                "windowId": window_id,
+                                "width": width,
+                                "height": height,
+                            })),
+                            None,
+                        )
+                        .await
+                    {
+                        eprintln!("Browser.setContentsSize failed (experimental CDP): {e}");
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 

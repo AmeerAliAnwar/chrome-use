@@ -1491,7 +1491,13 @@ async fn connect_auto_with_fresh_tab() -> Result<BrowserManager, String> {
 }
 
 async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
-    let options = launch_options_from_env();
+    let mut options = launch_options_from_env();
+
+    // Use the stream server's viewport dimensions for --window-size so the
+    // content area matches the desired viewport from the start.
+    if let Some(ref server) = state.stream_server {
+        options.viewport_size = Some(server.viewport().await);
+    }
     let engine = env::var("AGENT_BROWSER_ENGINE").ok();
 
     // Store proxy credentials for Fetch.authRequired handling
@@ -1636,6 +1642,7 @@ fn launch_options_from_env() -> LaunchOptions {
             .unwrap_or(false),
         color_scheme: env::var("AGENT_BROWSER_COLOR_SCHEME").ok(),
         download_path: env::var("AGENT_BROWSER_DOWNLOAD_PATH").ok(),
+        viewport_size: None,
         use_real_keychain: false,
     }
 }
@@ -1744,6 +1751,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             .get("downloadPath")
             .and_then(|v| v.as_str())
             .map(String::from),
+        viewport_size: None,
         use_real_keychain: false,
     };
 
