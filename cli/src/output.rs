@@ -2712,6 +2712,40 @@ Examples:
 "##
         }
 
+        "skills" => {
+            r##"
+agent-browser skills - List and retrieve bundled skill content
+
+Usage: agent-browser skills [subcommand] [options]
+
+Subcommands:
+  list                       List all available skills (default)
+  get <name> [name...]       Output a skill's full content
+  get <name> --full          Include references and templates
+  get --all                  Output every skill
+  path [name]                Print filesystem path to skill directory
+
+Options:
+  --json                     Output as JSON
+
+The skills command serves bundled skill content that always matches the
+installed CLI version. Agents should use this to get current instructions
+rather than relying on cached copies.
+
+Examples:
+  agent-browser skills
+  agent-browser skills list
+  agent-browser skills get agent-browser
+  agent-browser skills get electron --full
+  agent-browser skills get --all
+  agent-browser skills path agent-browser
+  agent-browser skills list --json
+
+Environment:
+  AGENT_BROWSER_SKILLS_DIR   Override the skills directory path
+"##
+        }
+
         _ => return false,
     };
     println!("{}", help.trim());
@@ -2843,6 +2877,12 @@ Setup:
   upgrade                    Upgrade to the latest version
   dashboard start            Start the observability dashboard
   profiles                   List available Chrome profiles
+
+Skills:
+  skills [list]              List available skills
+  skills get <name> [--full] Get skill content (--full includes references)
+  skills get --all           Get all skill content
+  skills path [name]         Print skill directory path
 
 Snapshot Options:
   -i, --interactive          Only interactive elements
