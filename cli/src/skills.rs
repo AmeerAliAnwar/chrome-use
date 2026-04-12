@@ -12,36 +12,35 @@ struct SkillInfo {
     dir: PathBuf,
 }
 
-/// Locate the `skills/` directory bundled with the installation.
+/// Skill content is split across two directories:
+/// - `skills/`     — the bootstrap skill (discoverable by npx skills add)
+/// - `skill-data/` — specialized skills (only served by the CLI)
+///
+/// Both are shipped in the npm package and searched by `discover_skills`.
+const SKILL_DIRS: &[&str] = &["skills", "skill-data"];
+
+/// Locate the package root that contains the skill directories.
 ///
 /// Resolution order:
-/// 1. AGENT_BROWSER_SKILLS_DIR env var
-/// 2. ../skills/ relative to the executable (npm installs: binary is in bin/)
+/// 1. AGENT_BROWSER_SKILLS_DIR env var (points directly at a single directory)
+/// 2. ../  relative to the executable (npm installs: binary is in bin/)
 /// 3. Walk up from the executable to find a project root with skills/
 ///    (dev builds where binary is in target/debug/ or target/release/)
-fn find_skills_dir() -> Option<PathBuf> {
-    if let Ok(dir) = env::var("AGENT_BROWSER_SKILLS_DIR") {
-        let p = PathBuf::from(dir);
-        if p.is_dir() {
-            return Some(p);
-        }
-    }
-
+fn find_package_root() -> Option<PathBuf> {
     if let Ok(exe) = env::current_exe() {
         let exe = exe.canonicalize().unwrap_or(exe);
         if let Some(parent) = exe.parent() {
-            // npm install layout: bin/agent-browser-* -> ../skills/
-            let candidate = parent.join("..").join("skills");
-            if candidate.is_dir() {
-                return Some(candidate);
+            // npm install layout: bin/agent-browser-* -> ../
+            let candidate = parent.join("..");
+            if candidate.join("skills").is_dir() {
+                return Some(candidate.canonicalize().unwrap_or(candidate));
             }
 
             // dev build layout: walk up from target/debug/ or target/release/
             let mut dir = parent;
             loop {
-                let candidate = dir.join("skills");
-                if candidate.is_dir() {
-                    return Some(candidate);
+                if dir.join("skills").is_dir() {
+                    return Some(dir.to_path_buf());
                 }
                 match dir.parent() {
                     Some(p) => dir = p,
@@ -52,6 +51,27 @@ fn find_skills_dir() -> Option<PathBuf> {
     }
 
     None
+}
+
+/// Collect all skill directories to search, respecting the env var override.
+fn find_skills_dirs() -> Vec<PathBuf> {
+    // Env var override: single directory, used as-is
+    if let Ok(dir) = env::var("AGENT_BROWSER_SKILLS_DIR") {
+        let p = PathBuf::from(dir);
+        if p.is_dir() {
+            return vec![p];
+        }
+    }
+
+    let Some(root) = find_package_root() else {
+        return vec![];
+    };
+
+    SKILL_DIRS
+        .iter()
+        .map(|d| root.join(d))
+        .filter(|p| p.is_dir())
+        .collect()
 }
 
 /// Parse YAML frontmatter from a SKILL.md file. Returns (name, description).
@@ -91,33 +111,36 @@ fn parse_frontmatter(content: &str) -> Option<(String, String)> {
     Some((name?, description.unwrap_or_default()))
 }
 
-/// Discover all skills in the skills directory.
-fn discover_skills(skills_dir: &Path) -> Vec<SkillInfo> {
+/// Discover all skills across the given directories.
+fn discover_skills(dirs: &[PathBuf]) -> Vec<SkillInfo> {
     let mut skills = Vec::new();
-    let entries = match fs::read_dir(skills_dir) {
-        Ok(e) => e,
-        Err(_) => return skills,
-    };
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let skill_md = path.join("SKILL.md");
-        if !skill_md.exists() {
-            continue;
-        }
-        let content = match fs::read_to_string(&skill_md) {
-            Ok(c) => c,
+    for skills_dir in dirs {
+        let entries = match fs::read_dir(skills_dir) {
+            Ok(e) => e,
             Err(_) => continue,
         };
-        if let Some((name, description)) = parse_frontmatter(&content) {
-            skills.push(SkillInfo {
-                name,
-                description,
-                dir: path,
-            });
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let skill_md = path.join("SKILL.md");
+            if !skill_md.exists() {
+                continue;
+            }
+            let content = match fs::read_to_string(&skill_md) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            if let Some((name, description)) = parse_frontmatter(&content) {
+                skills.push(SkillInfo {
+                    name,
+                    description,
+                    dir: path,
+                });
+            }
         }
     }
 
@@ -174,8 +197,8 @@ fn collect_supplementary_files(skill_dir: &Path) -> Vec<(String, String)> {
     files
 }
 
-fn run_list(skills_dir: &Path, json_mode: bool) {
-    let skills = discover_skills(skills_dir);
+fn run_list(skills_dirs: &[PathBuf], json_mode: bool) {
+    let skills = discover_skills(skills_dirs);
     if skills.is_empty() {
         if json_mode {
             println!(
@@ -215,8 +238,8 @@ fn run_list(skills_dir: &Path, json_mode: bool) {
     }
 }
 
-fn run_get(skills_dir: &Path, names: &[String], get_all: bool, full: bool, json_mode: bool) {
-    let all_skills = discover_skills(skills_dir);
+fn run_get(skills_dirs: &[PathBuf], names: &[String], get_all: bool, full: bool, json_mode: bool) {
+    let all_skills = discover_skills(skills_dirs);
 
     let targets: Vec<&SkillInfo> = if get_all {
         all_skills.iter().collect()
@@ -325,10 +348,10 @@ fn run_get(skills_dir: &Path, names: &[String], get_all: bool, full: bool, json_
     }
 }
 
-fn run_path(skills_dir: &Path, name: Option<&str>, json_mode: bool) {
+fn run_path(skills_dirs: &[PathBuf], name: Option<&str>, json_mode: bool) {
     match name {
         Some(name) => {
-            let all_skills = discover_skills(skills_dir);
+            let all_skills = discover_skills(skills_dirs);
             match all_skills.iter().find(|s| s.name == name) {
                 Some(s) => {
                     let path = s.dir.to_string_lossy().to_string();
@@ -363,50 +386,53 @@ fn run_path(skills_dir: &Path, name: Option<&str>, json_mode: bool) {
             }
         }
         None => {
-            let path = skills_dir.to_string_lossy().to_string();
+            let paths: Vec<String> = skills_dirs
+                .iter()
+                .map(|d| d.to_string_lossy().to_string())
+                .collect();
             if json_mode {
                 println!(
                     "{}",
                     serde_json::to_string(&json!({
                         "success": true,
-                        "data": { "path": path },
+                        "data": { "paths": paths },
                     }))
                     .unwrap_or_default()
                 );
             } else {
-                println!("{}", path);
+                for p in &paths {
+                    println!("{}", p);
+                }
             }
         }
     }
 }
 
 pub fn run_skills(args: &[String], json_mode: bool) {
-    let skills_dir = match find_skills_dir() {
-        Some(d) => d.canonicalize().unwrap_or(d),
-        None => {
-            if json_mode {
-                println!(
-                    "{}",
-                    serde_json::to_string(&json!({
-                        "success": false,
-                        "error": "Skills directory not found. Set AGENT_BROWSER_SKILLS_DIR or reinstall via npm.",
-                    }))
-                    .unwrap_or_default()
-                );
-            } else {
-                eprintln!(
-                    "{} Skills directory not found. Set AGENT_BROWSER_SKILLS_DIR or reinstall via npm.",
-                    color::error_indicator()
-                );
-            }
-            exit(1);
+    let skills_dirs = find_skills_dirs();
+    if skills_dirs.is_empty() {
+        if json_mode {
+            println!(
+                "{}",
+                serde_json::to_string(&json!({
+                    "success": false,
+                    "error": "Skills directory not found. Set AGENT_BROWSER_SKILLS_DIR or reinstall via npm.",
+                }))
+                .unwrap_or_default()
+            );
+        } else {
+            eprintln!(
+                "{} Skills directory not found. Set AGENT_BROWSER_SKILLS_DIR or reinstall via npm.",
+                color::error_indicator()
+            );
         }
-    };
+        exit(1);
+    }
 
     let subcommand = args.get(1).map(|s| s.as_str());
 
     match subcommand {
-        None | Some("list") => run_list(&skills_dir, json_mode),
+        None | Some("list") => run_list(&skills_dirs, json_mode),
         Some("get") => {
             let names: Vec<String> = args[2..]
                 .iter()
@@ -415,11 +441,11 @@ pub fn run_skills(args: &[String], json_mode: bool) {
                 .collect();
             let full = args[2..].iter().any(|a| a == "--full");
             let get_all = args[2..].iter().any(|a| a == "--all");
-            run_get(&skills_dir, &names, get_all, full, json_mode);
+            run_get(&skills_dirs, &names, get_all, full, json_mode);
         }
         Some("path") => {
             let name = args.get(2).map(|s| s.as_str());
-            run_path(&skills_dir, name, json_mode);
+            run_path(&skills_dirs, name, json_mode);
         }
         Some(unknown) => {
             if json_mode {
@@ -491,7 +517,7 @@ mod tests {
     }
 
     #[test]
-    fn test_discover_skills() {
+    fn test_discover_skills_single_dir() {
         let tmp = tempfile::tempdir().unwrap();
         create_test_skill(tmp.path(), "alpha", "Alpha skill");
         create_test_skill(tmp.path(), "beta", "Beta skill");
@@ -500,10 +526,27 @@ mod tests {
         fs::create_dir_all(tmp.path().join("not-a-skill")).unwrap();
         fs::write(tmp.path().join("not-a-skill").join("README.md"), "hi").unwrap();
 
-        let skills = discover_skills(tmp.path());
+        let dirs = vec![tmp.path().to_path_buf()];
+        let skills = discover_skills(&dirs);
         assert_eq!(skills.len(), 2);
         assert_eq!(skills[0].name, "alpha");
         assert_eq!(skills[1].name, "beta");
+    }
+
+    #[test]
+    fn test_discover_skills_multiple_dirs() {
+        let tmp1 = tempfile::tempdir().unwrap();
+        let tmp2 = tempfile::tempdir().unwrap();
+        create_test_skill(tmp1.path(), "alpha", "Alpha skill");
+        create_test_skill(tmp2.path(), "beta", "Beta skill");
+        create_test_skill(tmp2.path(), "gamma", "Gamma skill");
+
+        let dirs = vec![tmp1.path().to_path_buf(), tmp2.path().to_path_buf()];
+        let skills = discover_skills(&dirs);
+        assert_eq!(skills.len(), 3);
+        assert_eq!(skills[0].name, "alpha");
+        assert_eq!(skills[1].name, "beta");
+        assert_eq!(skills[2].name, "gamma");
     }
 
     #[test]
