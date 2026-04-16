@@ -290,11 +290,22 @@ agent-browser network har stop [output.har]    # Stop and save HAR (temp path if
 ### Tabs & Windows
 
 ```bash
-agent-browser tab                     # List tabs
+agent-browser tab                     # List tabs (shows stable `tabId` for each)
 agent-browser tab new [url]           # New tab (optionally with URL)
-agent-browser tab <n>                 # Switch to tab n
-agent-browser tab close [n]           # Close tab
+agent-browser tab <id>                # Switch to tab by id
+agent-browser tab close [id]          # Close tab by id (defaults to active tab)
 agent-browser window new              # New window
+```
+
+Tab IDs are stable and never reused within a session, so agents can keep
+referring to the same tab across commands even if other tabs are opened or
+closed in between. To run a single command against a specific tab without
+changing the active tab, use the global `--tab <id>` flag:
+
+```bash
+agent-browser tab new https://docs.example.com   # opens and activates tab 2
+agent-browser --tab 1 snapshot                   # peek at tab 1 (tab 2 stays active)
+agent-browser click "#submit"                    # runs on tab 2 as expected
 ```
 
 ### Frames
@@ -610,6 +621,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 |--------|-------------|
 | `--session <name>` | Use isolated session (or `AGENT_BROWSER_SESSION` env) |
 | `--session-name <name>` | Auto-save/restore session state (or `AGENT_BROWSER_SESSION_NAME` env) |
+| `--tab <id>` | Target a specific tab by stable `tabId` for this command only; the active tab is restored afterward |
 | `--profile <name\|path>` | Chrome profile name or persistent directory path (or `AGENT_BROWSER_PROFILE` env) |
 | `--state <path>` | Load storage state from JSON file (or `AGENT_BROWSER_STATE` env) |
 | `--headers <json>` | Set HTTP headers scoped to the URL's origin |

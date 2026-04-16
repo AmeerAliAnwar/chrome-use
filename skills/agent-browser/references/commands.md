@@ -166,12 +166,22 @@ agent-browser network requests --filter api    # Filter requests
 ## Tabs and Windows
 
 ```bash
-agent-browser tab                 # List tabs
+agent-browser tab                 # List tabs (each row includes a stable tabId)
 agent-browser tab new [url]       # New tab
-agent-browser tab 2               # Switch to tab by index
+agent-browser tab 2               # Switch to tab by tabId
 agent-browser tab close           # Close current tab
-agent-browser tab close 2         # Close tab by index
+agent-browser tab close 2         # Close tab by tabId
 agent-browser window new          # New window
+```
+
+Tab IDs are stable and never reused within a session, so the same `tabId` keeps
+referring to the same tab even when other tabs are opened or closed. For a
+non-intrusive peek at another tab, use the global `--tab <id>` flag; the
+active tab is restored after the command:
+
+```bash
+agent-browser --tab 1 snapshot    # snapshot tab 1 without switching
+agent-browser --tab 3 click @e1   # click @e1 on tab 3 and return
 ```
 
 ## Frames

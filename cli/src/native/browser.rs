@@ -392,7 +392,9 @@ impl BrowserManager {
         };
 
         if direct_page {
+            let tab_id = manager.assign_tab_id();
             manager.pages.push(PageInfo {
+                tab_id,
                 target_id: "provider-page".to_string(),
                 session_id: String::new(),
                 url: String::new(),
@@ -1284,6 +1286,16 @@ impl BrowserManager {
         self.pages.len()
     }
 
+    /// Returns the stable `tab_id` of the currently active page, if any.
+    pub fn active_tab_id(&self) -> Option<u32> {
+        self.pages.get(self.active_page_index).map(|p| p.tab_id)
+    }
+
+    /// Returns true if a tab with the given stable `tab_id` is still open.
+    pub fn has_tab_id(&self, tab_id: u32) -> bool {
+        self.pages.iter().any(|p| p.tab_id == tab_id)
+    }
+
     pub fn pages_list(&self) -> Vec<PageInfo> {
         self.pages.clone()
     }
@@ -1576,6 +1588,7 @@ mod tests {
     #[test]
     fn test_update_page_target_info_in_pages_updates_existing_page() {
         let mut pages = vec![PageInfo {
+            tab_id: 1,
             target_id: "popup-1".to_string(),
             session_id: "session-1".to_string(),
             url: String::new(),

@@ -1275,19 +1275,43 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         );
     }
 
-    // Pre-dispatch: if tabId is set on a non-tab command, switch to that tab first
-    if !matches!(
+    // Pre-dispatch: if `tabId` is set on a non-tab command, temporarily switch
+    // to that tab for the duration of the command and restore the original
+    // active tab after. This lets `--tab N <cmd>` target a specific tab
+    // without stealing the user's active-tab context.
+    //
+    // We save the current tab's stable `tab_id` (not its array index) so a
+    // tab close during the scoped command doesn't leave us restoring to a
+    // shifted position. If the saved tab was closed, we skip the restore.
+    let restore_tab_id: Option<u32> = if !matches!(
         action,
         "tab_list" | "tab_new" | "tab_switch" | "tab_close" | "launch" | "close"
     ) {
-        if let Some(tab_id) = cmd.get("tabId").and_then(|v| v.as_u64()) {
-            if let Some(ref mut mgr) = state.browser {
-                if let Err(e) = mgr.tab_switch_by_id(tab_id as u32).await {
-                    return error_response(&id, &e);
+        if let Some(target_tab_id) = cmd.get("tabId").and_then(|v| v.as_u64()) {
+            let target_tab_id = target_tab_id as u32;
+            let current_tab_id = state.browser.as_ref().and_then(|mgr| mgr.active_tab_id());
+            if current_tab_id == Some(target_tab_id) {
+                // Already on the target tab; nothing to do.
+                None
+            } else {
+                // Clear per-tab daemon state before switching so refs from the
+                // outer tab can't resolve against the target tab's DOM.
+                state.ref_map.clear();
+                state.iframe_sessions.clear();
+                state.active_frame_id = None;
+                if let Some(ref mut mgr) = state.browser {
+                    if let Err(e) = mgr.tab_switch_by_id(target_tab_id).await {
+                        return error_response(&id, &e);
+                    }
                 }
+                current_tab_id
             }
+        } else {
+            None
         }
-    }
+    } else {
+        None
+    };
 
     let result = match action {
         "launch" => handle_launch(cmd, state).await,
@@ -1446,6 +1470,24 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "mouseup" => handle_mouseup(cmd, state).await,
         _ => Err(format!("Not yet implemented: {}", action)),
     };
+
+    // Post-dispatch: if we temporarily switched tabs for this command, restore
+    // the original active tab. Skip silently if the tab no longer exists (e.g.
+    // the scoped command closed it).
+    if let Some(restore_tab_id) = restore_tab_id {
+        let still_exists = state
+            .browser
+            .as_ref()
+            .is_some_and(|mgr| mgr.has_tab_id(restore_tab_id));
+        if still_exists {
+            state.ref_map.clear();
+            state.iframe_sessions.clear();
+            state.active_frame_id = None;
+            if let Some(ref mut mgr) = state.browser {
+                let _ = mgr.tab_switch_by_id(restore_tab_id).await;
+            }
+        }
+    }
 
     let mut resp = match result {
         Ok(data) => success_response(&id, data),
