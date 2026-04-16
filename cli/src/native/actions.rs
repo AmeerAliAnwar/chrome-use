@@ -169,8 +169,12 @@ struct DrainedEvents {
 /// Compute a hash of the [`LaunchOptions`] fields that require a browser
 /// relaunch when changed (baked into the Chrome process at startup).
 ///
-/// Fields NOT hashed (adjustable at runtime via CDP without relaunch):
-/// ignore_https_errors, color_scheme, download_path, storage_state
+/// Fields NOT hashed:
+/// ignore_https_errors, color_scheme, download_path
+///
+/// `storage_state` is handled separately in `handle_launch()`: explicit
+/// `storageState` launches always require a clean local browser so the loaded
+/// state replaces the prior session instead of merging into it.
 fn launch_hash(opts: &LaunchOptions) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -1504,6 +1508,9 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
     }
     let engine = env::var("AGENT_BROWSER_ENGINE").ok();
 
+    // Extract storage_state before options is moved into BrowserManager::launch.
+    let storage_state_path = options.storage_state.clone();
+
     // Store proxy credentials for Fetch.authRequired handling
     let has_proxy_auth = options.proxy_username.is_some();
     if has_proxy_auth {
@@ -1527,6 +1534,7 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
         state.start_dialog_handler();
         state.update_stream_client().await;
         try_auto_restore_state(state).await;
+        try_load_storage_state(state, &storage_state_path).await;
         return Ok(());
     }
 
@@ -1538,6 +1546,7 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
         state.start_dialog_handler();
         state.update_stream_client().await;
         try_auto_restore_state(state).await;
+        try_load_storage_state(state, &storage_state_path).await;
         return Ok(());
     }
 
@@ -1572,6 +1581,7 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
                     state.update_stream_client().await;
                     write_provider_file(&state.session_id, &p);
                     try_auto_restore_state(state).await;
+                    try_load_storage_state(state, &storage_state_path).await;
                     return Ok(());
                 }
                 Err(e) => {
@@ -1604,6 +1614,7 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
     }
 
     try_auto_restore_state(state).await;
+    try_load_storage_state(state, &storage_state_path).await;
     Ok(())
 }
 
@@ -1665,6 +1676,64 @@ async fn try_auto_restore_state(state: &mut DaemonState) {
     }
 }
 
+/// Load storage state if a path is configured.
+///
+/// Explicit launch should surface this error. Best-effort callers can ignore
+/// the returned `Result` and keep their previous behavior.
+async fn load_storage_state(state: &DaemonState, path: &Option<String>) -> Result<(), String> {
+    if let Some(ref path) = path {
+        if let Some(ref mgr) = state.browser {
+            if let Ok(session_id) = mgr.active_session_id() {
+                state::load_state(&mgr.client, session_id, path).await?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn rollback_failed_launch(state: &mut DaemonState) -> Result<(), String> {
+    let close_error = if let Some(mut mgr) = state.browser.take() {
+        mgr.close().await.err()
+    } else {
+        None
+    };
+
+    state.launch_hash = None;
+    state.screencasting = false;
+    state.reset_input_state();
+    state.ref_map.clear();
+    state.update_stream_client().await;
+
+    if let Some(err) = close_error {
+        return Err(err);
+    }
+
+    Ok(())
+}
+
+async fn load_storage_state_or_rollback(
+    state: &mut DaemonState,
+    path: &Option<String>,
+) -> Result<(), String> {
+    if let Err(err) = load_storage_state(state, path).await {
+        if let Err(close_err) = rollback_failed_launch(state).await {
+            return Err(format!(
+                "{} (also failed to roll back browser after launch: {})",
+                err, close_err
+            ));
+        }
+        return Err(err);
+    }
+
+    Ok(())
+}
+
+/// Load storage state from AGENT_BROWSER_STATE if set.
+async fn try_load_storage_state(state: &DaemonState, path: &Option<String>) {
+    let _ = load_storage_state(state, path).await;
+}
+
 // ---------------------------------------------------------------------------
 // Phase 1 handlers
 // ---------------------------------------------------------------------------
@@ -1688,6 +1757,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
                 .collect()
         });
     let storage_state = cmd.get("storageState").and_then(|v| v.as_str());
+    let storage_state_owned = storage_state.map(|s| s.to_string());
 
     let launch_options = LaunchOptions {
         headless,
@@ -1768,8 +1838,10 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         let is_external = cdp_url.is_some() || cdp_port.is_some() || auto_connect;
         let was_external = mgr.is_cdp_connection();
         let hash_changed = !is_external && state.launch_hash != Some(new_hash);
+        let storage_state_requires_clean_launch = storage_state_owned.is_some() && !is_external;
         is_external != was_external
             || hash_changed
+            || storage_state_requires_clean_launch
             || mgr.has_process_exited()
             || !mgr.is_connection_alive().await
     } else {
@@ -1786,6 +1858,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             state.update_stream_client().await;
         }
     } else {
+        load_storage_state(state, &storage_state_owned).await?;
         return Ok(json!({ "launched": true, "reused": true }));
     }
     state.ref_map.clear();
@@ -1807,6 +1880,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         state.start_fetch_handler();
         state.start_dialog_handler();
         state.update_stream_client().await;
+        load_storage_state_or_rollback(state, &storage_state_owned).await?;
         return Ok(json!({ "launched": true }));
     }
 
@@ -1817,6 +1891,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         state.start_fetch_handler();
         state.start_dialog_handler();
         state.update_stream_client().await;
+        load_storage_state_or_rollback(state, &storage_state_owned).await?;
         return Ok(json!({ "launched": true }));
     }
 
@@ -1827,6 +1902,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         state.start_fetch_handler();
         state.start_dialog_handler();
         state.update_stream_client().await;
+        load_storage_state_or_rollback(state, &storage_state_owned).await?;
         return Ok(json!({ "launched": true }));
     }
 
@@ -1863,6 +1939,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
                         state.start_dialog_handler();
                         state.update_stream_client().await;
                         write_provider_file(&state.session_id, provider);
+                        load_storage_state_or_rollback(state, &storage_state_owned).await?;
 
                         if let Some(info) = providers::get_agentcore_info() {
                             return Ok(json!({
@@ -1954,6 +2031,11 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             }
         }
     }
+
+    // Load storage state only after Fetch interception is active so replayed
+    // origin navigations go through the same domain and proxy handling as
+    // normal browser traffic.
+    load_storage_state_or_rollback(state, &storage_state_owned).await?;
 
     Ok(json!({ "launched": true }))
 }

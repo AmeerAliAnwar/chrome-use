@@ -46,6 +46,54 @@ fn native_test_fixture_url(name: &str) -> String {
     )
 }
 
+async fn create_storage_state_with_cookie(path: &str, cookie_name: &str, cookie_value: &str) {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({
+            "id": "1",
+            "action": "launch",
+            "headless": true,
+            "args": ["--no-sandbox", "--disable-dev-shm-usage"]
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "cookies_set",
+            "name": cookie_name,
+            "value": cookie_value,
+            "domain": ".example.com",
+            "path": "/",
+            "expires": 2000000000
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "state_save", "path": path }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "5", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 // ---------------------------------------------------------------------------
 // Core: launch, navigate, evaluate, url, title, close
 // ---------------------------------------------------------------------------
@@ -4199,4 +4247,574 @@ async fn e2e_recording_inherits_viewport() {
     let _ = std::fs::remove_file(&rec_path);
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
+}
+
+// ---------------------------------------------------------------------------
+// --state / storageState flag: cookies should be loaded at launch time
+// ---------------------------------------------------------------------------
+
+/// Verify that launching with `storageState` in the launch command restores
+/// cookies that were previously saved with `state_save`.
+///
+/// This is the e2e equivalent of `agent-browser --state ./auth.json open <url>`.
+/// The launch command accepts a `storageState` field that should load the
+/// state file (cookies + localStorage) before the first navigation.
+#[tokio::test]
+#[ignore]
+async fn e2e_state_flag_restores_cookies() {
+    let state_path = std::env::temp_dir()
+        .join(format!(
+            "agent-browser-e2e-state-flag-{}.json",
+            uuid::Uuid::new_v4()
+        ))
+        .to_string_lossy()
+        .to_string();
+
+    // Session 1: launch, set a cookie, save state, close
+    {
+        let mut state = DaemonState::new();
+
+        let resp = execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({
+                "id": "3",
+                "action": "cookies_set",
+                "name": "state_flag_test",
+                "value": "from_state_file",
+                "domain": ".example.com",
+                "path": "/",
+                "expires": 2000000000
+            }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({ "id": "4", "action": "state_save", "path": &state_path }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(&json!({ "id": "5", "action": "close" }), &mut state).await;
+        assert_success(&resp);
+    }
+
+    // Session 2: launch with storageState pointing to saved file, verify
+    // cookies are present before any explicit state_load call.
+    {
+        let mut state = DaemonState::new();
+
+        let resp = execute_command(
+            &json!({
+                "id": "10",
+                "action": "launch",
+                "headless": true,
+                "storageState": &state_path
+            }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({ "id": "11", "action": "navigate", "url": "https://example.com" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp =
+            execute_command(&json!({ "id": "12", "action": "cookies_get" }), &mut state).await;
+        assert_success(&resp);
+        let cookies = get_data(&resp)["cookies"].as_array().unwrap();
+        let found = cookies
+            .iter()
+            .any(|c| c["name"] == "state_flag_test" && c["value"] == "from_state_file");
+        assert!(
+            found,
+            "Cookie from state file should be present after launch with storageState. \
+             Cookies found: {:?}",
+            cookies
+                .iter()
+                .map(|c| c["name"].as_str().unwrap_or("?"))
+                .collect::<Vec<_>>()
+        );
+
+        let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+        assert_success(&resp);
+    }
+
+    let _ = std::fs::remove_file(&state_path);
+}
+
+/// Verify that explicit `launch` surfaces storageState load failures instead
+/// of reporting success with an empty browser state.
+#[tokio::test]
+#[ignore]
+async fn e2e_state_flag_missing_file_fails_launch() {
+    let guard = EnvGuard::new(&["CI"]);
+    guard.set("CI", "1");
+
+    let missing_path = std::env::temp_dir()
+        .join(format!(
+            "agent-browser-e2e-missing-state-{}.json",
+            uuid::Uuid::new_v4()
+        ))
+        .to_string_lossy()
+        .to_string();
+
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({
+            "id": "10",
+            "action": "launch",
+            "headless": true,
+            "args": ["--no-sandbox", "--disable-dev-shm-usage"],
+            "storageState": &missing_path
+        }),
+        &mut state,
+    )
+    .await;
+
+    assert_eq!(resp["success"], false);
+    let error = resp["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("Failed to read state from") || error.contains("storage state"),
+        "Unexpected error for missing storageState file: {}",
+        error
+    );
+    assert!(
+        state.browser.is_none(),
+        "failed storageState launch should roll back the browser"
+    );
+}
+
+/// Repeated launch calls with `storageState` should relaunch a clean browser so
+/// stale cookies do not survive from the previous state file.
+#[tokio::test]
+#[ignore]
+async fn e2e_storage_state_launch_restarts_clean_browser() {
+    let state_one = std::env::temp_dir()
+        .join(format!(
+            "agent-browser-e2e-storage-reuse-1-{}.json",
+            uuid::Uuid::new_v4()
+        ))
+        .to_string_lossy()
+        .to_string();
+    let state_two = std::env::temp_dir()
+        .join(format!(
+            "agent-browser-e2e-storage-reuse-2-{}.json",
+            uuid::Uuid::new_v4()
+        ))
+        .to_string_lossy()
+        .to_string();
+
+    create_storage_state_with_cookie(&state_one, "storage_reload_first", "first").await;
+    create_storage_state_with_cookie(&state_two, "storage_reload_second", "second").await;
+
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({
+            "id": "10",
+            "action": "launch",
+            "headless": true,
+            "args": ["--no-sandbox", "--disable-dev-shm-usage"],
+            "storageState": &state_one
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(
+        get_data(&resp).get("reused").is_none(),
+        "first launch must create the browser"
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "11", "action": "navigate", "url": "https://example.com" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "12", "action": "cookies_get" }), &mut state).await;
+    assert_success(&resp);
+    let cookies = get_data(&resp)["cookies"].as_array().unwrap();
+    assert!(
+        cookies
+            .iter()
+            .any(|c| c["name"] == "storage_reload_first" && c["value"] == "first"),
+        "first storageState should be applied on the initial launch"
+    );
+
+    let resp = execute_command(
+        &json!({
+            "id": "13",
+            "action": "launch",
+            "headless": true,
+            "args": ["--no-sandbox", "--disable-dev-shm-usage"],
+            "storageState": &state_two
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp).get("reused"),
+        None,
+        "storageState launch should start from a clean browser"
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "14", "action": "navigate", "url": "https://example.com" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "15", "action": "cookies_get" }), &mut state).await;
+    assert_success(&resp);
+    let cookies = get_data(&resp)["cookies"].as_array().unwrap();
+    assert!(
+        cookies
+            .iter()
+            .any(|c| c["name"] == "storage_reload_second" && c["value"] == "second"),
+        "second storageState should be applied after relaunch"
+    );
+    assert!(
+        !cookies
+            .iter()
+            .any(|c| c["name"] == "storage_reload_first" && c["value"] == "first"),
+        "stale cookies from the first storageState should not survive relaunch"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+
+    let _ = std::fs::remove_file(&state_one);
+    let _ = std::fs::remove_file(&state_two);
+}
+
+/// Verify that AGENT_BROWSER_STATE env var restores cookies at auto-launch
+/// time (when the browser is lazily launched by a command like `navigate`
+/// rather than an explicit `launch` command).
+#[tokio::test]
+#[ignore]
+async fn e2e_state_env_restores_cookies_on_auto_launch() {
+    let state_path = std::env::temp_dir()
+        .join(format!(
+            "agent-browser-e2e-state-env-{}.json",
+            uuid::Uuid::new_v4()
+        ))
+        .to_string_lossy()
+        .to_string();
+
+    // Session 1: launch, set a cookie, save state, close
+    {
+        let mut state = DaemonState::new();
+
+        let resp = execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({
+                "id": "3",
+                "action": "cookies_set",
+                "name": "env_state_test",
+                "value": "from_env_state",
+                "domain": ".example.com",
+                "path": "/",
+                "expires": 2000000000
+            }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({ "id": "4", "action": "state_save", "path": &state_path }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(&json!({ "id": "5", "action": "close" }), &mut state).await;
+        assert_success(&resp);
+    }
+
+    // Session 2: set AGENT_BROWSER_STATE env var and let auto_launch pick it
+    // up. No explicit `launch` command — just navigate, which triggers
+    // auto_launch internally.
+    {
+        let env = EnvGuard::new(&["AGENT_BROWSER_STATE"]);
+        env.set("AGENT_BROWSER_STATE", &state_path);
+
+        let mut state = DaemonState::new();
+
+        // Navigate without explicit launch — triggers auto_launch
+        let resp = execute_command(
+            &json!({ "id": "10", "action": "navigate", "url": "https://example.com" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp =
+            execute_command(&json!({ "id": "11", "action": "cookies_get" }), &mut state).await;
+        assert_success(&resp);
+        let cookies = get_data(&resp)["cookies"].as_array().unwrap();
+        let found = cookies
+            .iter()
+            .any(|c| c["name"] == "env_state_test" && c["value"] == "from_env_state");
+        assert!(
+            found,
+            "Cookie should be restored via AGENT_BROWSER_STATE env on auto-launch. \
+             Cookies found: {:?}",
+            cookies
+                .iter()
+                .map(|c| c["name"].as_str().unwrap_or("?"))
+                .collect::<Vec<_>>()
+        );
+
+        let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+        assert_success(&resp);
+    }
+
+    let _ = std::fs::remove_file(&state_path);
+}
+
+/// Verify that --session-name auto-restores cookies saved from a prior
+/// session with the same name.
+#[tokio::test]
+#[ignore]
+async fn e2e_session_name_auto_restores_cookies() {
+    let session_name = format!(
+        "e2e-session-name-{}",
+        &uuid::Uuid::new_v4().to_string()[..8]
+    );
+
+    let env = EnvGuard::new(&["AGENT_BROWSER_SESSION_NAME"]);
+    env.set("AGENT_BROWSER_SESSION_NAME", &session_name);
+
+    // Session 1: launch, set a cookie, close (which auto-saves state)
+    {
+        let mut state = DaemonState::new();
+
+        let resp = execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({
+                "id": "3",
+                "action": "cookies_set",
+                "name": "session_name_test",
+                "value": "auto_restored",
+                "domain": ".example.com",
+                "path": "/",
+                "expires": 2000000000
+            }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        // close triggers auto-save when session_name is set
+        let resp = execute_command(&json!({ "id": "5", "action": "close" }), &mut state).await;
+        assert_success(&resp);
+    }
+
+    // Session 2: fresh DaemonState with same session_name. Navigate without
+    // explicit launch — this triggers auto_launch which calls
+    // try_auto_restore_state.
+    //
+    // NOTE: an explicit `launch` command skips auto_launch entirely, so
+    // session-name auto-restore only fires via the auto_launch path.
+    {
+        let mut state = DaemonState::new();
+
+        // Navigate without explicit launch — triggers auto_launch → try_auto_restore_state
+        let resp = execute_command(
+            &json!({ "id": "10", "action": "navigate", "url": "https://example.com" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp =
+            execute_command(&json!({ "id": "12", "action": "cookies_get" }), &mut state).await;
+        assert_success(&resp);
+        let cookies = get_data(&resp)["cookies"].as_array().unwrap();
+        let found = cookies
+            .iter()
+            .any(|c| c["name"] == "session_name_test" && c["value"] == "auto_restored");
+        assert!(
+            found,
+            "Cookie should be auto-restored via --session-name. Cookies found: {:?}",
+            cookies
+                .iter()
+                .map(|c| c["name"].as_str().unwrap_or("?"))
+                .collect::<Vec<_>>()
+        );
+
+        let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+        assert_success(&resp);
+    }
+
+    // Clean up auto-saved state files
+    let sessions_dir = dirs::home_dir()
+        .unwrap()
+        .join(".agent-browser")
+        .join("sessions");
+    if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
+        for entry in entries.flatten() {
+            let fname = entry.file_name().to_string_lossy().to_string();
+            if fname.starts_with(&format!("{}-", session_name)) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
+/// Verify that explicit `state_load` restores cookies into an existing
+/// session (baseline sanity check — this path is known to work).
+#[tokio::test]
+#[ignore]
+async fn e2e_explicit_state_load_restores_cookies() {
+    let state_path = std::env::temp_dir()
+        .join(format!(
+            "agent-browser-e2e-explicit-load-{}.json",
+            uuid::Uuid::new_v4()
+        ))
+        .to_string_lossy()
+        .to_string();
+
+    // Session 1: set cookie, save state
+    {
+        let mut state = DaemonState::new();
+
+        let resp = execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({
+                "id": "3",
+                "action": "cookies_set",
+                "name": "explicit_load_test",
+                "value": "manually_loaded",
+                "domain": ".example.com",
+                "path": "/",
+                "expires": 2000000000
+            }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({ "id": "4", "action": "state_save", "path": &state_path }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(&json!({ "id": "5", "action": "close" }), &mut state).await;
+        assert_success(&resp);
+    }
+
+    // Session 2: launch clean, then explicitly load state
+    {
+        let mut state = DaemonState::new();
+
+        let resp = execute_command(
+            &json!({ "id": "10", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({ "id": "11", "action": "state_load", "path": &state_path }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({ "id": "12", "action": "navigate", "url": "https://example.com" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp =
+            execute_command(&json!({ "id": "13", "action": "cookies_get" }), &mut state).await;
+        assert_success(&resp);
+        let cookies = get_data(&resp)["cookies"].as_array().unwrap();
+        let found = cookies
+            .iter()
+            .any(|c| c["name"] == "explicit_load_test" && c["value"] == "manually_loaded");
+        assert!(
+            found,
+            "Cookie should be present after explicit state_load. Cookies found: {:?}",
+            cookies
+                .iter()
+                .map(|c| c["name"].as_str().unwrap_or("?"))
+                .collect::<Vec<_>>()
+        );
+
+        let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+        assert_success(&resp);
+    }
+
+    let _ = std::fs::remove_file(&state_path);
 }
