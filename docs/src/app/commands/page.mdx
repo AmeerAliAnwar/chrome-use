@@ -188,27 +188,48 @@ agent-browser network har stop [output.har]    # Stop and save HAR (temp path if
 ## Tabs & frames
 
 ```bash
-agent-browser tab                     # List tabs (each row includes a stable tabId)
-agent-browser tab new [url]           # New tab
-agent-browser tab <id>                # Switch to tab by tabId
-agent-browser tab close [id]          # Close tab by tabId (defaults to active)
-agent-browser window new              # Open new browser window
-agent-browser frame <sel>             # Switch to iframe by CSS selector
-agent-browser frame @e3               # Switch to iframe by element ref
-agent-browser frame main              # Back to main frame
+agent-browser tab                              # List tabs (each row shows tabId and label)
+agent-browser tab new [url]                    # New tab
+agent-browser tab new --label docs [url]       # New tab with a user-assigned label
+agent-browser tab <t<N>|label>                 # Switch to a tab by id or label
+agent-browser tab close [t<N>|label]           # Close a tab (defaults to active)
+agent-browser window new                       # Open new browser window
+agent-browser frame <sel>                      # Switch to iframe by CSS selector
+agent-browser frame @e3                        # Switch to iframe by element ref
+agent-browser frame main                       # Back to main frame
 ```
 
-### Stable tab IDs and `--tab`
+### Stable tab ids and labels
 
-Tab IDs are assigned on creation and never reused within a session, so a given
-`tabId` keeps pointing at the same tab even when other tabs are opened or
-closed. The global `--tab <id>` flag runs a single command against a specific
-tab without changing the active tab:
+Tab ids are stable strings of the form `t1`, `t2`, `t3`. They're never reused
+within a session, so `t2` keeps pointing at the same tab even as other tabs
+are opened or closed. The `t` prefix mirrors the `@e1` element-ref convention
+and is not interchangeable with positional integers — `agent-browser tab 2`
+errors with a teaching message; use `t2`.
+
+You can also assign a memorable label (`docs`, `app`, `admin`) at tab-creation
+time and use it anywhere an id is accepted:
 
 ```bash
-agent-browser tab new https://docs.example.com   # opens and activates tab 2
-agent-browser --tab 1 snapshot                   # peek at tab 1; tab 2 stays active
-agent-browser click "#submit"                    # runs on tab 2 as expected
+agent-browser tab new --label docs https://docs.example.com
+agent-browser tab docs          # switch to the docs tab
+agent-browser snapshot          # populate refs for docs
+agent-browser click @e3         # click uses docs's refs
+agent-browser tab close docs    # close by label
+```
+
+Labels are never auto-generated and never rewritten on navigation — an agent
+that names a tab `docs` keeps that name until the tab is closed. Labels are
+unique within a session; creating a second tab with an existing label
+errors.
+
+Refs (`@e1`, etc.) are scoped to the tab that was active when the snapshot
+ran, so switch tabs first, then snapshot and interact:
+
+```bash
+agent-browser tab docs          # switch first
+agent-browser snapshot          # refs for docs
+agent-browser click @e3         # uses docs's refs
 ```
 
 ### Iframe support

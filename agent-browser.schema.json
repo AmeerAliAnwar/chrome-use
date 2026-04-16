@@ -24,11 +24,6 @@
       "type": "string",
       "description": "Auto-save/load state persistence name."
     },
-    "tab": {
-      "type": "integer",
-      "minimum": 1,
-      "description": "Target a specific tab by stable tabId for this command only. The active tab is restored afterward."
-    },
     "executablePath": {
       "type": "string",
       "description": "Path to a custom browser executable."

@@ -290,22 +290,30 @@ agent-browser network har stop [output.har]    # Stop and save HAR (temp path if
 ### Tabs & Windows
 
 ```bash
-agent-browser tab                     # List tabs (shows stable `tabId` for each)
-agent-browser tab new [url]           # New tab (optionally with URL)
-agent-browser tab <id>                # Switch to tab by id
-agent-browser tab close [id]          # Close tab by id (defaults to active tab)
-agent-browser window new              # New window
+agent-browser tab                              # List tabs (shows `tabId` and optional label)
+agent-browser tab new [url]                    # New tab (optionally with URL)
+agent-browser tab new --label docs [url]       # New tab with a user-assigned label
+agent-browser tab <t<N>|label>                 # Switch to a tab by id or label
+agent-browser tab close [t<N>|label]           # Close a tab (defaults to active)
+agent-browser window new                       # New window
 ```
 
-Tab IDs are stable and never reused within a session, so agents can keep
-referring to the same tab across commands even if other tabs are opened or
-closed in between. To run a single command against a specific tab without
-changing the active tab, use the global `--tab <id>` flag:
+Tab ids are stable strings of the form `t1`, `t2`, `t3`. They're never reused
+within a session, so scripts and agents can keep referring to the same tab
+even after other tabs are opened or closed. Positional integers like `tab 2`
+are **not** accepted; the `t` prefix disambiguates handles from indices and
+mirrors the `@e1` convention used for element refs.
+
+You can also assign a memorable label (`docs`, `app`, `admin`) and use it
+interchangeably with the id. Labels are never auto-generated and never
+rewritten on navigation — they're yours to name and keep:
 
 ```bash
-agent-browser tab new https://docs.example.com   # opens and activates tab 2
-agent-browser --tab 1 snapshot                   # peek at tab 1 (tab 2 stays active)
-agent-browser click "#submit"                    # runs on tab 2 as expected
+agent-browser tab new --label docs https://docs.example.com
+agent-browser tab docs               # switch to the docs tab
+agent-browser snapshot               # populate refs for docs
+agent-browser click @e3              # click uses docs's refs
+agent-browser tab close docs         # close by label
 ```
 
 ### Frames
@@ -621,7 +629,6 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 |--------|-------------|
 | `--session <name>` | Use isolated session (or `AGENT_BROWSER_SESSION` env) |
 | `--session-name <name>` | Auto-save/restore session state (or `AGENT_BROWSER_SESSION_NAME` env) |
-| `--tab <id>` | Target a specific tab by stable `tabId` for this command only; the active tab is restored afterward |
 | `--profile <name\|path>` | Chrome profile name or persistent directory path (or `AGENT_BROWSER_PROFILE` env) |
 | `--state <path>` | Load storage state from JSON file (or `AGENT_BROWSER_STATE` env) |
 | `--headers <json>` | Set HTTP headers scoped to the URL's origin |

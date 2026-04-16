@@ -665,6 +665,7 @@ impl DaemonState {
                     let tab_id = mgr.assign_tab_id();
                     mgr.add_page(super::browser::PageInfo {
                         tab_id,
+                        label: None,
                         target_id: te.target_info.target_id.clone(),
                         session_id: attach.session_id,
                         url: te.target_info.url.clone(),
@@ -1275,44 +1276,6 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         );
     }
 
-    // Pre-dispatch: if `tabId` is set on a non-tab command, temporarily switch
-    // to that tab for the duration of the command and restore the original
-    // active tab after. This lets `--tab N <cmd>` target a specific tab
-    // without stealing the user's active-tab context.
-    //
-    // We save the current tab's stable `tab_id` (not its array index) so a
-    // tab close during the scoped command doesn't leave us restoring to a
-    // shifted position. If the saved tab was closed, we skip the restore.
-    let restore_tab_id: Option<u32> = if !matches!(
-        action,
-        "tab_list" | "tab_new" | "tab_switch" | "tab_close" | "launch" | "close"
-    ) {
-        if let Some(target_tab_id) = cmd.get("tabId").and_then(|v| v.as_u64()) {
-            let target_tab_id = target_tab_id as u32;
-            let current_tab_id = state.browser.as_ref().and_then(|mgr| mgr.active_tab_id());
-            if current_tab_id == Some(target_tab_id) {
-                // Already on the target tab; nothing to do.
-                None
-            } else {
-                // Clear per-tab daemon state before switching so refs from the
-                // outer tab can't resolve against the target tab's DOM.
-                state.ref_map.clear();
-                state.iframe_sessions.clear();
-                state.active_frame_id = None;
-                if let Some(ref mut mgr) = state.browser {
-                    if let Err(e) = mgr.tab_switch_by_id(target_tab_id).await {
-                        return error_response(&id, &e);
-                    }
-                }
-                current_tab_id
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
     let result = match action {
         "launch" => handle_launch(cmd, state).await,
         "navigate" => handle_navigate(cmd, state).await,
@@ -1471,24 +1434,6 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         _ => Err(format!("Not yet implemented: {}", action)),
     };
 
-    // Post-dispatch: if we temporarily switched tabs for this command, restore
-    // the original active tab. Skip silently if the tab no longer exists (e.g.
-    // the scoped command closed it).
-    if let Some(restore_tab_id) = restore_tab_id {
-        let still_exists = state
-            .browser
-            .as_ref()
-            .is_some_and(|mgr| mgr.has_tab_id(restore_tab_id));
-        if still_exists {
-            state.ref_map.clear();
-            state.iframe_sessions.clear();
-            state.active_frame_id = None;
-            if let Some(ref mut mgr) = state.browser {
-                let _ = mgr.tab_switch_by_id(restore_tab_id).await;
-            }
-        }
-    }
-
     let mut resp = match result {
         Ok(data) => success_response(&id, data),
         Err(e) => error_response(&id, &super::browser::to_ai_friendly_error(&e)),
@@ -1545,7 +1490,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
 /// subsequent navigations don't hijack the user's existing tabs.
 async fn connect_auto_with_fresh_tab() -> Result<BrowserManager, String> {
     let mut mgr = BrowserManager::connect_auto().await?;
-    mgr.tab_new(None).await?;
+    mgr.tab_new(None, None).await?;
     let session_id = mgr.active_session_id()?.to_string();
     let _ = mgr
         .client
@@ -2648,7 +2593,7 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 
         let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
         state.ref_map.clear();
-        mgr.tab_new(Some(&href)).await?;
+        mgr.tab_new(Some(&href), None).await?;
 
         return Ok(json!({ "clicked": selector, "newTab": true, "url": href }));
     }
@@ -3697,18 +3642,21 @@ async fn handle_tab_list(state: &DaemonState) -> Result<Value, String> {
 async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
     let url = cmd.get("url").and_then(|v| v.as_str());
+    let label = cmd.get("label").and_then(|v| v.as_str());
     state.ref_map.clear();
     state.iframe_sessions.clear();
     state.active_frame_id = None;
-    mgr.tab_new(url).await
+    mgr.tab_new(url, label).await
 }
 
 async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-    let tab_id = cmd
+    let tab_ref_str = cmd
         .get("tabId")
-        .and_then(|v| v.as_u64())
-        .ok_or("Missing 'tabId' parameter")? as u32;
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'tabId' parameter (expected `t<N>` or a label)")?;
+    let tab_ref = super::browser::TabRef::parse(tab_ref_str)?;
+    let tab_id = mgr.resolve_tab_ref(&tab_ref)?;
     state.ref_map.clear();
     state.iframe_sessions.clear();
     state.active_frame_id = None;
@@ -3737,7 +3685,13 @@ async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value
 
 async fn handle_tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-    let tab_id = cmd.get("tabId").and_then(|v| v.as_u64()).map(|i| i as u32);
+    let tab_id = match cmd.get("tabId").and_then(|v| v.as_str()) {
+        Some(s) => {
+            let tab_ref = super::browser::TabRef::parse(s)?;
+            Some(mgr.resolve_tab_ref(&tab_ref)?)
+        }
+        None => None,
+    };
     state.ref_map.clear();
     state.iframe_sessions.clear();
     state.active_frame_id = None;
@@ -4123,6 +4077,7 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
         let tab_id = mgr.assign_tab_id();
         mgr.add_page(super::browser::PageInfo {
             tab_id,
+            label: None,
             target_id: create_result.target_id,
             session_id: new_session_id.clone(),
             url: nav_url.clone(),
@@ -6036,6 +5991,7 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
     let tab_id = mgr.assign_tab_id();
     mgr.add_page(super::browser::PageInfo {
         tab_id,
+        label: None,
         target_id: create_result.target_id,
         session_id: attach.session_id,
         url: "about:blank".to_string(),
@@ -6063,7 +6019,10 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
     let total = mgr.page_count();
     state.ref_map.clear();
 
-    Ok(json!({ "tabId": tab_id, "total": total }))
+    Ok(json!({
+        "tabId": super::browser::format_tab_id(tab_id),
+        "total": total,
+    }))
 }
 
 async fn handle_diff_screenshot(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
