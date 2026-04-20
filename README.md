@@ -98,7 +98,8 @@ agent-browser find role button click --name "Submit"
 ### Core Commands
 
 ```bash
-agent-browser open <url>              # Navigate to URL (aliases: goto, navigate)
+agent-browser open                    # Launch browser (no navigation); stays on about:blank
+agent-browser open <url>              # Launch + navigate to URL (aliases: goto, navigate)
 agent-browser click <sel>             # Click element (--new-tab to open in new tab)
 agent-browser dblclick <sel>          # Double-click element
 agent-browser focus <sel>             # Focus element
@@ -260,6 +261,8 @@ agent-browser set media [dark|light]  # Emulate color scheme
 ```bash
 agent-browser cookies                 # Get all cookies
 agent-browser cookies set <name> <val> # Set cookie
+agent-browser cookies set --curl <file> # Import cookies from a Copy-as-cURL dump,
+                                        # JSON array, or bare Cookie header (auto-detected)
 agent-browser cookies clear           # Clear cookies
 
 agent-browser storage local           # Get all localStorage
@@ -276,6 +279,7 @@ agent-browser storage session         # Same for sessionStorage
 agent-browser network route <url>              # Intercept requests
 agent-browser network route <url> --abort      # Block requests
 agent-browser network route <url> --body <json>  # Mock response
+agent-browser network route '*' --abort --resource-type script  # Block scripts only
 agent-browser network unroute [url]            # Remove routes
 agent-browser network requests                 # View tracked requests
 agent-browser network requests --filter api    # Filter requests
@@ -380,6 +384,60 @@ agent-browser state clean --older-than <days>  # Delete old states
 agent-browser back                    # Go back
 agent-browser forward                 # Go forward
 agent-browser reload                  # Reload page
+agent-browser pushstate <url>         # SPA client-side nav; auto-detects window.next.router.push,
+                                      # falls back to history.pushState + popstate
+```
+
+### Pre-navigation setup
+
+Some flows (SSR debug, auth cookies for protected origins, init scripts)
+need state set up *before* the first navigation. Use `open` with no URL
+to launch the browser, then stage cookies / routes / init scripts, then
+navigate. `batch` sends it all in one CLI call:
+
+```bash
+agent-browser batch \
+  '["open"]' \
+  '["network","route","*","--abort","--resource-type","script"]' \
+  '["cookies","set","--curl","cookies.curl","--domain","localhost"]' \
+  '["navigate","http://localhost:3000/target"]'
+```
+
+Without `batch` the same sequence is three commands that all reuse the
+same daemon (fast, but not one turn).
+
+### React / Web Vitals
+
+Agent-browser ships with first-class React introspection and universal Web
+Vitals metrics. The React commands need the React DevTools hook installed at
+launch; Web Vitals and pushstate are framework-agnostic.
+
+```bash
+agent-browser open --enable react-devtools <url>   # Launch with React hook installed
+agent-browser react tree                           # Full component tree
+agent-browser react inspect <fiberId>              # props, hooks, state, source
+agent-browser react renders start                  # Begin fiber render recording
+agent-browser react renders stop [--json]          # Stop and print profile (--json for raw data)
+agent-browser react suspense [--only-dynamic] [--json]  # Suspense boundaries + classifier
+                                                         # --only-dynamic hides the "static" list
+agent-browser vitals [url] [--json]                # LCP/CLS/TTFB/FCP/INP + React hydration phases
+```
+
+Each `react ...` subcommand requires `--enable react-devtools` to have been
+passed at launch (the React DevTools `installHook.js` is embedded in the
+binary). Without it the commands error with `React DevTools hook not installed
+- relaunch with --enable react-devtools`.
+
+Works on any React app — Next.js, Remix, Vite+React, CRA, TanStack Start,
+React Native Web, etc. `vitals` and `pushstate` are framework-agnostic.
+
+### Init scripts
+
+```bash
+agent-browser open --init-script <path>           # Register page init script before first navigation
+                                                  # (repeatable; also AGENT_BROWSER_INIT_SCRIPTS env)
+agent-browser addinitscript <js>                  # Register at runtime (returns identifier)
+agent-browser removeinitscript <identifier>       # Remove a previously registered init script
 ```
 
 ### Setup
@@ -642,6 +700,8 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--headers <json>` | Set HTTP headers scoped to the URL's origin |
 | `--executable-path <path>` | Custom browser executable (or `AGENT_BROWSER_EXECUTABLE_PATH` env) |
 | `--extension <path>` | Load browser extension (repeatable; or `AGENT_BROWSER_EXTENSIONS` env) |
+| `--init-script <path>` | Register a page init script before the first navigation (repeatable; or `AGENT_BROWSER_INIT_SCRIPTS` env) |
+| `--enable <feature>` | Built-in init scripts: `react-devtools` (repeatable or comma-list; or `AGENT_BROWSER_ENABLE` env) |
 | `--args <args>` | Browser launch args, comma or newline separated (or `AGENT_BROWSER_ARGS` env) |
 | `--user-agent <ua>` | Custom User-Agent string (or `AGENT_BROWSER_USER_AGENT` env) |
 | `--proxy <url>` | Proxy server URL with optional auth (or `AGENT_BROWSER_PROXY` env) |
