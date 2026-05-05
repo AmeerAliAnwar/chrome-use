@@ -2,6 +2,8 @@
 
 Browser automation CLI for AI agents. Fast native Rust CLI.
 
+[![skills.sh](https://skills.sh/b/vercel-labs/agent-browser)](https://skills.sh/vercel-labs/agent-browser)
+
 ## Installation
 
 ### Global Installation (recommended)
