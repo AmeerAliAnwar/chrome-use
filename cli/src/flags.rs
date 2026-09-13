@@ -26,6 +26,8 @@ pub(crate) const GLOBAL_BOOL_FLAGS: &[&str] = &[
     "--content-boundaries",
     "--confirm-interactive",
     "--no-auto-dialog",
+    "--new-tab",
+    "-t",
     // Action guards (issue #65 followup): skip an action instead of erroring
     // when its target element is absent. Stripped here so they don't break a
     // command's positional parsing; injected into the action JSON via
@@ -87,6 +89,8 @@ pub(crate) const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &[
     "--model",
     "--humanize",
     "--window",
+    "--tab",
+    "--tab-label",
 ];
 
 /// Whether `--<name>` is a reserved global flag (value-taking or boolean) that
@@ -477,6 +481,9 @@ pub struct Flags {
     /// `--observe`: after a mutating action, return only what changed on the page
     /// (a11y delta + url + requests) instead of the agent re-snapshotting.
     pub observe: bool,
+    pub new_tab: bool,
+    pub tab: Option<String>,
+    pub tab_label: Option<String>,
     pub model: Option<String>,
     pub verbose: bool,
     pub quiet: bool,
@@ -934,6 +941,9 @@ pub fn parse_flags(args: &[String]) -> Flags {
             || config.no_auto_dialog.unwrap_or(false),
         if_present: false,
         observe: false,
+        new_tab: false,
+        tab: None,
+        tab_label: None,
         settle_ms: None,
         with_screenshot: None,
         model: env::var("AI_GATEWAY_MODEL").ok().or(config.model),
@@ -1335,6 +1345,25 @@ pub fn parse_flags(args: &[String]) -> Flags {
             }
             "--observe" => {
                 flags.observe = true;
+            }
+            "--new-tab" | "-t" => {
+                let (val, consumed) = parse_bool_arg(args, i);
+                flags.new_tab = val;
+                if consumed {
+                    i += 1;
+                }
+            }
+            "--tab" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.tab = Some(s.clone());
+                    i += 1;
+                }
+            }
+            "--tab-label" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.tab_label = Some(s.clone());
+                    i += 1;
+                }
             }
             "--no-settle" => {
                 flags.settle_ms = Some(0);
@@ -2279,5 +2308,21 @@ mod tests {
             pick_agent_id(&env(&[shell, ("TERM_SESSION_ID", "iterm-guid")])).as_deref(),
             Some("iterm-guid")
         );
+    }
+
+    #[test]
+    fn test_parse_tab_flags() {
+        let f = parse_flags(&args("open example.com --new-tab --tab-label research"));
+        assert!(f.new_tab);
+        assert_eq!(f.tab_label.as_deref(), Some("research"));
+
+        let f2 = parse_flags(&args("click @e1 --tab t2"));
+        assert_eq!(f2.tab.as_deref(), Some("t2"));
+
+        let f3 = parse_flags(&args("open example.com -t"));
+        assert!(f3.new_tab);
+
+        let cleaned = clean_args(&args("click @e1 --tab t2"));
+        assert_eq!(cleaned, vec!["click", "@e1"]);
     }
 }

@@ -3151,17 +3151,44 @@ impl BrowserManager {
         // scratch so the session's tab group isn't left showing a stray blank
         // page beside the work tab (every group otherwise carried one).
         if target_url != "about:blank" {
+            let ready_check = async {
+                for _ in 0..50 {
+                    if let Ok(val) = self.evaluate_simple("document.readyState").await {
+                        if let Some(s) = val.as_str() {
+                            if s == "complete" || s == "interactive" {
+                                break;
+                            }
+                        }
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                }
+            };
+            let _ = tokio::time::timeout(tokio::time::Duration::from_millis(5000), ready_check).await;
+
+            let current_url = self.get_url().await.unwrap_or_else(|_| target_url.to_string());
+            let current_title = self.get_title().await.unwrap_or_default();
+            if let Some(page) = self.pages.get_mut(index) {
+                page.url = current_url.clone();
+                page.title = sanitize_title(&current_title);
+            }
+
             if let Some(new_tid) = self.pages.get(index).map(|p| p.target_id.clone()) {
                 self.close_leftover_blank_scratch(&new_tid).await;
             }
         }
 
-        Ok(json!({
+        let page_url = self.pages.get(index).map(|p| p.url.clone()).unwrap_or_else(|| target_url.to_string());
+        let page_title = self.pages.get(index).map(|p| p.title.clone()).unwrap_or_default();
+        let mut resp = json!({
             "tabId": format_tab_id(tab_id),
             "label": label,
-            "url": target_url,
+            "url": page_url,
             "total": self.pages.len(),
-        }))
+        });
+        if !page_title.is_empty() {
+            resp["title"] = json!(page_title);
+        }
+        Ok(resp)
     }
 
     /// Duplicate a tab with Chrome's native duplicate primitive exposed by the

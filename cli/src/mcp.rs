@@ -308,6 +308,8 @@ fn core_tools() -> Vec<Value> {
                 ("url", json!({ "type": "string", "description": "URL to open. https:// is assumed if no scheme is given." })),
                 ("waitUntil", json!({ "type": "string", "enum": ["load", "domcontentloaded", "networkidle", "none"], "description": "Navigation readiness to wait for (default: load)." })),
                 ("reuseTab", json!({ "type": "boolean", "description": "Adopt an existing tab already on this URL instead of opening a new one." })),
+                ("newTab", json!({ "type": "boolean", "description": "Open the URL in a new tab instead of navigating the current tab." })),
+                ("label", json!({ "type": "string", "description": "Assign a memorable label to the tab (--label)." })),
             ]), &[]),
         }),
         json!({
@@ -321,6 +323,7 @@ fn core_tools() -> Vec<Value> {
                 ("outline", json!({ "type": "boolean", "description": "Return only the heading outline instead of full content." })),
                 ("filter", json!({ "type": "string", "description": "Keep only lines matching this text/regex filter." })),
                 ("timeoutMs", json!({ "type": "integer", "description": "Read-specific timeout in ms (distinct from the top-level timeoutMs, which bounds the whole child process)." })),
+                ("tabId", json!({ "type": "string", "description": "Target tab id (e.g. t2), label, or targetId (--tab)." })),
             ]), &[]),
         }),
         json!({
@@ -334,6 +337,7 @@ fn core_tools() -> Vec<Value> {
                 ("depth", json!({ "type": "integer", "description": "Limit tree depth (-d)." })),
                 ("selector", json!({ "type": "string", "description": "Scope the snapshot to a CSS selector (-s)." })),
                 ("filter", json!({ "type": "string", "description": "Regex: keep only matching lines + ancestor context (-f)." })),
+                ("tabId", json!({ "type": "string", "description": "Target tab id (e.g. t2), label, or targetId (--tab)." })),
             ]), &[]),
         }),
         json!({
@@ -345,6 +349,7 @@ fn core_tools() -> Vec<Value> {
                 ("y", json!({ "type": "number", "description": "Viewport y coordinate (use with x instead of selector)." })),
                 ("newTab", json!({ "type": "boolean", "description": "Report a tab opened by this click without switching to it." })),
                 ("follow", json!({ "type": "boolean", "description": "If the click opens a new tab, switch the active tab to it." })),
+                ("tabId", json!({ "type": "string", "description": "Target tab id (e.g. t2), label, or targetId (--tab)." })),
             ]), &[]),
         }),
         json!({
@@ -353,6 +358,7 @@ fn core_tools() -> Vec<Value> {
             "inputSchema": build_schema(obj(&[
                 ("selector", json!({ "type": "string", "description": "CSS selector or @ref of the field." })),
                 ("value", json!({ "type": "string", "description": "Text to fill in." })),
+                ("tabId", json!({ "type": "string", "description": "Target tab id (e.g. t2), label, or targetId (--tab)." })),
             ]), &["selector", "value"]),
         }),
         json!({
@@ -365,6 +371,7 @@ fn core_tools() -> Vec<Value> {
                 ("delayMs", json!({ "type": "integer", "description": "Per-key delay in ms." })),
                 ("keyEvents", json!({ "type": "boolean", "description": "Send real per-character keystrokes instead of a bulk insertText (needed for autocomplete widgets)." })),
                 ("enter", json!({ "type": "boolean", "description": "Press Enter after typing (implies keyEvents) to commit an autocomplete candidate." })),
+                ("tabId", json!({ "type": "string", "description": "Target tab id (e.g. t2), label, or targetId (--tab)." })),
             ]), &["text"]),
         }),
         json!({
@@ -373,6 +380,7 @@ fn core_tools() -> Vec<Value> {
             "inputSchema": build_schema(obj(&[
                 ("key", json!({ "type": "string", "description": "Key or chord to press, e.g. \"Enter\" or \"Control+a\"." })),
                 ("holdMs", json!({ "type": "integer", "description": "Hold the key down this long (ms) before releasing." })),
+                ("tabId", json!({ "type": "string", "description": "Target tab id (e.g. t2), label, or targetId (--tab)." })),
             ]), &["key"]),
         }),
         json!({
@@ -381,6 +389,7 @@ fn core_tools() -> Vec<Value> {
             "inputSchema": build_schema(obj(&[
                 ("script", json!({ "type": "string", "description": "JavaScript to evaluate." })),
                 ("frame", json!({ "type": "string", "description": "Run in this frame's context instead of the main frame (CSS selector, @ref, URL substring, or frame index)." })),
+                ("tabId", json!({ "type": "string", "description": "Target tab id (e.g. t2), label, or targetId (--tab)." })),
             ]), &["script"]),
         }),
         json!({
@@ -398,6 +407,7 @@ fn core_tools() -> Vec<Value> {
                 ("download", json!({ "type": "boolean", "description": "Wait for a download to complete." })),
                 ("downloadPath", json!({ "type": "string", "description": "With download: save it to this path." })),
                 ("waitTimeoutMs", json!({ "type": "integer", "description": "How long to wait before giving up (distinct from the top-level timeoutMs)." })),
+                ("tabId", json!({ "type": "string", "description": "Target tab id (e.g. t2), label, or targetId (--tab)." })),
             ]), &[]),
         }),
         json!({
@@ -415,6 +425,19 @@ fn core_tools() -> Vec<Value> {
             "description": "Reload the current page.",
             "inputSchema": build_schema(obj(&[]), &[]),
         }),
+        json!({
+            "name": TOOL_TABS,
+            "description": "List browser tabs, open or duplicate tabs, explicitly adopt existing tabs, inspect tabs, close tabs, or switch tabs. External Chrome listings include ownership; there, close accepts only session-created tabs and switch accepts only created/adopted tabs.",
+            "inputSchema": build_schema(obj(&[
+                ("action", json!({ "type": "string", "enum": ["list", "new", "duplicate", "adopt", "inspect", "close", "switch"], "description": "Tab operation to perform." })),
+                ("url", json!({ "type": "string", "description": "With action=new: URL to open in the new tab." })),
+                ("spec", json!({ "type": "string", "description": "With action=adopt: URL substring or stable target ID of an existing tab." })),
+                ("label", json!({ "type": "string", "description": "With action=new or duplicate: assign this label to the new tab (--label)." })),
+                ("tabId", json!({ "type": "string", "description": "Tab id, label, or stable target ID. On external Chrome, switch accepts created/adopted tabs and close accepts only session-created tabs. Required for action=switch or inspect; optional for action=close or duplicate (defaults to current tab)." })),
+                ("activate", json!({ "type": "boolean", "description": "With action=switch: also raise the tab to the foreground (--activate)." })),
+                ("full", json!({ "type": "boolean", "description": "With action=list: emit untruncated tab URLs (--full)." })),
+            ]), &["action"]),
+        }),
     ]
 }
 
@@ -427,6 +450,7 @@ fn extended_tools() -> Vec<Value> {
             "description": "Hover the pointer over an element.",
             "inputSchema": build_schema(obj(&[
                 ("selector", json!({ "type": "string", "description": "CSS selector or @ref to hover." })),
+                ("tabId", json!({ "type": "string", "description": "Target tab id (e.g. t2), label, or targetId (--tab)." })),
             ]), &["selector"]),
         }),
         json!({
@@ -435,6 +459,7 @@ fn extended_tools() -> Vec<Value> {
             "inputSchema": build_schema(obj(&[
                 ("selector", json!({ "type": "string", "description": "CSS selector or @ref of the <select>." })),
                 ("values", json!({ "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "Option value(s) to select (multiple for a multi-select)." })),
+                ("tabId", json!({ "type": "string", "description": "Target tab id (e.g. t2), label, or targetId (--tab)." })),
             ]), &["selector", "values"]),
         }),
         json!({
@@ -458,6 +483,7 @@ fn extended_tools() -> Vec<Value> {
                 ("maxWidth", json!({ "type": "integer", "description": "Downscale the saved image to this max width in px (--max-width)." })),
                 ("maxHeight", json!({ "type": "integer", "description": "Downscale the saved image to this max height in px (--max-height)." })),
                 ("scale", json!({ "type": "number", "description": "Downscale the saved image by this factor, (0, 1] (--scale)." })),
+                ("tabId", json!({ "type": "string", "description": "Capture a specific tab (e.g. t2, label, or targetId) (--tab)." })),
             ]), &[]),
         }),
         json!({
@@ -483,20 +509,8 @@ fn extended_tools() -> Vec<Value> {
                     "required": ["x", "y"],
                 })),
                 ("frame", json!({ "type": "integer", "description": "Scroll the n-th frame from chrome_use snapshot/frames by index (--frame)." })),
+                ("tabId", json!({ "type": "string", "description": "Target tab id (e.g. t2), label, or targetId (--tab)." })),
             ]), &[]),
-        }),
-        json!({
-            "name": TOOL_TABS,
-            "description": "List browser tabs, open or duplicate tabs, explicitly adopt existing tabs, inspect tabs, close tabs, or switch tabs. External Chrome listings include ownership; there, close accepts only session-created tabs and switch accepts only created/adopted tabs.",
-            "inputSchema": build_schema(obj(&[
-                ("action", json!({ "type": "string", "enum": ["list", "new", "duplicate", "adopt", "inspect", "close", "switch"], "description": "Tab operation to perform." })),
-                ("url", json!({ "type": "string", "description": "With action=new: URL to open in the new tab." })),
-                ("spec", json!({ "type": "string", "description": "With action=adopt: URL substring or stable target ID of an existing tab." })),
-                ("label", json!({ "type": "string", "description": "With action=new or duplicate: assign this label to the new tab (--label)." })),
-                ("tabId", json!({ "type": "string", "description": "Tab id, label, or stable target ID. On external Chrome, switch accepts created/adopted tabs and close accepts only session-created tabs. Required for action=switch or inspect; optional for action=close or duplicate (defaults to current tab)." })),
-                ("activate", json!({ "type": "boolean", "description": "With action=switch: also raise the tab to the foreground (--activate)." })),
-                ("full", json!({ "type": "boolean", "description": "With action=list: emit untruncated tab URLs (--full)." })),
-            ]), &["action"]),
         }),
         json!({
             "name": TOOL_EXTRACT,
@@ -641,6 +655,7 @@ fn is_known_tool(name: &str, profile: Profile) -> bool {
             | TOOL_BACK
             | TOOL_FORWARD
             | TOOL_RELOAD
+            | TOOL_TABS
     );
     if core {
         return true;
@@ -653,7 +668,6 @@ fn is_known_tool(name: &str, profile: Profile) -> bool {
                 | TOOL_SCREENSHOT
                 | TOOL_A11Y
                 | TOOL_SCROLL
-                | TOOL_TABS
                 | TOOL_EXTRACT
                 | TOOL_EXPECT
                 | TOOL_FIND
@@ -734,6 +748,15 @@ fn call_open(arguments: &Value) -> Result<Value, ProtocolError> {
     if optional_bool(arguments, "reuseTab")?.unwrap_or(false) {
         args.push("--reuse-tab".to_string());
     }
+    if optional_bool(arguments, "newTab")?.unwrap_or(false) {
+        args.push("--new-tab".to_string());
+    }
+    if let Some(label) = optional_string(arguments, "label")? {
+        if !label.is_empty() {
+            args.push("--label".to_string());
+            args.push(label);
+        }
+    }
     run_tool(arguments, args)
 }
 
@@ -759,6 +782,10 @@ fn call_read(arguments: &Value) -> Result<Value, ProtocolError> {
     if let Some(timeout) = optional_u64(arguments, "timeoutMs")? {
         args.push("--timeout".to_string());
         args.push(timeout.to_string());
+    }
+    if let Some(tab_id) = optional_string(arguments, "tabId")? {
+        args.push("--tab".to_string());
+        args.push(tab_id);
     }
     if let Some(url) = optional_string(arguments, "url")? {
         if !url.is_empty() {
@@ -794,6 +821,10 @@ fn call_snapshot(arguments: &Value) -> Result<Value, ProtocolError> {
         args.push("-f".to_string());
         args.push(filter);
     }
+    if let Some(tab_id) = optional_string(arguments, "tabId")? {
+        args.push("--tab".to_string());
+        args.push(tab_id);
+    }
     run_tool(arguments, args)
 }
 
@@ -821,13 +852,22 @@ fn call_click(arguments: &Value) -> Result<Value, ProtocolError> {
     if optional_bool(arguments, "follow")?.unwrap_or(false) {
         args.push("--follow".to_string());
     }
+    if let Some(tab_id) = optional_string(arguments, "tabId")? {
+        args.push("--tab".to_string());
+        args.push(tab_id);
+    }
     run_tool(arguments, args)
 }
 
 fn call_fill(arguments: &Value) -> Result<Value, ProtocolError> {
     let selector = required_string(arguments, "selector")?;
     let value = required_string(arguments, "value")?;
-    run_tool(arguments, vec!["fill".to_string(), selector, value])
+    let mut args = vec!["fill".to_string(), selector, value];
+    if let Some(tab_id) = optional_string(arguments, "tabId")? {
+        args.push("--tab".to_string());
+        args.push(tab_id);
+    }
+    run_tool(arguments, args)
 }
 
 fn call_type(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -851,6 +891,10 @@ fn call_type(arguments: &Value) -> Result<Value, ProtocolError> {
     if optional_bool(arguments, "enter")?.unwrap_or(false) {
         args.push("--enter".to_string());
     }
+    if let Some(tab_id) = optional_string(arguments, "tabId")? {
+        args.push("--tab".to_string());
+        args.push(tab_id);
+    }
     run_tool(arguments, args)
 }
 
@@ -861,6 +905,10 @@ fn call_press(arguments: &Value) -> Result<Value, ProtocolError> {
         args.push("--hold".to_string());
         args.push(hold.to_string());
     }
+    if let Some(tab_id) = optional_string(arguments, "tabId")? {
+        args.push("--tab".to_string());
+        args.push(tab_id);
+    }
     run_tool(arguments, args)
 }
 
@@ -870,6 +918,10 @@ fn call_eval(arguments: &Value) -> Result<Value, ProtocolError> {
     if let Some(frame) = optional_string(arguments, "frame")? {
         args.push("--frame".to_string());
         args.push(frame);
+    }
+    if let Some(tab_id) = optional_string(arguments, "tabId")? {
+        args.push("--tab".to_string());
+        args.push(tab_id);
     }
     // `script` is passed as a single argv element (no shell in between), so
     // it needs no escaping/base64/--stdin trick even if it contains spaces,
@@ -917,6 +969,10 @@ fn call_wait(arguments: &Value) -> Result<Value, ProtocolError> {
         args.push("--timeout".to_string());
         args.push(timeout.to_string());
     }
+    if let Some(tab_id) = optional_string(arguments, "tabId")? {
+        args.push("--tab".to_string());
+        args.push(tab_id);
+    }
     run_tool(arguments, args)
 }
 
@@ -925,7 +981,12 @@ fn call_wait(arguments: &Value) -> Result<Value, ProtocolError> {
 /// `hover <selector>`.
 fn call_hover(arguments: &Value) -> Result<Value, ProtocolError> {
     let selector = required_string(arguments, "selector")?;
-    run_tool(arguments, vec!["hover".to_string(), selector])
+    let mut args = vec!["hover".to_string(), selector];
+    if let Some(tab_id) = optional_string(arguments, "tabId")? {
+        args.push("--tab".to_string());
+        args.push(tab_id);
+    }
+    run_tool(arguments, args)
 }
 
 /// `select <selector> <value...>`.
@@ -934,6 +995,10 @@ fn call_select(arguments: &Value) -> Result<Value, ProtocolError> {
     let values = required_string_array(arguments, "values")?;
     let mut args = vec!["select".to_string(), selector];
     args.extend(values);
+    if let Some(tab_id) = optional_string(arguments, "tabId")? {
+        args.push("--tab".to_string());
+        args.push(tab_id);
+    }
     run_tool(arguments, args)
 }
 
@@ -972,6 +1037,10 @@ fn call_screenshot(arguments: &Value) -> Result<Value, ProtocolError> {
     }
     if let Some(path) = optional_string(arguments, "path")? {
         args.push(path);
+    }
+    if let Some(tab_id) = optional_string(arguments, "tabId")? {
+        args.push("--tab".to_string());
+        args.push(tab_id);
     }
     let mut result = run_tool(arguments, args)?;
     attach_screenshot_image(&mut result);
@@ -1131,6 +1200,10 @@ fn call_scroll(arguments: &Value) -> Result<Value, ProtocolError> {
     }
     if let Some(amount) = optional_u64(arguments, "amount")? {
         args.push(amount.to_string());
+    }
+    if let Some(tab_id) = optional_string(arguments, "tabId")? {
+        args.push("--tab".to_string());
+        args.push(tab_id);
     }
     run_tool(arguments, args)
 }

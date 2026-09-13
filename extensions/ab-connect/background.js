@@ -1056,15 +1056,16 @@ async function handleForwardCdpCommand(msg) {
       : await chrome.tabs.create({ url, active: false });
     if (!tab || !tab.id) throw new Error('createTarget: no tab id');
     markOwned(tab.id); // agent-created → ours to attach (and re-attach after SW restart)
-    await new Promise((r) => setTimeout(r, 100));
-    const t = await attachTab(tab.id);
     // Per-session tab grouping (non-CDP hint from the daemon). Best-effort.
+    // Group before attaching so tabScopeHints reads the assigned group on initial attach announcement.
     const group = typeof params?.agentGroup === 'string' ? params.agentGroup.trim() : '';
     if (group) {
       try {
         await groupTabInto(tab.id, group);
       } catch {}
     }
+    await new Promise((r) => setTimeout(r, 100));
+    const t = await attachTab(tab.id);
     return { targetId: t.targetId };
   }
   if (method === 'Target.closeTarget') {
