@@ -1641,6 +1641,51 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         );
     }
 
+    // If a specific tab is targeted via `--tab <ref>` or `tabId`, switch to it
+    // prior to executing the action (unless the action is itself a tab management verb).
+    if let Some(tab_ref_str) = cmd
+        .get("tab")
+        .or_else(|| cmd.get("tabId"))
+        .and_then(|v| v.as_str())
+    {
+        if !matches!(
+            action,
+            "tab_switch"
+                | "tab_close"
+                | "tab_new"
+                | "tab_duplicate"
+                | "tab_list"
+                | "tab_adopt"
+                | "tab_inspect"
+                | "navigate"
+                | "launch"
+        ) {
+            if let Some(mgr) = state.browser.as_mut() {
+                mgr.resync_targets().await.ok();
+                let target_tab_id = match mgr.tab_id_for_target(tab_ref_str) {
+                    Some(id) => Some(id),
+                    None => {
+                        if let Ok(tab_ref) = super::browser::TabRef::parse(tab_ref_str) {
+                            mgr.resolve_tab_ref(&tab_ref).ok()
+                        } else {
+                            None
+                        }
+                    }
+                };
+                if let Some(target_tab_id) = target_tab_id {
+                    let current_tab_id = mgr.active_tab_id();
+                    if current_tab_id != Some(target_tab_id) {
+                        if mgr.tab_switch_by_id(target_tab_id).await.is_ok() {
+                            state.ref_map.clear();
+                            state.iframe_sessions.clear();
+                            state.active_frame_id = None;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // `--observe` (issue #65 followup): for a mutating action, capture a cheap
     // interactive-snapshot baseline BEFORE the action so we can return only what
     // changed (added/removed nodes, new toasts/validation via the #57 surface,
@@ -3447,6 +3492,34 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     state.iframe_sessions.clear();
     state.active_frame_id = None;
 
+    let new_tab = cmd
+        .get("newTab")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let label = cmd.get("label").and_then(|v| v.as_str());
+
+    if new_tab {
+        let new_tab_info = mgr.tab_new(None, label).await?;
+        if let Some(sid) = mgr.active_session_id().ok().map(|s| s.to_string()) {
+            apply_stealth_to_session(state, &sid).await;
+        }
+        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+        let mut result = mgr.navigate(url, wait_until).await?;
+        if let Some(tid) = new_tab_info.get("tabId") {
+            if let Some(obj) = result.as_object_mut() {
+                obj.insert("tabId".to_string(), tid.clone());
+                if let Some(tot) = new_tab_info.get("total") {
+                    obj.insert("total".to_string(), tot.clone());
+                }
+                if let Some(lbl) = new_tab_info.get("label") {
+                    obj.insert("label".to_string(), lbl.clone());
+                }
+            }
+        }
+        detect_and_set_humanize(mgr).await;
+        return Ok(with_site_hint(result, url));
+    }
+
     // `--reuse-tab`: if a tab already shows this URL (same origin+path), switch
     // to it instead of navigating — preserves any in-page state and stops
     // re-`open` from piling up duplicate tabs on rebind (issue #21).
@@ -4892,7 +4965,7 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
     // `tab <id>` (targetId, then `t<N>`/label).
     if let Some(mgr) = state.browser.as_mut() {
         mgr.resync_targets().await.ok();
-        if let Some(tab_ref_str) = cmd.get("tab").and_then(|v| v.as_str()) {
+        if let Some(tab_ref_str) = cmd.get("tab").or_else(|| cmd.get("tabId")).and_then(|v| v.as_str()) {
             let tab_id = match mgr.tab_id_for_target(tab_ref_str) {
                 Some(id) => id,
                 None => {
