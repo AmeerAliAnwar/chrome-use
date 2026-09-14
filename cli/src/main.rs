@@ -2149,7 +2149,7 @@ fn main() {
     let remember_request = if flags.remember {
         match remember_request(
             &clean,
-            flags.browser.as_deref(),
+            browser_selector.as_deref(),
             flags.no_choosebrowser,
             browser_email.as_deref(),
             choosebrowser::read_local_state().as_deref(),

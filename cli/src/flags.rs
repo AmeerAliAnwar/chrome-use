@@ -27,7 +27,6 @@ pub(crate) const GLOBAL_BOOL_FLAGS: &[&str] = &[
     "--confirm-interactive",
     "--no-auto-dialog",
     "--new-tab",
-    "-t",
     // Action guards (issue #65 followup): skip an action instead of erroring
     // when its target element is absent. Stripped here so they don't break a
     // command's positional parsing; injected into the action JSON via
@@ -1346,7 +1345,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--observe" => {
                 flags.observe = true;
             }
-            "--new-tab" | "-t" => {
+            "--new-tab" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.new_tab = val;
                 if consumed {
@@ -2318,9 +2317,6 @@ mod tests {
 
         let f2 = parse_flags(&args("click @e1 --tab t2"));
         assert_eq!(f2.tab.as_deref(), Some("t2"));
-
-        let f3 = parse_flags(&args("open example.com -t"));
-        assert!(f3.new_tab);
 
         let cleaned = clean_args(&args("click @e1 --tab t2"));
         assert_eq!(cleaned, vec!["click", "@e1"]);

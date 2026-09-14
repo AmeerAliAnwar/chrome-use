@@ -3311,6 +3311,8 @@ async fn nm_host_main() {
         let _ = std::fs::write(relay_ext_profile_path(), &rec);
         if let Some(ver) = read_ext_version_file(relay_ext_version_path_for(&rem_id)) {
             let _ = std::fs::write(relay_ext_version_path(), &ver);
+        } else {
+            let _ = std::fs::remove_file(relay_ext_version_path());
         }
     } else {
         let _ = std::fs::remove_file(relay_url_path());
