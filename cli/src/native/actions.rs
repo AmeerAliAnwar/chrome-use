@@ -1663,24 +1663,36 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
             if let Some(mgr) = state.browser.as_mut() {
                 mgr.resync_targets().await.ok();
                 let target_tab_id = match mgr.tab_id_for_target(tab_ref_str) {
-                    Some(id) => Some(id),
-                    None => {
-                        if let Ok(tab_ref) = super::browser::TabRef::parse(tab_ref_str) {
-                            mgr.resolve_tab_ref(&tab_ref).ok()
-                        } else {
-                            None
+                    Some(id) => id,
+                    None => match super::browser::TabRef::parse(tab_ref_str) {
+                        Ok(tab_ref) => match mgr.resolve_tab_ref(&tab_ref) {
+                            Ok(id) => id,
+                            Err(e) => {
+                                return error_response(
+                                    &id,
+                                    &format!("Could not resolve target tab `{}`: {}", tab_ref_str, e),
+                                );
+                            }
+                        },
+                        Err(e) => {
+                            return error_response(
+                                &id,
+                                &format!("Invalid target tab reference `{}`: {}", tab_ref_str, e),
+                            );
                         }
-                    }
+                    },
                 };
-                if let Some(target_tab_id) = target_tab_id {
-                    let current_tab_id = mgr.active_tab_id();
-                    if current_tab_id != Some(target_tab_id) {
-                        if mgr.tab_switch_by_id(target_tab_id).await.is_ok() {
-                            state.ref_map.clear();
-                            state.iframe_sessions.clear();
-                            state.active_frame_id = None;
-                        }
+                let current_tab_id = mgr.active_tab_id();
+                if current_tab_id != Some(target_tab_id) {
+                    if let Err(e) = mgr.tab_switch_by_id(target_tab_id).await {
+                        return error_response(
+                            &id,
+                            &format!("Failed to switch to target tab `{}`: {}", tab_ref_str, e),
+                        );
                     }
+                    state.ref_map.clear();
+                    state.iframe_sessions.clear();
+                    state.active_frame_id = None;
                 }
             }
         }
@@ -3502,6 +3514,15 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         let new_tab_info = mgr.tab_new(None, label).await?;
         if let Some(sid) = mgr.active_session_id().ok().map(|s| s.to_string()) {
             apply_stealth_to_session(state, &sid).await;
+            let has_origin_headers = !state.origin_headers.read().await.is_empty();
+            let has_proxy_creds = state.proxy_credentials.read().await.is_some();
+            if has_origin_headers || has_proxy_creds {
+                let mut params = json!({ "patterns": [{ "urlPattern": "*" }] });
+                if has_proxy_creds {
+                    params["handleAuthRequests"] = json!(true);
+                }
+                let _ = mgr.client.send_command("Fetch.enable", Some(params), Some(&sid)).await;
+            }
         }
         let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
         let mut result = mgr.navigate(url, wait_until).await?;
