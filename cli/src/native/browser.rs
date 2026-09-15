@@ -3163,9 +3163,13 @@ impl BrowserManager {
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                 }
             };
-            let _ = tokio::time::timeout(tokio::time::Duration::from_millis(5000), ready_check).await;
+            let _ =
+                tokio::time::timeout(tokio::time::Duration::from_millis(5000), ready_check).await;
 
-            let current_url = self.get_url().await.unwrap_or_else(|_| target_url.to_string());
+            let current_url = self
+                .get_url()
+                .await
+                .unwrap_or_else(|_| target_url.to_string());
             let current_title = self.get_title().await.unwrap_or_default();
             if let Some(page) = self.pages.get_mut(index) {
                 page.url = current_url.clone();
@@ -3177,8 +3181,16 @@ impl BrowserManager {
             }
         }
 
-        let page_url = self.pages.get(index).map(|p| p.url.clone()).unwrap_or_else(|| target_url.to_string());
-        let page_title = self.pages.get(index).map(|p| p.title.clone()).unwrap_or_default();
+        let page_url = self
+            .pages
+            .get(index)
+            .map(|p| p.url.clone())
+            .unwrap_or_else(|| target_url.to_string());
+        let page_title = self
+            .pages
+            .get(index)
+            .map(|p| p.title.clone())
+            .unwrap_or_default();
         let mut resp = json!({
             "tabId": format_tab_id(tab_id),
             "label": label,
