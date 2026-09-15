@@ -1641,6 +1641,63 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         );
     }
 
+    // If a specific tab is targeted via `--tab <ref>` or `tabId`, switch to it
+    // prior to executing the action (unless the action is itself a tab management verb).
+    if let Some(tab_ref_str) = cmd
+        .get("tab")
+        .or_else(|| cmd.get("tabId"))
+        .and_then(|v| v.as_str())
+    {
+        if !matches!(
+            action,
+            "tab_switch"
+                | "tab_close"
+                | "tab_new"
+                | "tab_duplicate"
+                | "tab_list"
+                | "tab_adopt"
+                | "tab_inspect"
+                | "navigate"
+                | "launch"
+        ) {
+            if let Some(mgr) = state.browser.as_mut() {
+                mgr.resync_targets().await.ok();
+                let target_tab_id = match mgr.tab_id_for_target(tab_ref_str) {
+                    Some(id) => id,
+                    None => match super::browser::TabRef::parse(tab_ref_str) {
+                        Ok(tab_ref) => match mgr.resolve_tab_ref(&tab_ref) {
+                            Ok(id) => id,
+                            Err(e) => {
+                                return error_response(
+                                    &id,
+                                    &format!("Could not resolve target tab `{}`: {}", tab_ref_str, e),
+                                );
+                            }
+                        },
+                        Err(e) => {
+                            return error_response(
+                                &id,
+                                &format!("Invalid target tab reference `{}`: {}", tab_ref_str, e),
+                            );
+                        }
+                    },
+                };
+                let current_tab_id = mgr.active_tab_id();
+                if current_tab_id != Some(target_tab_id) {
+                    if let Err(e) = mgr.tab_switch_by_id(target_tab_id).await {
+                        return error_response(
+                            &id,
+                            &format!("Failed to switch to target tab `{}`: {}", tab_ref_str, e),
+                        );
+                    }
+                    state.ref_map.clear();
+                    state.iframe_sessions.clear();
+                    state.active_frame_id = None;
+                }
+            }
+        }
+    }
+
     // `--observe` (issue #65 followup): for a mutating action, capture a cheap
     // interactive-snapshot baseline BEFORE the action so we can return only what
     // changed (added/removed nodes, new toasts/validation via the #57 surface,
@@ -3447,6 +3504,43 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     state.iframe_sessions.clear();
     state.active_frame_id = None;
 
+    let new_tab = cmd
+        .get("newTab")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let label = cmd.get("label").and_then(|v| v.as_str());
+
+    if new_tab {
+        let new_tab_info = mgr.tab_new(None, label).await?;
+        if let Some(sid) = mgr.active_session_id().ok().map(|s| s.to_string()) {
+            apply_stealth_to_session(state, &sid).await;
+            let has_origin_headers = !state.origin_headers.read().await.is_empty();
+            let has_proxy_creds = state.proxy_credentials.read().await.is_some();
+            if has_origin_headers || has_proxy_creds {
+                let mut params = json!({ "patterns": [{ "urlPattern": "*" }] });
+                if has_proxy_creds {
+                    params["handleAuthRequests"] = json!(true);
+                }
+                let _ = mgr.client.send_command("Fetch.enable", Some(params), Some(&sid)).await;
+            }
+        }
+        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+        let mut result = mgr.navigate(url, wait_until).await?;
+        if let Some(tid) = new_tab_info.get("tabId") {
+            if let Some(obj) = result.as_object_mut() {
+                obj.insert("tabId".to_string(), tid.clone());
+                if let Some(tot) = new_tab_info.get("total") {
+                    obj.insert("total".to_string(), tot.clone());
+                }
+                if let Some(lbl) = new_tab_info.get("label") {
+                    obj.insert("label".to_string(), lbl.clone());
+                }
+            }
+        }
+        detect_and_set_humanize(mgr).await;
+        return Ok(with_site_hint(result, url));
+    }
+
     // `--reuse-tab`: if a tab already shows this URL (same origin+path), switch
     // to it instead of navigating — preserves any in-page state and stops
     // re-`open` from piling up duplicate tabs on rebind (issue #21).
@@ -4841,6 +4935,7 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
             }
 
             let base64_data = wb.screenshot().await?;
+            let want_b64 = cmd.get("base64").and_then(|v| v.as_bool()).unwrap_or(false);
             let path = cmd.get("path").and_then(|v| v.as_str());
             if let Some(p) = path {
                 let bytes = base64::Engine::decode(
@@ -4850,21 +4945,32 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
                 .map_err(|e| format!("Base64 decode error: {}", e))?;
                 std::fs::write(p, bytes)
                     .map_err(|e| format!("Failed to write screenshot: {}", e))?;
-                return Ok(json!({ "path": absolutize_saved_path(p) }));
+                let mut res = json!({ "path": absolutize_saved_path(p) });
+                if want_b64 {
+                    res["base64"] = json!(base64_data);
+                }
+                return Ok(res);
             }
-            let tmp = format!(
-                "/tmp/screenshot-{}.png",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis())
-                    .unwrap_or(0)
-            );
+            let tmp = std::env::temp_dir()
+                .join(format!(
+                    "screenshot-{}.png",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0)
+                ))
+                .to_string_lossy()
+                .to_string();
             let bytes =
                 base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &base64_data)
                     .map_err(|e| format!("Base64 decode error: {}", e))?;
             std::fs::write(&tmp, bytes)
                 .map_err(|e| format!("Failed to write screenshot: {}", e))?;
-            return Ok(json!({ "path": tmp }));
+            let mut res = json!({ "path": tmp });
+            if want_b64 {
+                res["base64"] = json!(base64_data);
+            }
+            return Ok(res);
         }
     }
     // Re-sync with the live browser before resolving the active tab, mirroring
@@ -4880,7 +4986,7 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
     // `tab <id>` (targetId, then `t<N>`/label).
     if let Some(mgr) = state.browser.as_mut() {
         mgr.resync_targets().await.ok();
-        if let Some(tab_ref_str) = cmd.get("tab").and_then(|v| v.as_str()) {
+        if let Some(tab_ref_str) = cmd.get("tab").or_else(|| cmd.get("tabId")).and_then(|v| v.as_str()) {
             let tab_id = match mgr.tab_id_for_target(tab_ref_str) {
                 Some(id) => id,
                 None => {
@@ -5053,6 +5159,16 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
     if !result.annotations.is_empty() {
         response["annotations"] = serde_json::to_value(&result.annotations)
             .map_err(|e| format!("Failed to serialize annotations: {}", e))?;
+    }
+    if cmd.get("base64").and_then(|v| v.as_bool()).unwrap_or(false) {
+        let b64 = if resized.is_some() {
+            std::fs::read(&result.path)
+                .map(|bytes| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes))
+                .unwrap_or_else(|_| result.base64.clone())
+        } else {
+            result.base64.clone()
+        };
+        response["base64"] = json!(b64);
     }
     // Stamp which page was captured so a screenshot of the wrong tab is obvious
     // (issue #8.1: relay sessions can drift to whatever tab the user activated).

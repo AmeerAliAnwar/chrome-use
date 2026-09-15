@@ -455,6 +455,26 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
         }
     }
 
+    if flags.new_tab {
+        if let Some(obj) = result.as_object_mut() {
+            obj.insert("newTab".to_string(), json!(true));
+        }
+    }
+    if let Some(ref t) = flags.tab {
+        if let Some(obj) = result.as_object_mut() {
+            if !obj.contains_key("tabId") && !obj.contains_key("tab") {
+                obj.insert("tabId".to_string(), json!(t));
+            }
+        }
+    }
+    if let Some(ref lbl) = flags.tab_label {
+        if let Some(obj) = result.as_object_mut() {
+            if !obj.contains_key("label") {
+                obj.insert("label".to_string(), json!(lbl));
+            }
+        }
+    }
+
     Ok(result)
 }
 
@@ -496,11 +516,11 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         skip_next = false;
                         continue;
                     }
-                    if *a == "--wait-until" {
+                    if *a == "--wait-until" || *a == "--label" || *a == "--tab-label" || *a == "--tab" {
                         skip_next = true;
                         continue;
                     }
-                    if !a.starts_with("--") {
+                    if !a.starts_with("--") && *a != "-t" && !a.starts_with('-') {
                         url = Some(a);
                         break;
                     }
@@ -535,6 +555,15 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             let mut nav_cmd = json!({ "id": id, "action": "navigate", "url": url });
             if flags.provider.is_some() {
                 nav_cmd["waitUntil"] = json!("none");
+            }
+            // `--new-tab` / `-t`: open URL in a fresh tab instead of navigating the active tab
+            if rest.iter().any(|a| *a == "--new-tab" || *a == "-t") {
+                nav_cmd["newTab"] = json!(true);
+            }
+            if let Some(i) = rest.iter().position(|a| *a == "--label" || *a == "--tab-label") {
+                if let Some(lbl) = rest.get(i + 1) {
+                    nav_cmd["label"] = json!(lbl);
+                }
             }
             // `--reuse-tab`: adopt an existing tab already on this URL instead of
             // navigating/spawning a new one (issue #21 — avoids duplicate tabs on
@@ -1334,6 +1363,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             // selector: @ref or CSS selector
             // path: file path (contains / or . or ends with known extension)
             let mut full_page = false;
+            let mut base64 = false;
             let mut clip: Option<Value> = None;
             let mut max_width: Option<u32> = None;
             let mut max_height: Option<u32> = None;
@@ -1355,6 +1385,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             while i < rest.len() {
                 match rest[i] {
                     "--full" | "-f" => full_page = true,
+                    "--base64" | "-b" => base64 = true,
                     // Downscale the saved image so retina/full-page shots fit an
                     // agent's image reader and screenshot px line up with click px (#42).
                     "--max-width" => {
@@ -1457,6 +1488,9 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 "path": path, "selector": selector,
                 "fullPage": full_page, "annotate": flags.annotate
             });
+            if base64 {
+                cmd["base64"] = json!(true);
+            }
             if let Some(c) = clip {
                 cmd["clip"] = c;
             }
@@ -5886,6 +5920,48 @@ mod tests {
     }
 
     #[test]
+    fn test_navigate_new_tab() {
+        let cmd = parse_command(&args("open example.com --new-tab"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "navigate");
+        assert_eq!(cmd["url"], "https://example.com");
+        assert_eq!(cmd["newTab"], true);
+    }
+
+    #[test]
+    fn test_navigate_new_tab_shorthand() {
+        let cmd = parse_command(&args("open example.com -t"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "navigate");
+        assert_eq!(cmd["url"], "https://example.com");
+        assert_eq!(cmd["newTab"], true);
+    }
+
+    #[test]
+    fn test_navigate_new_tab_with_label() {
+        let cmd = parse_command(
+            &args("open example.com --new-tab --label research"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "navigate");
+        assert_eq!(cmd["url"], "https://example.com");
+        assert_eq!(cmd["newTab"], true);
+        assert_eq!(cmd["label"], "research");
+    }
+
+    #[test]
+    fn test_command_with_tab_flag() {
+        let mut flags = default_flags();
+        flags.tab = Some("t2".to_string());
+        let cmd = parse_command(&args("click @e1"), &flags).unwrap();
+        assert_eq!(cmd["action"], "click");
+        assert_eq!(cmd["tabId"], "t2");
+
+        let snap_cmd = parse_command(&args("snapshot -i"), &flags).unwrap();
+        assert_eq!(snap_cmd["action"], "snapshot");
+        assert_eq!(snap_cmd["tabId"], "t2");
+    }
+
+    #[test]
     fn test_navigate_chrome_url() {
         let cmd = parse_command(&args("open chrome://extensions"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "navigate");
@@ -6628,6 +6704,20 @@ mod tests {
         let cmd = parse_command(&args("screenshot -f"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "screenshot");
         assert_eq!(cmd["fullPage"], true);
+    }
+
+    #[test]
+    fn test_screenshot_base64() {
+        let cmd = parse_command(&args("screenshot --base64"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "screenshot");
+        assert_eq!(cmd["base64"], true);
+    }
+
+    #[test]
+    fn test_screenshot_base64_shorthand() {
+        let cmd = parse_command(&args("screenshot -b"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "screenshot");
+        assert_eq!(cmd["base64"], true);
     }
 
     #[test]
