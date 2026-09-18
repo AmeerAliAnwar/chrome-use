@@ -1738,8 +1738,10 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                     };
                     let current_tab_id = mgr.active_tab_id();
                     if current_tab_id != Some(target_tab_id) {
-                        let old_target = mgr.active_target_id().ok().map(str::to_string);
-                        let new_target = mgr.target_id_for_tab(target_tab_id).map(str::to_string);
+                        let old_target = mgr.active_target_id().ok().map(ToString::to_string);
+                        let new_target = mgr
+                            .target_id_for_tab(target_tab_id)
+                            .map(ToString::to_string);
                         if let Err(e) = mgr.tab_switch_by_id(target_tab_id).await {
                             return error_response(
                                 &id,
@@ -5086,8 +5088,8 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
             };
             let current_tab_id = mgr.active_tab_id();
             if current_tab_id != Some(tab_id) {
-                let old_target = mgr.active_target_id().ok().map(str::to_string);
-                let new_target = mgr.target_id_for_tab(tab_id).map(str::to_string);
+                let old_target = mgr.active_target_id().ok().map(ToString::to_string);
+                let new_target = mgr.target_id_for_tab(tab_id).map(ToString::to_string);
                 mgr.tab_switch_by_id(tab_id).await?;
                 new_target.map(|new_t| (old_target, new_t))
             } else {
@@ -5632,8 +5634,8 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         // `--follow`: switch the active tab to the newly-opened one (default is
         // to report it but stay put, so multi-tab flows aren't hijacked).
         if follow {
-            let old_target = mgr.active_target_id().ok().map(str::to_string);
-            let new_target = mgr.target_id_for_tab(page.tab_id).map(str::to_string);
+            let old_target = mgr.active_target_id().ok().map(ToString::to_string);
+            let new_target = mgr.target_id_for_tab(page.tab_id).map(ToString::to_string);
             let _ = mgr.tab_switch_by_id(page.tab_id).await;
             if let Some(ref new_t) = new_target {
                 state.switch_tab_context(old_target.as_deref(), new_t);
@@ -8397,7 +8399,7 @@ async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
         .browser
         .as_ref()
         .and_then(|m| m.active_target_id().ok())
-        .map(str::to_string);
+        .map(ToString::to_string);
     let result = {
         let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
         mgr.tab_new(url, label).await?
@@ -8406,7 +8408,7 @@ async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
         .browser
         .as_ref()
         .and_then(|m| m.active_target_id().ok())
-        .map(str::to_string);
+        .map(ToString::to_string);
     if let Some(ref new_t) = new_target {
         state.switch_tab_context(old_target.as_deref(), new_t);
     } else {
@@ -8434,7 +8436,7 @@ async fn handle_tab_duplicate(cmd: &Value, state: &mut DaemonState) -> Result<Va
         .browser
         .as_ref()
         .and_then(|m| m.active_target_id().ok())
-        .map(str::to_string);
+        .map(ToString::to_string);
     let result = {
         let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
         mgr.tab_duplicate(source_ref, label).await?
@@ -8443,7 +8445,7 @@ async fn handle_tab_duplicate(cmd: &Value, state: &mut DaemonState) -> Result<Va
         .browser
         .as_ref()
         .and_then(|m| m.active_target_id().ok())
-        .map(str::to_string);
+        .map(ToString::to_string);
     if let Some(ref new_t) = new_target {
         state.switch_tab_context(old_target.as_deref(), new_t);
     } else {
@@ -8483,8 +8485,8 @@ async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value
                 mgr.resolve_tab_ref(&tab_ref)?
             }
         };
-        let old_target = mgr.active_target_id().ok().map(str::to_string);
-        let new_target = mgr.target_id_for_tab(tab_id).map(str::to_string);
+        let old_target = mgr.active_target_id().ok().map(ToString::to_string);
+        let new_target = mgr.target_id_for_tab(tab_id).map(ToString::to_string);
         let result = mgr.tab_switch_by_id(tab_id).await?;
         (result, old_target, new_target)
     };
@@ -8817,8 +8819,8 @@ async fn handle_tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         None => None,
     };
     let closed_target = match tab_id {
-        Some(id) => mgr.target_id_for_tab(id).map(str::to_string),
-        None => mgr.active_target_id().ok().map(str::to_string),
+        Some(id) => mgr.target_id_for_tab(id).map(ToString::to_string),
+        None => mgr.active_target_id().ok().map(ToString::to_string),
     };
     let res = mgr.tab_close_by_id(tab_id).await?;
     if let Some(ref target) = closed_target {
