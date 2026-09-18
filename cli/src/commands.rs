@@ -516,7 +516,11 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         skip_next = false;
                         continue;
                     }
-                    if *a == "--wait-until" || *a == "--label" || *a == "--tab-label" || *a == "--tab" {
+                    if *a == "--wait-until"
+                        || *a == "--label"
+                        || *a == "--tab-label"
+                        || *a == "--tab"
+                    {
                         skip_next = true;
                         continue;
                     }
@@ -560,7 +564,10 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             if rest.iter().any(|a| *a == "--new-tab" || *a == "-t") {
                 nav_cmd["newTab"] = json!(true);
             }
-            if let Some(i) = rest.iter().position(|a| *a == "--label" || *a == "--tab-label") {
+            if let Some(i) = rest
+                .iter()
+                .position(|a| *a == "--label" || *a == "--tab-label")
+            {
                 if let Some(lbl) = rest.get(i + 1) {
                     nav_cmd["label"] = json!(lbl);
                 }
@@ -5066,6 +5073,9 @@ mod tests {
         Flags {
             no_choosebrowser: false,
             remember: false,
+            new_tab: false,
+            tab: None,
+            tab_label: None,
             session: "test".to_string(),
             session_explicit: true,
             json: false,

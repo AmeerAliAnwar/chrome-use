@@ -2265,10 +2265,7 @@ impl BrowserManager {
         // every other async eval. So enable replMode ONLY for synchronous scripts
         // that declare a top-level `let`/`const`; promise-returning scripts keep
         // `awaitPromise` (no replMode) — exactly the pre-#38 behaviour.
-        let mentions_async = script.contains("await")
-            || script.contains(".then(")
-            || script.contains("fetch(")
-            || script.contains("Promise");
+        let mentions_async = script_may_return_promise(script);
         let declares = script.contains("let ") || script.contains("const ");
         let repl_mode = declares && !mentions_async;
         let mut params = json!({
@@ -3163,9 +3160,13 @@ impl BrowserManager {
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                 }
             };
-            let _ = tokio::time::timeout(tokio::time::Duration::from_millis(5000), ready_check).await;
+            let _ =
+                tokio::time::timeout(tokio::time::Duration::from_millis(5000), ready_check).await;
 
-            let current_url = self.get_url().await.unwrap_or_else(|_| target_url.to_string());
+            let current_url = self
+                .get_url()
+                .await
+                .unwrap_or_else(|_| target_url.to_string());
             let current_title = self.get_title().await.unwrap_or_default();
             if let Some(page) = self.pages.get_mut(index) {
                 page.url = current_url.clone();
@@ -3177,8 +3178,16 @@ impl BrowserManager {
             }
         }
 
-        let page_url = self.pages.get(index).map(|p| p.url.clone()).unwrap_or_else(|| target_url.to_string());
-        let page_title = self.pages.get(index).map(|p| p.title.clone()).unwrap_or_default();
+        let page_url = self
+            .pages
+            .get(index)
+            .map(|p| p.url.clone())
+            .unwrap_or_else(|| target_url.to_string());
+        let page_title = self
+            .pages
+            .get(index)
+            .map(|p| p.title.clone())
+            .unwrap_or_default();
         let mut resp = json!({
             "tabId": format_tab_id(tab_id),
             "label": label,
@@ -5806,5 +5815,32 @@ mod tests {
         assert!(result
             .unwrap_err()
             .contains("Timeout waiting for networkidle"));
+    }
+}
+
+/// Whether an `eval` script may evaluate to a promise, which must be awaited
+/// and so cannot run under `replMode`. An `async` function returns a promise
+/// even when it never awaits, so `async` counts on its own.
+fn script_may_return_promise(script: &str) -> bool {
+    ["async", "await", ".then(", "fetch(", "Promise"]
+        .iter()
+        .any(|needle| script.contains(needle))
+}
+
+#[cfg(test)]
+mod eval_mode_tests {
+    use super::script_may_return_promise;
+
+    #[test]
+    fn async_function_without_await_is_awaited() {
+        assert!(script_may_return_promise(
+            "(async () => { const x = {a: 1}; return x; })()"
+        ));
+        assert!(script_may_return_promise(
+            "(async function () { let y = 1; return y; })()"
+        ));
+        assert!(!script_may_return_promise(
+            "(() => { const x = {a: 1}; return x; })()"
+        ));
     }
 }
