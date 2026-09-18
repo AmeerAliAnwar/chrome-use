@@ -396,6 +396,12 @@ impl RefMap {
     }
 }
 
+impl Default for RefMap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub fn parse_ref(input: &str) -> Option<String> {
     let trimmed = input.trim();
 

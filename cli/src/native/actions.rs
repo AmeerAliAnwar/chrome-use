@@ -359,6 +359,17 @@ fn launch_hash(opts: &LaunchOptions) -> u64 {
     h.finish()
 }
 
+/// Isolated state for an individual tab/target so concurrent or multi-tab
+/// agent interactions do not corrupt or wipe each other's element refs (@ref),
+/// iframe sessions, and snapshot diff baselines.
+#[derive(Clone)]
+pub struct TabState {
+    pub ref_map: RefMap,
+    pub last_snapshot: Option<(String, String, String)>,
+    pub iframe_sessions: HashMap<String, String>,
+    pub active_frame_id: Option<String>,
+}
+
 pub struct DaemonState {
     pub browser: Option<BrowserManager>,
     pub appium: Option<AppiumManager>,
@@ -366,6 +377,7 @@ pub struct DaemonState {
     pub webdriver_backend: Option<super::webdriver::backend::WebDriverBackend>,
     pub backend_type: BackendType,
     pub ref_map: RefMap,
+    pub tab_states: HashMap<String, TabState>,
     pub domain_filter: Arc<RwLock<Option<DomainFilter>>>,
     pub event_tracker: EventTracker,
     pub session_name: Option<String>,
@@ -449,6 +461,7 @@ impl DaemonState {
             webdriver_backend: None,
             backend_type: BackendType::Cdp,
             ref_map: RefMap::with_session_label(env::var("AGENT_BROWSER_SESSION").ok().as_deref()),
+            tab_states: HashMap::new(),
             domain_filter: Arc::new(RwLock::new(
                 env::var("AGENT_BROWSER_ALLOWED_DOMAINS")
                     .ok()
@@ -513,6 +526,40 @@ impl DaemonState {
 
     fn reset_input_state(&mut self) {
         self.mouse_state = MouseState::default();
+    }
+
+    /// Switch active tab context from `old_target_id` to `new_target_id`.
+    /// Preserves the outgoing tab's RefMap, last_snapshot, and iframe sessions,
+    /// and restores the incoming tab's state (or creates fresh state if first visit).
+    pub fn switch_tab_context(&mut self, old_target_id: Option<&str>, new_target_id: &str) {
+        if let Some(old_id) = old_target_id {
+            if old_id == new_target_id {
+                return;
+            }
+            let old_state = TabState {
+                ref_map: std::mem::replace(
+                    &mut self.ref_map,
+                    RefMap::with_session_label(env::var("AGENT_BROWSER_SESSION").ok().as_deref()),
+                ),
+                last_snapshot: self.last_snapshot.take(),
+                iframe_sessions: std::mem::take(&mut self.iframe_sessions),
+                active_frame_id: self.active_frame_id.take(),
+            };
+            self.tab_states.insert(old_id.to_string(), old_state);
+        }
+
+        if let Some(target_state) = self.tab_states.remove(new_target_id) {
+            self.ref_map = target_state.ref_map;
+            self.last_snapshot = target_state.last_snapshot;
+            self.iframe_sessions = target_state.iframe_sessions;
+            self.active_frame_id = target_state.active_frame_id;
+        } else {
+            self.ref_map =
+                RefMap::with_session_label(env::var("AGENT_BROWSER_SESSION").ok().as_deref());
+            self.last_snapshot = None;
+            self.iframe_sessions = HashMap::new();
+            self.active_frame_id = None;
+        }
     }
 
     /// Requests still in flight that started at or after `since` — the network
@@ -1660,39 +1707,57 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                 | "navigate"
                 | "launch"
         ) {
-            if let Some(mgr) = state.browser.as_mut() {
-                mgr.resync_targets().await.ok();
-                let target_tab_id = match mgr.tab_id_for_target(tab_ref_str) {
-                    Some(id) => id,
-                    None => match super::browser::TabRef::parse(tab_ref_str) {
-                        Ok(tab_ref) => match mgr.resolve_tab_ref(&tab_ref) {
-                            Ok(id) => id,
+            let switch_res = {
+                if let Some(mgr) = state.browser.as_mut() {
+                    mgr.resync_targets().await.ok();
+                    let target_tab_id = match mgr.tab_id_for_target(tab_ref_str) {
+                        Some(id) => id,
+                        None => match super::browser::TabRef::parse(tab_ref_str) {
+                            Ok(tab_ref) => match mgr.resolve_tab_ref(&tab_ref) {
+                                Ok(id) => id,
+                                Err(e) => {
+                                    return error_response(
+                                        &id,
+                                        &format!(
+                                            "Could not resolve target tab `{}`: {}",
+                                            tab_ref_str, e
+                                        ),
+                                    );
+                                }
+                            },
                             Err(e) => {
                                 return error_response(
                                     &id,
                                     &format!(
-                                        "Could not resolve target tab `{}`: {}",
+                                        "Invalid target tab reference `{}`: {}",
                                         tab_ref_str, e
                                     ),
                                 );
                             }
                         },
-                        Err(e) => {
+                    };
+                    let current_tab_id = mgr.active_tab_id();
+                    if current_tab_id != Some(target_tab_id) {
+                        let old_target = mgr.active_target_id().ok().map(str::to_string);
+                        let new_target = mgr.target_id_for_tab(target_tab_id).map(str::to_string);
+                        if let Err(e) = mgr.tab_switch_by_id(target_tab_id).await {
                             return error_response(
                                 &id,
-                                &format!("Invalid target tab reference `{}`: {}", tab_ref_str, e),
+                                &format!("Failed to switch to target tab `{}`: {}", tab_ref_str, e),
                             );
                         }
-                    },
-                };
-                let current_tab_id = mgr.active_tab_id();
-                if current_tab_id != Some(target_tab_id) {
-                    if let Err(e) = mgr.tab_switch_by_id(target_tab_id).await {
-                        return error_response(
-                            &id,
-                            &format!("Failed to switch to target tab `{}`: {}", tab_ref_str, e),
-                        );
+                        Some((old_target, new_target))
+                    } else {
+                        None
                     }
+                } else {
+                    None
+                }
+            };
+            if let Some((old_target, new_target)) = switch_res {
+                if let Some(ref new_t) = new_target {
+                    state.switch_tab_context(old_target.as_deref(), new_t);
+                } else {
                     state.ref_map.clear();
                     state.iframe_sessions.clear();
                     state.active_frame_id = None;
@@ -3453,7 +3518,9 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         }
     }
 
-    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+    if state.browser.is_none() {
+        return Err("Browser not launched".into());
+    }
 
     let wait_until = cmd
         .get("waitUntil")
@@ -3490,12 +3557,18 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
             // Fetch.enable is idempotent — safe even if domain filter or
             // routes already enabled it. Wildcard ensures we see all requests.
             if first_origin_header {
-                let session_id = mgr.active_session_id()?.to_string();
+                let session_id = state
+                    .browser
+                    .as_mut()
+                    .ok_or("Browser not launched")?
+                    .active_session_id()?
+                    .to_string();
                 let has_proxy_creds = state.proxy_credentials.read().await.is_some();
                 let mut params = json!({ "patterns": [{ "urlPattern": "*" }] });
                 if has_proxy_creds {
                     params["handleAuthRequests"] = json!(true);
                 }
+                let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
                 mgr.client
                     .send_command("Fetch.enable", Some(params), Some(&session_id))
                     .await?;
@@ -3511,8 +3584,12 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     let label = cmd.get("label").and_then(|v| v.as_str());
 
     if new_tab {
-        let new_tab_info = mgr.tab_new(None, label).await?;
-        let sid = mgr.active_session_id().ok().map(|s| s.to_string());
+        let (new_tab_info, sid) = {
+            let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+            let info = mgr.tab_new(None, label).await?;
+            let sid = mgr.active_session_id().ok().map(|s| s.to_string());
+            (info, sid)
+        };
         if let Some(sid) = sid {
             apply_stealth_to_session(state, &sid).await;
             let has_origin_headers = !state.origin_headers.read().await.is_empty();
@@ -3522,12 +3599,11 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
                 if has_proxy_creds {
                     params["handleAuthRequests"] = json!(true);
                 }
-                if let Some(mgr) = state.browser.as_ref() {
-                    let _ = mgr
-                        .client
-                        .send_command("Fetch.enable", Some(params), Some(&sid))
-                        .await;
-                }
+                let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+                let _ = mgr
+                    .client
+                    .send_command("Fetch.enable", Some(params), Some(&sid))
+                    .await;
             }
         }
         let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
@@ -3546,6 +3622,8 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         detect_and_set_humanize(mgr).await;
         return Ok(with_site_hint(result, url));
     }
+
+    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
 
     // `--reuse-tab`: if a tab already shows this URL (same origin+path), switch
     // to it instead of navigating — preserves any in-page state and stops
@@ -4231,6 +4309,7 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
     }
 
     state.ref_map.clear();
+    state.tab_states.clear();
     Ok(json!({ "closed": true }))
 }
 
@@ -4499,7 +4578,7 @@ async fn handle_do_action(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     // (the tree cannot say for this action). Callers that treat null as true
     // are back to the silent success this command exists to avoid.
     let confirmed = match (&after_actions, decidable) {
-        (Some(_), true) => Some(warning.is_none()),
+        (Some(_), true) => Some(!warning.is_some()),
         _ => None,
     };
     let mut out = json!({
@@ -4990,13 +5069,14 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
     // An explicit `--tab <ref>` (issue #88) switches to that tab first, so the
     // shot targets it regardless of the active pin — resolved exactly like
     // `tab <id>` (targetId, then `t<N>`/label).
-    if let Some(mgr) = state.browser.as_mut() {
-        mgr.resync_targets().await.ok();
-        if let Some(tab_ref_str) = cmd
-            .get("tab")
-            .or_else(|| cmd.get("tabId"))
-            .and_then(|v| v.as_str())
-        {
+    if let Some(tab_ref_str) = cmd
+        .get("tab")
+        .or_else(|| cmd.get("tabId"))
+        .and_then(|v| v.as_str())
+    {
+        let switch_target: Option<(Option<String>, String)> = {
+            let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+            mgr.resync_targets().await.ok();
             let tab_id = match mgr.tab_id_for_target(tab_ref_str) {
                 Some(id) => id,
                 None => {
@@ -5004,9 +5084,27 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
                     mgr.resolve_tab_ref(&tab_ref)?
                 }
             };
-            mgr.tab_switch_by_id(tab_id).await?;
-            state.ref_map.clear();
+            let current_tab_id = mgr.active_tab_id();
+            if current_tab_id != Some(tab_id) {
+                let old_target = mgr.active_target_id().ok().map(str::to_string);
+                let new_target = mgr.target_id_for_tab(tab_id).map(str::to_string);
+                mgr.tab_switch_by_id(tab_id).await?;
+                new_target.map(|new_t| (old_target, new_t))
+            } else {
+                None
+            }
+        };
+        if let Some((old_target, new_target)) = switch_target {
+            state.switch_tab_context(old_target.as_deref(), &new_target);
         }
+    }
+    if let Some(mgr) = state.browser.as_mut() {
+        // Waking Chrome's GPU compositor:
+        // Background and occluded tabs stop producing frames in headful Chrome,
+        // which causes Page.captureScreenshot to stall indefinitely until the
+        // relay timeout (8000ms). Bringing the target tab to front ensures Chrome
+        // immediately produces frames and captures in milliseconds.
+        let _ = mgr.bring_to_front().await;
     }
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
@@ -5534,10 +5632,16 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         // `--follow`: switch the active tab to the newly-opened one (default is
         // to report it but stay put, so multi-tab flows aren't hijacked).
         if follow {
-            state.ref_map.clear();
-            state.iframe_sessions.clear();
-            state.active_frame_id = None;
+            let old_target = mgr.active_target_id().ok().map(str::to_string);
+            let new_target = mgr.target_id_for_tab(page.tab_id).map(str::to_string);
             let _ = mgr.tab_switch_by_id(page.tab_id).await;
+            if let Some(ref new_t) = new_target {
+                state.switch_tab_context(old_target.as_deref(), new_t);
+            } else {
+                state.ref_map.clear();
+                state.iframe_sessions.clear();
+                state.active_frame_id = None;
+            }
             out["followed"] = json!(true);
         }
     }
@@ -8289,13 +8393,27 @@ async fn handle_tab_list(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
 async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let url = cmd.get("url").and_then(|v| v.as_str());
     let label = cmd.get("label").and_then(|v| v.as_str());
-    state.ref_map.clear();
-    state.iframe_sessions.clear();
-    state.active_frame_id = None;
+    let old_target = state
+        .browser
+        .as_ref()
+        .and_then(|m| m.active_target_id().ok())
+        .map(str::to_string);
     let result = {
         let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
         mgr.tab_new(url, label).await?
     };
+    let new_target = state
+        .browser
+        .as_ref()
+        .and_then(|m| m.active_target_id().ok())
+        .map(str::to_string);
+    if let Some(ref new_t) = new_target {
+        state.switch_tab_context(old_target.as_deref(), new_t);
+    } else {
+        state.ref_map.clear();
+        state.iframe_sessions.clear();
+        state.active_frame_id = None;
+    }
     // A new tab is a new CDP session; stealth scripts registered on the prior
     // session don't carry over, so patch the new tab too.
     if let Some(sid) = state
@@ -8312,13 +8430,27 @@ async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
 async fn handle_tab_duplicate(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let source_ref = cmd.get("tabId").and_then(|v| v.as_str());
     let label = cmd.get("label").and_then(|v| v.as_str());
+    let old_target = state
+        .browser
+        .as_ref()
+        .and_then(|m| m.active_target_id().ok())
+        .map(str::to_string);
     let result = {
         let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
         mgr.tab_duplicate(source_ref, label).await?
     };
-    state.ref_map.clear();
-    state.iframe_sessions.clear();
-    state.active_frame_id = None;
+    let new_target = state
+        .browser
+        .as_ref()
+        .and_then(|m| m.active_target_id().ok())
+        .map(str::to_string);
+    if let Some(ref new_t) = new_target {
+        state.switch_tab_context(old_target.as_deref(), new_t);
+    } else {
+        state.ref_map.clear();
+        state.iframe_sessions.clear();
+        state.active_frame_id = None;
+    }
     if let Some(sid) = state
         .browser
         .as_ref()
@@ -8331,29 +8463,40 @@ async fn handle_tab_duplicate(cmd: &Value, state: &mut DaemonState) -> Result<Va
 }
 
 async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
     let tab_ref_str = cmd
         .get("tabId")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'tabId' parameter (expected `t<N>`, a label, or a targetId)")?;
-    // Re-sync first so a tab opened by another session, or one that re-attached
-    // after a cross-process nav, is adoptable from here (issue #21).
-    mgr.resync_targets().await.ok();
-    // A CDP `targetId` (shown in `tab list`) is stable across sessions, so resolve
-    // it directly before falling back to the per-session `t<N>` / label form.
-    // `tab_switch_by_id` still refuses foreign targets; callers must explicitly
-    // `tab adopt <targetId>` before driving a pre-existing tab.
-    let tab_id = match mgr.tab_id_for_target(tab_ref_str) {
-        Some(id) => id,
-        None => {
-            let tab_ref = super::browser::TabRef::parse(tab_ref_str)?;
-            mgr.resolve_tab_ref(&tab_ref)?
-        }
+    let (mut result, old_target, new_target) = {
+        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+        // Re-sync first so a tab opened by another session, or one that re-attached
+        // after a cross-process nav, is adoptable from here (issue #21).
+        mgr.resync_targets().await.ok();
+        // A CDP `targetId` (shown in `tab list`) is stable across sessions, so resolve
+        // it directly before falling back to the per-session `t<N>` / label form.
+        // `tab_switch_by_id` still refuses foreign targets; callers must explicitly
+        // `tab adopt <targetId>` before driving a pre-existing tab.
+        let tab_id = match mgr.tab_id_for_target(tab_ref_str) {
+            Some(id) => id,
+            None => {
+                let tab_ref = super::browser::TabRef::parse(tab_ref_str)?;
+                mgr.resolve_tab_ref(&tab_ref)?
+            }
+        };
+        let old_target = mgr.active_target_id().ok().map(str::to_string);
+        let new_target = mgr.target_id_for_tab(tab_id).map(str::to_string);
+        let result = mgr.tab_switch_by_id(tab_id).await?;
+        (result, old_target, new_target)
     };
-    state.ref_map.clear();
-    state.iframe_sessions.clear();
-    state.active_frame_id = None;
-    let mut result = mgr.tab_switch_by_id(tab_id).await?;
+    if let Some(ref new_t) = new_target {
+        state.switch_tab_context(old_target.as_deref(), new_t);
+    } else {
+        state.ref_map.clear();
+        state.iframe_sessions.clear();
+        state.active_frame_id = None;
+    }
+
+    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
 
     // Liveness probe: confirm the new session actually answers before we report
     // success, so `tab <id>` doesn't print a misleading ✓ for a session that's
@@ -8673,10 +8816,33 @@ async fn handle_tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         }
         None => None,
     };
-    state.ref_map.clear();
-    state.iframe_sessions.clear();
-    state.active_frame_id = None;
-    mgr.tab_close_by_id(tab_id).await
+    let closed_target = match tab_id {
+        Some(id) => mgr.target_id_for_tab(id).map(str::to_string),
+        None => mgr.active_target_id().ok().map(str::to_string),
+    };
+    let res = mgr.tab_close_by_id(tab_id).await?;
+    if let Some(ref target) = closed_target {
+        state.tab_states.remove(target);
+    }
+    if let Ok(active_target) = mgr.active_target_id() {
+        if let Some(target_state) = state.tab_states.remove(active_target) {
+            state.ref_map = target_state.ref_map;
+            state.last_snapshot = target_state.last_snapshot;
+            state.iframe_sessions = target_state.iframe_sessions;
+            state.active_frame_id = target_state.active_frame_id;
+        } else {
+            state.ref_map =
+                RefMap::with_session_label(env::var("AGENT_BROWSER_SESSION").ok().as_deref());
+            state.last_snapshot = None;
+            state.iframe_sessions = HashMap::new();
+            state.active_frame_id = None;
+        }
+    } else {
+        state.ref_map.clear();
+        state.iframe_sessions.clear();
+        state.active_frame_id = None;
+    }
+    Ok(res)
 }
 
 async fn handle_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {

@@ -2590,17 +2590,20 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     }
                     Ok(cmd)
                 }
-                Some("select") => {
-                    let subcommand_index = rest
+                Some("select") | Some("switch") => {
+                    let sub = rest
                         .iter()
-                        .position(|arg| *arg == "select")
-                        .unwrap_or_default();
+                        .find(|arg| **arg == "select" || **arg == "switch")
+                        .copied()
+                        .unwrap_or("select");
+                    let subcommand_index =
+                        rest.iter().position(|arg| *arg == sub).unwrap_or_default();
                     let tab_ref = rest
                         .iter()
                         .skip(subcommand_index + 1)
                         .find(|arg| !arg.starts_with("--"))
                         .ok_or(ParseError::MissingArguments {
-                            context: "tab select".to_string(),
+                            context: format!("tab {sub}"),
                             usage: "tab select <ref> [--activate]",
                         })?;
                     let mut cmd = json!({ "id": id, "action": "tab_switch", "tabId": tab_ref });
@@ -6596,6 +6599,16 @@ mod tests {
             parse_command(&args("tab --activate select t4"), &default_flags()).unwrap();
         assert_eq!(flag_before_subcommand["tabId"], "t4");
         assert_eq!(flag_before_subcommand["activate"], true);
+
+        // `tab switch` alias:
+        let switch_cmd = parse_command(&args("tab switch t2"), &default_flags()).unwrap();
+        assert_eq!(switch_cmd["action"], "tab_switch");
+        assert_eq!(switch_cmd["tabId"], "t2");
+
+        let switch_front =
+            parse_command(&args("tab switch --activate t2"), &default_flags()).unwrap();
+        assert_eq!(switch_front["tabId"], "t2");
+        assert_eq!(switch_front["activate"], true);
     }
 
     #[test]
