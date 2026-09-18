@@ -4580,7 +4580,7 @@ async fn handle_do_action(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     // (the tree cannot say for this action). Callers that treat null as true
     // are back to the silent success this command exists to avoid.
     let confirmed = match (&after_actions, decidable) {
-        (Some(_), true) => Some(!warning.is_some()),
+        (Some(_), true) => Some(warning.is_none()),
         _ => None,
     };
     let mut out = json!({
@@ -5071,6 +5071,9 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
     // An explicit `--tab <ref>` (issue #88) switches to that tab first, so the
     // shot targets it regardless of the active pin — resolved exactly like
     // `tab <id>` (targetId, then `t<N>`/label).
+    // Whether an explicit `--tab <ref>` actually moved the capture off the
+    // currently-active tab. Only that case needs the compositor wake-up below.
+    let mut switched_to_inactive_tab = false;
     if let Some(tab_ref_str) = cmd
         .get("tab")
         .or_else(|| cmd.get("tabId"))
@@ -5098,15 +5101,25 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
         };
         if let Some((old_target, new_target)) = switch_target {
             state.switch_tab_context(old_target.as_deref(), &new_target);
+            switched_to_inactive_tab = true;
         }
     }
-    if let Some(mgr) = state.browser.as_mut() {
-        // Waking Chrome's GPU compositor:
-        // Background and occluded tabs stop producing frames in headful Chrome,
-        // which causes Page.captureScreenshot to stall indefinitely until the
-        // relay timeout (8000ms). Bringing the target tab to front ensures Chrome
-        // immediately produces frames and captures in milliseconds.
-        let _ = mgr.bring_to_front().await;
+    // Waking Chrome's GPU compositor:
+    // Background and occluded tabs stop producing frames in headful Chrome,
+    // which causes Page.captureScreenshot to stall indefinitely until the
+    // relay timeout (8000ms). Bringing the target tab to front ensures Chrome
+    // immediately produces frames and captures in milliseconds.
+    //
+    // Only do this when `--tab` switched the capture to a tab that was NOT the
+    // active/foreground tab: that tab may be idle and needs the wake-up. Firing
+    // bring_to_front on every screenshot (the common path: no `--tab`, or `--tab`
+    // pointing at the already-active tab) steals the foreground on each shot, so
+    // concurrent sessions would fight over which tab is frontmost — the opposite
+    // of the multi-tab isolation this path is meant to preserve.
+    if switched_to_inactive_tab {
+        if let Some(mgr) = state.browser.as_mut() {
+            let _ = mgr.bring_to_front().await;
+        }
     }
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
