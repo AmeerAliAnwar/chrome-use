@@ -3128,6 +3128,48 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         "diff" => parse_diff(&rest, &id),
 
         // === Batch ===
+        "jev" => {
+            if rest.first() != Some(&"run") {
+                return Err(ParseError::InvalidValue {
+                    message: "Usage: chrome-use jev run --goal <text> [--url <url>]".to_string(),
+                    usage: "jev run --goal <text> [--url <url>]",
+                });
+            }
+            let mut cmd = json!({ "id": id, "action": "jev" });
+            let mut goal: Vec<&str> = Vec::new();
+            let mut i = 1;
+            while i < rest.len() {
+                match rest[i] {
+                    flag @ ("--goal" | "--url") => {
+                        let value = rest
+                            .get(i + 1)
+                            .copied()
+                            .filter(|v| !v.starts_with("--"))
+                            .ok_or_else(|| ParseError::InvalidValue {
+                                message: format!("jev run: {flag} needs a value"),
+                                usage: "jev run --goal <text> [--url <url>]",
+                            })?;
+                        if flag == "--goal" {
+                            goal.push(value);
+                        } else {
+                            cmd["url"] = json!(value);
+                        }
+                        i += 1;
+                    }
+                    other => goal.push(other),
+                }
+                i += 1;
+            }
+            if goal.is_empty() {
+                return Err(ParseError::InvalidValue {
+                    message: "jev run needs a goal: --goal <text>".to_string(),
+                    usage: "jev run --goal <text> [--url <url>]",
+                });
+            }
+            cmd["goal"] = json!(goal.join(" "));
+            Ok(cmd)
+        }
+
         "batch" => {
             let bail = rest.contains(&"--bail");
             let commands: Vec<&str> = rest.iter().filter(|a| **a != "--bail").copied().collect();
@@ -5070,6 +5112,34 @@ mod tests {
         assert!(parse(&["keep", "--as"]).is_err());
         assert!(parse(&["keep", "--unknown"]).is_err());
         assert!(parse(&["keep", "--release", "extra"]).is_err());
+    }
+
+    #[test]
+    fn jev_run_requires_a_goal_and_flag_values() {
+        let parse = |a: &[&str]| {
+            let a: Vec<String> = a.iter().map(|s| s.to_string()).collect();
+            parse_command(&a, &default_flags())
+        };
+        let cmd = parse(&[
+            "jev",
+            "run",
+            "--url",
+            "https://x.test",
+            "--goal",
+            "find",
+            "flights",
+        ])
+        .expect("jev run parses");
+        assert_eq!(cmd["action"], "jev");
+        assert_eq!(cmd["url"], "https://x.test");
+        assert_eq!(cmd["goal"], "find flights");
+
+        // A flag without its value is a usage error, not part of the goal.
+        assert!(parse(&["jev", "run", "--goal"]).is_err());
+        assert!(parse(&["jev", "run", "--goal", "x", "--url"]).is_err());
+        assert!(parse(&["jev", "run", "--goal", "--url", "https://x.test"]).is_err());
+        assert!(parse(&["jev", "run"]).is_err());
+        assert!(parse(&["jev"]).is_err());
     }
 
     fn default_flags() -> Flags {
