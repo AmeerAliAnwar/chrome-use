@@ -3751,13 +3751,26 @@ async fn try_in_page_route(mgr: &BrowserManager, target: &str) -> Option<Value> 
 
     // The click is only a claim; the router has to actually land. Poll briefly,
     // and hand back `None` on a miss so the caller does the real navigation.
+    //
+    // `readyState` is polled with the URL because the clicked link is not always
+    // a client-side route: on a same-origin plain link the browser does a real
+    // navigation, and `location` changes at commit, well before the document is
+    // parsed. Returning on the URL alone would hand back a page the ordinary
+    // `open --wait-until load` would still have been waiting for. An SPA route
+    // never leaves `readyState` at `loading`, so this costs it nothing.
+    const LANDED_JS: &str = r#"JSON.stringify([location.href, document.readyState !== 'loading'])"#;
     for _ in 0..30 {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        let Ok(now) = mgr.evaluate("location.href", None).await else {
+        let Ok(now) = mgr.evaluate(LANDED_JS, None).await else {
             continue;
         };
-        let Some(now) = now.as_str() else { continue };
-        if same_page_for_routing(now, target) {
+        let Some((now, ready)) = now
+            .as_str()
+            .and_then(|s| serde_json::from_str::<(String, bool)>(s).ok())
+        else {
+            continue;
+        };
+        if ready && same_page_for_routing(&now, target) {
             let title = mgr.get_title().await.unwrap_or_default();
             return Some(json!({ "url": now, "title": title }));
         }

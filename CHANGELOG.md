@@ -5,6 +5,8 @@
 <!-- release:start -->
 ### Bug Fixes
 
+- **`open --prefer-spa` waits for the page to be ready, not just for the URL to change.** The clicked link is not always a client-side route: on a same-origin plain link the browser does a real navigation and `location` changes at commit, well before the document is parsed, so the command could return a page that an ordinary `open --wait-until load` would still have been waiting for. `readyState` is now polled with the URL. An SPA route never sits at `loading`, so it costs that path nothing.
+
 - **`cu.find` is now defined.** The script guide has always listed it among the `cu.*` helpers, but the prelude never defined it, so calling it threw "cu.find is not a function". It mirrors the CLI: a string is the natural-language search, and `{ selector }` lists matching elements.
 
 ### Contributors
