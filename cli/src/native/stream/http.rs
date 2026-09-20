@@ -5,9 +5,10 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::RwLock;
 
-use crate::connection::get_socket_dir;
 #[cfg(windows)]
-use crate::connection::resolve_port;
+#[cfg(windows)]
+use crate::connection::announced_port;
+use crate::connection::get_socket_dir;
 
 use super::chat::{chat_status_json, handle_chat_request, handle_models_request};
 use super::dashboard::spawn_session;
@@ -464,7 +465,12 @@ pub(super) async fn relay_command_to_daemon(
 
     #[cfg(windows)]
     let stream = {
-        let port = resolve_port(session_name);
+        // Only a port the daemon announced. The derived port is a guess in a
+        // range the OS also hands to unrelated programs, and connecting to one
+        // of those succeeds and then never answers (#327).
+        let port = announced_port(session_name).ok_or_else(|| {
+            format!("Failed to connect to daemon: no daemon endpoint for session '{session_name}' (os error 2)")
+        })?;
         tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
             .await
             .map_err(|e| format!("Failed to connect to daemon: {}", e))?

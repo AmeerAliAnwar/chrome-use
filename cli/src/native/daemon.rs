@@ -787,9 +787,18 @@ mod tests {
             .spawn()
             .expect("failed to spawn child");
 
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        // Poll to a deadline rather than assuming a fixed 200ms is enough. On a
+        // loaded machine (a full parallel test run plus a build) it is not, and
+        // this failed spuriously. The point of the test is that `try_wait`
+        // reaps without a `waitpid(-1)` handler, not how fast the child exits.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut reaped = child.try_wait();
+        while matches!(reaped, Ok(None)) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            reaped = child.try_wait();
+        }
 
-        match child.try_wait() {
+        match reaped {
             Ok(Some(status)) => {
                 assert!(
                     !status.success(),
