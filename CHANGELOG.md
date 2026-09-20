@@ -1,8 +1,21 @@
 # Changelog
 
-## 1.5.129
+## 1.5.130
 
 <!-- release:start -->
+### Bug Fixes
+
+- **Windows: a first command on a fresh `--session` name could hang forever with no output** (#327). `resolve_port` fell back to a port derived from a hash of the session name into 49152-65534 — the Windows *ephemeral* range, the ports the OS hands to every other program's outbound sockets — so on a busy machine an unrelated process was routinely already listening there. Connecting then succeeded against a stranger: `daemon_ready` reported a healthy daemon so none was started, the command was written, and nothing ever answered. The recovery that clears stale state and starts a fresh daemon keys on "os error 2", which a Unix socket reports and a TCP connect never does, so it could not fire on Windows. Now the `.port` file a daemon writes is the only source for connecting (no file means "start one", not "connect to whoever is there"), the derived port moves to 21000-31999 so the daemon's preferred bind stops colliding by construction, and the Windows connect is bounded and reaches the existing recovery. Cross-checked against `x86_64-pc-windows-gnu`; not reproduced on Windows, so this is a demonstrated defect matching the report, not a confirmed diagnosis of the reporter's machine.
+
+- **A child-reaping test no longer flakes** under a loaded machine: it slept a fixed 200 ms and then asserted the child had exited, and now polls to a deadline.
+
+### Contributors
+
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.129
+
 ### Bug Fixes
 
 - **`open --prefer-spa` waits for the page to be ready, not just for the URL to change.** The clicked link is not always a client-side route: on a same-origin plain link the browser does a real navigation and `location` changes at commit, well before the document is parsed, so the command could return a page that an ordinary `open --wait-until load` would still have been waiting for. `readyState` is now polled with the URL. An SPA route never sits at `loading`, so it costs that path nothing.
@@ -12,7 +25,6 @@
 ### Contributors
 
 - @leeguooooo
-<!-- release:end -->
 
 ## 1.5.128
 
