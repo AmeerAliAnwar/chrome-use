@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.5.126
+
+<!-- release:start -->
+### Bug Fixes
+
+- **Tab switch no longer pays for a second target discovery** (#338 by @AmeerAliAnwar): `tab switch` ran `resync_targets` unconditionally and then `tab_switch` ran discovery again through `reattach_active_session`. A known target id or `t<N>` ref now resolves locally, and discovery runs only as the fallback for an unknown tab reference.
+
+- **The refusal for an unadopted tab now names a command that works.** It gained a recovery hint reading ``use `tab adopt t1` or `--adopt` ``, and neither exists: `tab adopt` matches a spec against targetIds and URL substrings only, so `t1` fails with "no open tab matching `t1`", and there is no `--adopt` flag in the CLI. The hint now names the tab's targetId, so the suggested command is copy-pasteable.
+
+- **The extension version is read from the profile actually being driven** (#319, remaining callers): the per-profile version file landed for `status` and `doctor`, but `outdated_extension_note`, the `tab select` / `tab adopt` liveness warnings, `tab inspect`'s error and the bug-report environment block still read the generic `relay-ext-version`, which whichever worker said hello last overwrites. With two profiles connected each could describe the other one — including telling an up-to-date user to go update. The fallback for extensions too old to report a `profileId` is unchanged.
+
+- **Duplicated tabs verify their settle under coarse timer ticks** (#338 by @AmeerAliAnwar): with 15.6ms platform tick quantization the transaction deadline could expire while `completeBefore` waited on a stalled promise, so `observeWithin` was called with `timeoutMs = 0` and skipped verification even though foreground activation had finished. A small observation budget lets it confirm a state that is already reached.
+
+### Contributors
+
+- @leeguooooo
+- @AmeerAliAnwar
+<!-- release:end -->
+
 ## 1.5.125
 
 <!-- release:start -->
