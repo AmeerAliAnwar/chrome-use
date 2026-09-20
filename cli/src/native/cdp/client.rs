@@ -483,7 +483,9 @@ mod timeout_tests {
         // The sizes span both ceilings: the daemon's binds at 82.5KB and the
         // extension's at 146KB, so the invariant is checked while each is
         // scaling and while each is capped.
-        for len in [1_000u64, 20_000, 34_000, 80_000, 100_000, 150_000, 300_000, 10_000_000] {
+        for len in [
+            1_000u64, 20_000, 34_000, 80_000, 100_000, 150_000, 300_000, 10_000_000,
+        ] {
             let params = json!({ "text": "a".repeat(len as usize) });
             let daemon = command_timeout("Input.insertText", Some(&params)).as_millis() as u64;
             let extension = std::cmp::min(8_000 + len * 2, 300_000);
