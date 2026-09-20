@@ -1,8 +1,23 @@
 # Changelog
 
-## 1.5.130
+## 1.5.131
 
 <!-- release:start -->
+### Bug Fixes
+
+- **A large `Input.insertText` is no longer declared failed while it is working** (#315, #309). A timed-out insert cannot be cancelled — losing a `Promise.race` cancels nothing and CDP has no primitive to recall a dispatched command — so the page keeps working on it for minutes and the next command on that tab collides with a renderer we already gave up on. That damage was largely our own timeout: the extension's budget is 8s + 2ms/byte, "~4x the measured worst case", but the 120s cap started binding at 56KB and the *effective* rate collapsed above it — 0.8ms/byte at 150KB, under the ~1.0ms/byte worst case measured on chatgpt.com. A healthy renderer was failed at exactly the sizes the feature exists for, and #309 measured the same ceiling from outside ("around 100KB, not the ~265KB the budgets imply"). The extension cap moves to 300s and the daemon's to 360s, keeping "client outlasts daemon outlasts extension" at every size; the invariant test now spans both ceilings. The cap still exists for a pathological payload — it just no longer cuts into the per-byte allowance an ordinary large insert depends on.
+
+- **The extension's timeout text no longer advises the chunking that corrupts text.** It still said "Insert less at once", which #301 proved scrambles text at every boundary because a call returns on dispatch, not on commit. The CLI-side hint was fixed for this; this copy was missed. It now says the insert was not cancelled and the page may still be working.
+
+- ab-connect **0.5.27**.
+
+### Contributors
+
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.130
+
 ### Bug Fixes
 
 - **Windows: a first command on a fresh `--session` name could hang forever with no output** (#327). `resolve_port` fell back to a port derived from a hash of the session name into 49152-65534 — the Windows *ephemeral* range, the ports the OS hands to every other program's outbound sockets — so on a busy machine an unrelated process was routinely already listening there. Connecting then succeeded against a stranger: `daemon_ready` reported a healthy daemon so none was started, the command was written, and nothing ever answered. The recovery that clears stale state and starts a fresh daemon keys on "os error 2", which a Unix socket reports and a TCP connect never does, so it could not fire on Windows. Now the `.port` file a daemon writes is the only source for connecting (no file means "start one", not "connect to whoever is there"), the derived port moves to 21000-31999 so the daemon's preferred bind stops colliding by construction, and the Windows connect is bounded and reaches the existing recovery. Cross-checked against `x86_64-pc-windows-gnu`; not reproduced on Windows, so this is a demonstrated defect matching the report, not a confirmed diagnosis of the reporter's machine.
@@ -12,7 +27,6 @@
 ### Contributors
 
 - @leeguooooo
-<!-- release:end -->
 
 ## 1.5.129
 
