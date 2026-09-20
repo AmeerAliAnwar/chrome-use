@@ -651,13 +651,23 @@ fn get_daemon_socket_dir() -> PathBuf {
     std::env::temp_dir().join("chrome-use")
 }
 
+/// The port this daemon PREFERS to bind, derived from the session name.
+///
+/// Only a preference: a failed bind falls back to an OS-assigned port, and the
+/// `.port` file the daemon writes is what clients actually use.
+///
+/// The range deliberately sits below 49152. It used to be 49152-65534, which
+/// is the Windows ephemeral range — the ports the OS hands out to every other
+/// program's outbound sockets — so on a busy machine the preferred port was
+/// routinely already taken by something unrelated (#327). Keep this in step
+/// with the client's copy in `connection.rs`; the test below pins both.
 #[cfg(windows)]
 fn get_port_for_session(session: &str) -> u16 {
     let mut hash: i32 = 0;
     for c in session.chars() {
         hash = ((hash << 5).wrapping_sub(hash)).wrapping_add(c as i32);
     }
-    49152 + ((hash.unsigned_abs() as u32 % 16383) as u16)
+    21000 + ((hash.unsigned_abs() as u32 % 11000) as u16)
 }
 
 #[cfg(test)]
@@ -710,13 +720,29 @@ mod tests {
         assert!(should_close_browser_on_idle(false, false));
     }
 
+    /// The daemon's preferred port must match the client's copy exactly, and
+    /// must stay out of the Windows ephemeral range (#327): a preferred port
+    /// the OS also hands to unrelated programs is taken often enough that the
+    /// fallback path became the normal path.
     #[cfg(windows)]
     #[test]
     fn test_port_matches_client_algorithm() {
-        assert_eq!(get_port_for_session("default"), 50838);
-        assert_eq!(get_port_for_session("my-session"), 63105);
-        assert_eq!(get_port_for_session("work"), 51184);
-        assert_eq!(get_port_for_session(""), 49152);
+        for session in ["default", "my-session", "work", "", "cu-final2"] {
+            assert_eq!(
+                get_port_for_session(session),
+                crate::connection::get_port_for_session(session),
+                "daemon and client disagree on the preferred port for {session:?}"
+            );
+            let port = get_port_for_session(session);
+            assert!(
+                (21000..32000).contains(&port),
+                "{session:?} -> {port} is outside the reserved range"
+            );
+            assert!(
+                port < 49152,
+                "{session:?} -> {port} is in the ephemeral range"
+            );
+        }
     }
 
     /// Guard against re-introducing `waitpid(-1)` in daemon code.

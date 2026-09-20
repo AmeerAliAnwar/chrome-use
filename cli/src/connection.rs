@@ -707,26 +707,52 @@ fn get_port_path(session: &str) -> PathBuf {
 }
 
 #[cfg(windows)]
+/// The port a daemon for `session` PREFERS to bind. Mirrors the daemon's own
+/// copy in `native/daemon.rs`, which a test pins to this one.
+///
+/// Below 49152 on purpose: the old 49152-65534 range is the Windows ephemeral
+/// range that the OS hands to every other program's sockets, so the preferred
+/// port was routinely occupied by something unrelated (#327).
 pub fn get_port_for_session(session: &str) -> u16 {
     let mut hash: i32 = 0;
     for c in session.chars() {
         hash = ((hash << 5).wrapping_sub(hash)).wrapping_add(c as i32);
     }
-    // Correct logic: first take absolute modulo, then cast to u16
-    // Using unsigned_abs() to safely handle i32::MIN
-    49152 + ((hash.unsigned_abs() as u32 % 16383) as u16)
+    // Take the absolute modulo first, then cast to u16.
+    // `unsigned_abs()` handles i32::MIN safely.
+    21000 + ((hash.unsigned_abs() as u32 % 11000) as u16)
 }
 
-/// Read the actual daemon port from the `.port` file written by the daemon.
-/// Falls back to the hash-derived port if the file does not exist or is
-/// unreadable (e.g. daemon has not started yet).
+/// The port a daemon for `session` has ANNOUNCED, from the `.port` file it
+/// writes once it is listening. `None` when no daemon has announced one.
+///
+/// It used to fall back to `get_port_for_session` when the file was missing,
+/// and that fallback is the Windows hang in #327. The derived port lives in
+/// 49152-65534 — the Windows ephemeral range, which is exactly what the OS
+/// hands out to every other program's sockets — so on a busy box an unrelated
+/// process is routinely already listening there. Connecting then SUCCEEDS
+/// against a stranger: `daemon_ready` reports a healthy daemon, no daemon is
+/// started, the command is written, and nothing ever answers. That is the
+/// reported symptom exactly — a first command on a fresh session name hanging
+/// with no output and no error, indefinitely.
+///
+/// The `.port` file is the only evidence that the listener on a port is ours,
+/// so it is now the only source. A missing file means "no daemon yet", which
+/// the callers turn into "start one" instead of "connect to whoever is there".
 #[cfg(windows)]
-pub fn resolve_port(session: &str) -> u16 {
-    let port_path = get_port_path(session);
-    fs::read_to_string(&port_path)
+pub fn announced_port(session: &str) -> Option<u16> {
+    fs::read_to_string(get_port_path(session))
         .ok()
         .and_then(|s| s.trim().parse::<u16>().ok())
-        .unwrap_or_else(|| get_port_for_session(session))
+        .filter(|port| *port != 0)
+}
+
+/// The announced port, or the derived one for display/diagnostics only.
+///
+/// Never use this to decide whether to CONNECT — see [`announced_port`].
+#[cfg(windows)]
+pub fn resolve_port(session: &str) -> u16 {
+    announced_port(session).unwrap_or_else(|| get_port_for_session(session))
 }
 
 pub fn daemon_ready(session: &str) -> bool {
@@ -737,7 +763,11 @@ pub fn daemon_ready(session: &str) -> bool {
     }
     #[cfg(windows)]
     {
-        let port = resolve_port(session);
+        // Only a port the daemon announced counts. Probing the derived port
+        // would call a stranger's listener a ready daemon (#327).
+        let Some(port) = announced_port(session) else {
+            return false;
+        };
         TcpStream::connect_timeout(
             &format!("127.0.0.1:{}", port).parse().unwrap(),
             Duration::from_millis(50),
@@ -1255,10 +1285,26 @@ fn connect(session: &str) -> Result<Connection, String> {
     }
     #[cfg(windows)]
     {
-        let port = resolve_port(session);
-        TcpStream::connect(format!("127.0.0.1:{}", port))
-            .map(Connection::Tcp)
-            .map_err(|e| format!("Failed to connect: {}", e))
+        // No announced port means no daemon to talk to. Report it the way a
+        // missing Unix socket reports itself, so the caller's existing
+        // "endpoint disappeared → clear stale state, start a fresh daemon"
+        // recovery runs instead of connecting to whoever holds the derived
+        // port and then waiting forever (#327).
+        let Some(port) = announced_port(session) else {
+            return Err(format!(
+                "Failed to connect: no daemon endpoint for session '{session}' (os error 2)"
+            ));
+        };
+        // Bounded, like the readiness probe: a connect with no timeout is one
+        // more way this path can hang with nothing to show for it.
+        TcpStream::connect_timeout(
+            &format!("127.0.0.1:{}", port)
+                .parse()
+                .map_err(|e| format!("Failed to connect: bad daemon address: {e}"))?,
+            Duration::from_secs(5),
+        )
+        .map(Connection::Tcp)
+        .map_err(|e| format!("Failed to connect: {}", e))
     }
 }
 
@@ -1636,6 +1682,50 @@ mod tests {
         }
     }
 
+    /// The preferred port must stay out of the Windows ephemeral range.
+    ///
+    /// #327: it was derived into 49152-65534, the range Windows hands to every
+    /// other program's outbound sockets, so an unrelated process was routinely
+    /// already listening on it.
+    #[cfg(windows)]
+    #[test]
+    fn the_preferred_port_avoids_the_windows_ephemeral_range() {
+        for session in ["default", "my-session", "work", "", "cu-final2", "cu-pin"] {
+            let port = super::get_port_for_session(session);
+            assert!(
+                port < 49152,
+                "{session:?} -> {port} is in the ephemeral range"
+            );
+            assert!(
+                (21000..32000).contains(&port),
+                "{session:?} -> {port} is outside the reserved range"
+            );
+        }
+    }
+
+    /// Windows could never self-heal a missing endpoint: the recovery is keyed
+    /// on "os error 2", which a Unix socket reports and a TCP connect never
+    /// does, so the branch that clears stale state and starts a fresh daemon
+    /// was unreachable there (#327). The Windows "no announced port" error is
+    /// worded to reach it — if someone rewords it, this fails rather than
+    /// silently restoring the hang.
+    #[test]
+    fn a_missing_windows_endpoint_reaches_the_stale_state_recovery() {
+        let windows_no_port =
+            "Failed to connect: no daemon endpoint for session 'cu-pin' (os error 2)";
+        assert!(super::is_missing_endpoint_error(windows_no_port));
+
+        // The Unix wording that has always reached it, for contrast.
+        assert!(super::is_missing_endpoint_error(
+            "Failed to connect: No such file or directory (os error 2)"
+        ));
+        // A connection that was refused is a different situation and must NOT
+        // be mistaken for a missing endpoint.
+        assert!(!super::is_missing_endpoint_error(
+            "Failed to connect: Connection refused (os error 61)"
+        ));
+    }
+
     #[test]
     fn only_payload_sized_commands_widen_the_read_budget() {
         // An ordinary command keeps the flat 45s, so a genuinely hung session
@@ -1914,7 +2004,7 @@ mod tests {
         assert!(is_transient_error(
             "Failed to connect: No such file or directory (os error 2)"
         ));
-        assert!(is_missing_endpoint_error(
+        assert!(super::is_missing_endpoint_error(
             "Failed to connect: No such file or directory (os error 2)"
         ));
     }
