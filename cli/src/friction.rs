@@ -275,7 +275,7 @@ fn environment_block() -> String {
         std::env::consts::OS,
         std::env::consts::ARCH,
     );
-    match crate::connect::relay_ext_version() {
+    match crate::connect::relay_ext_version_driving() {
         Some(v) => out.push_str(&format!(
             "\n- ab-connect: {v} (bundled with this CLI: {})",
             env!("AB_CONNECT_VERSION")

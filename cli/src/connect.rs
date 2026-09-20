@@ -1888,7 +1888,7 @@ pub fn update_instruction() -> String {
 /// behind the version this CLI bundles is the normal state for Web Store users
 /// and not a problem to report (#186).
 pub fn outdated_extension_note() -> Option<String> {
-    let live = relay_ext_version()?;
+    let live = relay_ext_version_driving()?;
     let bundled = env!("AB_CONNECT_VERSION");
     if !crate::upgrade::version_is_newer(bundled, &live) {
         return None;

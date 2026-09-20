@@ -8546,7 +8546,7 @@ async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value
         Err(_) => {
             let warning = tab_liveness_probe_warning(
                 mgr.on_relay(),
-                crate::connect::relay_ext_version().as_deref(),
+                crate::connect::relay_ext_version_driving().as_deref(),
                 env!("AB_CONNECT_VERSION"),
             );
             if let Some(obj) = result.as_object_mut() {
@@ -8747,7 +8747,7 @@ async fn handle_tab_adopt(cmd: &Value, state: &mut DaemonState) -> Result<Value,
             Err(_) => {
                 let warning = tab_liveness_probe_warning(
                     mgr.on_relay(),
-                    crate::connect::relay_ext_version().as_deref(),
+                    crate::connect::relay_ext_version_driving().as_deref(),
                     env!("AB_CONNECT_VERSION"),
                 );
                 if let Some(obj) = result.as_object_mut() {
@@ -8793,7 +8793,7 @@ async fn handle_tab_inspect(cmd: &Value, state: &mut DaemonState) -> Result<Valu
         }
     };
     let on_relay = mgr.on_relay();
-    let live_extension_version = crate::connect::relay_ext_version();
+    let live_extension_version = crate::connect::relay_ext_version_driving();
     mgr.tab_inspect_by_id(tab_id).await.map_err(|error| {
         tab_inspect_error_message(
             error,
