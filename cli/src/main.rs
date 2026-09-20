@@ -724,11 +724,24 @@ fn session_stop_incomplete_message(session: &str, error: &str, tabs: usize) -> S
     )
 }
 
+/// What `--force` actually did, including what it did not do.
+///
+/// #309 reported running this against a session name that kept refusing
+/// commands, reading "dropped its record", and concluding the name should now
+/// be clear — it was not. `--force` drops the CLI's record; the tabs stay open,
+/// and on the extension relay a session's tabs live in a tab group named after
+/// the session, so a fresh daemon under the same name meets them again. If one
+/// of them is a tab whose renderer is still busy, the name keeps behaving as if
+/// nothing was cleared. Saying so is the difference between a command that
+/// looks broken and one whose limits are known.
 fn session_stop_forced_note(session: &str, tabs: usize) -> String {
     let tab_word = if tabs == 1 { "tab" } else { "tabs" };
     format!(
         "stopped session daemon {session} and dropped its record of {tabs} {tab_word} — \
-         they were not closed and stay open in the browser; close them by hand if you no longer want them."
+         they were not closed and stay open in the browser; close them by hand if you no longer want them. \
+         Note this clears the record, not the tabs: a new daemon under the name `{session}` finds the same \
+         tabs again, so if that name was refusing commands because one of them is busy, close that tab or \
+         use a different --session name."
     )
 }
 
@@ -3753,5 +3766,15 @@ mod tests {
         let m = session_stop_forced_note("cu-x", 1);
         assert!(m.contains("1 tab —"), "{m}");
         assert!(m.contains("not closed"), "{m}");
+    }
+
+    /// #309: "dropped its record" read as "the name is clear now", and it is
+    /// not. The note must say the record is not the tabs, and give the move
+    /// that works when the name keeps refusing.
+    #[test]
+    fn forced_stop_does_not_claim_the_name_is_clear() {
+        let m = session_stop_forced_note("cu-x", 2);
+        assert!(m.contains("the record, not the tabs"), "{m}");
+        assert!(m.contains("--session"), "{m}");
     }
 }
