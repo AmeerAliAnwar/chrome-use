@@ -2046,13 +2046,16 @@ mod tests {
         assert!(!is_transient_error("Daemon not found"));
     }
 
+    /// Exact values, so a change to the derivation is a deliberate act rather
+    /// than a surprise. They moved with the range in #327 — the old ones sat in
+    /// 49152-65534, the Windows ephemeral range.
     #[test]
     #[cfg(windows)]
     fn test_get_port_for_session() {
-        assert_eq!(get_port_for_session("default"), 50838);
-        assert_eq!(get_port_for_session("my-session"), 63105);
-        assert_eq!(get_port_for_session("work"), 51184);
-        assert_eq!(get_port_for_session(""), 49152);
+        assert_eq!(get_port_for_session("default"), 28905);
+        assert_eq!(get_port_for_session("my-session"), 21243);
+        assert_eq!(get_port_for_session("work"), 24441);
+        assert_eq!(get_port_for_session(""), 21000);
     }
 
     // === Daemon Version Mismatch Detection Tests ===
