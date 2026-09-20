@@ -1,8 +1,25 @@
 # Changelog
 
-## 1.5.126
+## 1.5.127
 
 <!-- release:start -->
+### New Features
+
+- **`script --keep <name>` / `--in <name>`: JS contexts that persist across calls** (#289). `script` built a fresh engine every call, so nothing survived between them. What that costs is round trips, not bytes: a single call could always do several steps, but an agent usually has to see one step's result before choosing the next, which meant re-deriving every handle each time. `--keep` runs in a named context and creates it on demand, `--in` requires one that already exists, `--drop <name>` releases one and `--contexts` lists them. Contexts are released with the session's daemon. A named context evaluates at top level so declarations survive, which has two consequences that now carry a hint instead of a bare SyntaxError: top-level `return` is invalid (end with the expression), and re-declaring a `const` the context still holds throws, as in a Node REPL.
+
+- **`open <url> --prefer-spa`: route in-page instead of cold-booting the app** (#311). When the page is already on the target's origin and the app has its own link to the target, click that link and let the router handle it. A full navigation makes the SPA boot from scratch — measured on chatgpt.com in the issue, `open <origin>` cost 45 backend-api requests where the app's own controls cost 1 to 9, and that site throttles on requests, not messages. On react.dev (`/learn` to `/reference/react`) an in-page route costs 19 requests against 47 for the navigation. It falls back to an ordinary navigation for a cross-origin target, when no link matches, or when the router does not land, so it never leaves you somewhere other than the requested URL. Opt-in, because a client-side route can keep stale state a reload would have cleared.
+
+### Bug Fixes
+
+- **`cu.fill` never worked.** The `script` JS helper sent `text` where the `fill` action wants `value`, so every `cu.fill(...)` failed with "Missing 'value' parameter". Found by driving a real login form while verifying the above.
+
+### Contributors
+
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.126
+
 ### Bug Fixes
 
 - **Tab switch no longer pays for a second target discovery** (#338 by @AmeerAliAnwar): `tab switch` ran `resync_targets` unconditionally and then `tab_switch` ran discovery again through `reattach_active_session`. A known target id or `t<N>` ref now resolves locally, and discovery runs only as the fallback for an unknown tab reference.
@@ -17,7 +34,6 @@
 
 - @leeguooooo
 - @AmeerAliAnwar
-<!-- release:end -->
 
 ## 1.5.125
 
