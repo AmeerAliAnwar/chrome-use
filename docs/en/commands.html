@@ -83,6 +83,9 @@
 <span class="du-prompt">$</span> chrome-use reload              <span class="du-cmt"># reload</span>
 <span class="du-cmt"># SPA client-side navigation: auto-detects Next.js router.push, falls back to history.pushState</span>
 <span class="du-prompt">$</span> chrome-use pushstate <span class="du-str">&lt;url&gt;</span>
+<span class="du-cmt"># Already on the target's origin and the page links to it? Click that link</span>
+<span class="du-cmt"># instead of navigating (react.dev: 19 requests in-page vs 47 for a navigation)</span>
+<span class="du-prompt">$</span> chrome-use open <span class="du-str">&lt;url&gt;</span> <span class="du-flag">--prefer-spa</span>
 <span class="du-prompt">$</span> chrome-use close               <span class="du-cmt"># close the browser (aliases: quit, exit)</span>
 <span class="du-prompt">$</span> chrome-use connect 9222        <span class="du-cmt"># connect over a CDP port</span></code></pre>
       </div>

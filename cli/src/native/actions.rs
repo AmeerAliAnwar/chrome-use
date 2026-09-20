@@ -3645,11 +3645,124 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         }
     }
 
+    // `--prefer-spa`: drive the app's own client-side route instead of doing a
+    // full navigation, when one is available (#311).
+    if cmd
+        .get("preferSpa")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        if let Some(mut result) = try_in_page_route(mgr, url).await {
+            if let Some(obj) = result.as_object_mut() {
+                obj.insert("inPageRoute".to_string(), json!(true));
+            }
+            return Ok(with_site_hint(result, url));
+        }
+    }
+
     let result = mgr.navigate(url, wait_until).await?;
     // Adaptive humanize: sample the freshly loaded page for known behavioural
     // anti-bot vendors and escalate this session to Human if any are present.
     detect_and_set_humanize(mgr).await;
     Ok(with_site_hint(result, url))
+}
+
+/// Two URLs that name the same page for routing purposes: same origin, same
+/// path (a trailing slash is not a different page), same query. The fragment is
+/// deliberately ignored — it never reaches the server and routers treat it as
+/// in-page position.
+fn same_page_for_routing(a: &str, b: &str) -> bool {
+    let (Ok(a), Ok(b)) = (url::Url::parse(a), url::Url::parse(b)) else {
+        return false;
+    };
+    a.origin() == b.origin()
+        && a.path().trim_end_matches('/') == b.path().trim_end_matches('/')
+        && a.query().unwrap_or("") == b.query().unwrap_or("")
+}
+
+/// Whether an in-page route to `target` is even worth attempting: we must
+/// already be somewhere on the target's origin. A cross-origin `open` is a real
+/// navigation, always.
+fn in_page_route_is_possible(current: &str, target: &str) -> bool {
+    let (Ok(current), Ok(target)) = (url::Url::parse(current), url::Url::parse(target)) else {
+        return false;
+    };
+    current.origin() == target.origin()
+}
+
+/// Try to reach `target` by clicking the app's own link to it, returning the
+/// resulting `{url, title}` only when the page actually got there.
+///
+/// Why this exists (#311): a full navigation cold-boots the SPA. Measured on
+/// chatgpt.com, `open <origin>` cost 45 backend-api requests where the app's own
+/// "New chat" control cost 1 and a sidebar link cost 9 — and that site throttles
+/// on REQUESTS, not messages, so `open` was the dominant consumer of the budget
+/// deciding how long a tool could keep working.
+///
+/// `None` means "could not do it" for every reason — wrong origin, no matching
+/// link, the click went nowhere — and the caller then performs the ordinary
+/// navigation. That fallback is the whole safety story: this never leaves the
+/// caller somewhere other than the requested URL.
+async fn try_in_page_route(mgr: &BrowserManager, target: &str) -> Option<Value> {
+    let current = mgr
+        .evaluate("location.href", None)
+        .await
+        .ok()?
+        .as_str()?
+        .to_string();
+    if !in_page_route_is_possible(&current, target) {
+        return None;
+    }
+    // Already there: nothing to route, and re-navigating would cost the very
+    // cold boot this flag exists to avoid.
+    if same_page_for_routing(&current, target) {
+        let title = mgr.get_title().await.unwrap_or_default();
+        return Some(json!({ "url": current, "title": title }));
+    }
+
+    // Find the app's own link to the target and click it in the page, so the
+    // router sees a real activation rather than the history push we could have
+    // invented — a pushState the app never hears about renders nothing.
+    //
+    // Built by substitution rather than `format!` so the JS keeps its own
+    // braces and stays readable/greppable as JS.
+    const ROUTE_JS: &str = r#"(() => { try {
+            const want = new URL(__TARGET__);
+            const norm = (p) => p.replace(/\/+$/, '');
+            const same = (h) => {
+              try {
+                const u = new URL(h, location.href);
+                return u.origin === want.origin
+                  && norm(u.pathname) === norm(want.pathname)
+                  && u.search === want.search;
+              } catch (e) { return false; }
+            };
+            const a = [...document.querySelectorAll('a[href]')]
+              .find(el => same(el.getAttribute('href')));
+            if (!a) return false;
+            a.scrollIntoView({ block: 'center' });
+            a.click();
+            return true;
+          } catch (e) { return false; } })()"#;
+    let js = ROUTE_JS.replace("__TARGET__", &serde_json::to_string(target).ok()?);
+    if mgr.evaluate(&js, None).await.ok()?.as_bool() != Some(true) {
+        return None;
+    }
+
+    // The click is only a claim; the router has to actually land. Poll briefly,
+    // and hand back `None` on a miss so the caller does the real navigation.
+    for _ in 0..30 {
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        let Ok(now) = mgr.evaluate("location.href", None).await else {
+            continue;
+        };
+        let Some(now) = now.as_str() else { continue };
+        if same_page_for_routing(now, target) {
+            let title = mgr.get_title().await.unwrap_or_default();
+            return Some(json!({ "url": now, "title": title }));
+        }
+    }
+    None
 }
 
 /// Annotate a navigation/snapshot result with the `site` adapters available for
@@ -15086,7 +15199,57 @@ mod tests {
         assert_eq!(state.active_frame_id.as_deref(), Some("frame-1"));
     }
 
+    /// `--prefer-spa` must only ever be *attempted*; the target decides whether
+    /// it counts as the same page. A trailing slash and a fragment do not make a
+    /// different page; a different query or path does.
     #[test]
+    fn same_page_for_routing_ignores_trailing_slash_and_fragment() {
+        assert!(same_page_for_routing(
+            "https://x.com/chat",
+            "https://x.com/chat/"
+        ));
+        assert!(same_page_for_routing(
+            "https://x.com/chat#top",
+            "https://x.com/chat"
+        ));
+        assert!(same_page_for_routing("https://x.com/", "https://x.com"));
+
+        assert!(!same_page_for_routing(
+            "https://x.com/chat",
+            "https://x.com/other"
+        ));
+        assert!(!same_page_for_routing(
+            "https://x.com/c?id=1",
+            "https://x.com/c?id=2"
+        ));
+        // A different origin is never the same page, however alike the path.
+        assert!(!same_page_for_routing(
+            "https://x.com/chat",
+            "https://y.com/chat"
+        ));
+        assert!(!same_page_for_routing("not a url", "https://x.com/"));
+    }
+
+    /// An in-page route is only conceivable from the target's own origin —
+    /// cross-origin `open` must stay a real navigation.
+    #[test]
+    fn in_page_route_needs_the_same_origin() {
+        assert!(in_page_route_is_possible(
+            "https://x.com/a",
+            "https://x.com/b"
+        ));
+        assert!(!in_page_route_is_possible(
+            "https://x.com/a",
+            "https://y.com/b"
+        ));
+        // Scheme and port are part of the origin.
+        assert!(!in_page_route_is_possible(
+            "http://x.com/a",
+            "https://x.com/a"
+        ));
+        assert!(!in_page_route_is_possible("about:blank", "https://x.com/"));
+    }
+
     fn tab_adopt_failure_preserves_active_tab_context() {
         let mut state = DaemonState::new();
         state

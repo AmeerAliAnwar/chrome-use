@@ -578,6 +578,13 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             if rest.iter().any(|a| *a == "--reuse-tab" || *a == "--reuse") {
                 nav_cmd["reuseTab"] = json!(true);
             }
+            // `--prefer-spa`: when the page is already on the target's origin and
+            // an in-page link points at the target, click it instead of doing a
+            // full navigation (#311). Opt-in, because a client-side route can
+            // leave stale state a reload would have cleared.
+            if rest.contains(&"--prefer-spa") {
+                nav_cmd["preferSpa"] = json!(true);
+            }
             // Explicit readiness override (issue #10): SPAs whose `load` event
             // never fires (a long-lived XHR/websocket holds it open) hang out the
             // load-event wait. `--wait-until domcontentloaded` returns as soon as

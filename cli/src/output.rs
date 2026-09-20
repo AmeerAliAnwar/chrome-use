@@ -1948,6 +1948,16 @@ Global Options:
                        Env: AGENT_BROWSER_DEDICATED_WINDOW=1 (on) / 0 (off).
   --enable react-devtools   Inject the React DevTools hook before any page JS
   --init-script <path>      Register a page init script (repeatable)
+  --prefer-spa         When the page is already on the target's origin and the
+                       app has its own link to the target, click that link
+                       instead of navigating. A full navigation cold-boots the
+                       SPA, which on a request-metered site is the dominant
+                       cost: measured on react.dev, 19 requests in-page vs 47
+                       for the navigation. Falls back to a real navigation for
+                       a cross-origin target, when no link matches, or when the
+                       router does not land — so it never leaves you elsewhere.
+                       Opt-in because an in-page route can keep stale state
+                       that a reload would have cleared.
 
 Examples:
   chrome-use open                     # Launch, no nav
@@ -4684,6 +4694,8 @@ Tabs:
   tab close [ref]            Close a tab (external: session-created only)
   open <url> --reuse-tab     Reuse an existing tab on that URL instead of spawning
                              a duplicate (matches origin+path; preserves state)
+  open <url> --prefer-spa    Route in-page when already on the target's origin
+                             and the app links to it (falls back to navigating)
   adopt <url|targetId>       Read a PRE-EXISTING tab (the user's own, or another
                              session's) WITHOUT opening a new one — matches by URL
                              substring or stable targetId, then drives it. e.g.

@@ -80,6 +80,9 @@
 <span class="du-prompt">$</span> chrome-use reload              <span class="du-cmt"># 重新加载</span>
 <span class="du-cmt"># SPA 客户端导航：自动探测 Next.js router.push，回退 history.pushState</span>
 <span class="du-prompt">$</span> chrome-use pushstate <span class="du-str">&lt;url&gt;</span>
+<span class="du-cmt"># 已在目标同源、且页面里有指向目标的链接时，点那个链接而不是整页导航</span>
+<span class="du-cmt"># （实测 react.dev：站内 19 个请求 vs 整页导航 47 个）；不满足条件就照常导航</span>
+<span class="du-prompt">$</span> chrome-use open <span class="du-str">&lt;url&gt;</span> <span class="du-flag">--prefer-spa</span>
 <span class="du-prompt">$</span> chrome-use close               <span class="du-cmt"># 关闭浏览器（别名：quit, exit）</span>
 <span class="du-prompt">$</span> chrome-use connect 9222        <span class="du-cmt"># 通过 CDP 端口连接</span></code></pre>
       </div>
