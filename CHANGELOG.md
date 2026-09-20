@@ -21,7 +21,6 @@
 
 ## 1.5.125
 
-<!-- release:start -->
 ### New Features
 
 - **`chrome-use jev run --goal <text> [--url <url>]`**: a browser agent in which TypeSafe's Jev picks each step's operation and target from an indexed element table, and a small OpenAI-compatible model (default `inception/mercury-2.5` on OpenRouter) writes text only when a field needs typing. The policy is adapted from browser-use/jev-ultrafast (MIT); the browser layer is this CLI's own daemon socket, so no process is spawned per step. Keys come from `TYPESAFE_API_KEY` / `TEXT_MODEL_API_KEY` or `~/.config/typesafe/key` / `~/.config/openrouter/key`. On the Google Flights task (Zurich to London) from Tokyo it finishes in 11 to 13s; most of that is Jev round trips, about 460 ms each from Japan versus about 150 ms from Los Angeles. An explicit "no value for this field" from the text model ends the run as `blocked`, and `--json` reports `success` from the run status.
@@ -36,7 +35,6 @@
 
 - @leeguooooo
 - @AmeerAliAnwar
-<!-- release:end -->
 
 ## 1.5.124
 
