@@ -1,8 +1,19 @@
 # Changelog
 
-## 1.5.128
+## 1.5.129
 
 <!-- release:start -->
+### Bug Fixes
+
+- **`cu.find` is now defined.** The script guide has always listed it among the `cu.*` helpers, but the prelude never defined it, so calling it threw "cu.find is not a function". It mirrors the CLI: a string is the natural-language search, and `{ selector }` lists matching elements.
+
+### Contributors
+
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.128
+
 ### Bug Fixes
 
 - **A `script` context could deadlock the session.** A context runs one program at a time, so a `cu.*` call that re-entered `script --in <the same name>` queued a job behind the very program waiting for it: the thread could not pick it up, nothing closed the new run's bridge, and the daemon waited forever — the session simply looked unresponsive. The re-entrant call is now refused with an error that says why. Introduced with the feature in 1.5.127 and caught before it was used in anger.
@@ -14,7 +25,6 @@
 ### Contributors
 
 - @leeguooooo
-<!-- release:end -->
 
 ## 1.5.127
 
