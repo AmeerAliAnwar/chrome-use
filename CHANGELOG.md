@@ -1,8 +1,21 @@
 # Changelog
 
-## 1.5.127
+## 1.5.128
 
 <!-- release:start -->
+### Bug Fixes
+
+- **`AGENT_BROWSER_DEBUG=1` produces a daemon log on Windows too** (#327). The debug-log redirection sat inside a `#[cfg(unix)]` block, so on Windows the variable did nothing at all — no `<session>.log`, no daemon stderr anywhere. #327 is a Windows-only hang whose reporter offered to run with a verbose/debug variable, and there wasn't one for them. Windows now writes the same file; `eprintln!` goes through CRT fd 2, so the fd is re-pointed rather than only the Win32 stderr handle. Cross-checked against `x86_64-pc-windows-gnu`; not verified at runtime on Windows.
+
+- **`session stop <name> --force` no longer implies the name is clear** (#309). It reported "dropped its record", which reads as "this name works again" — and it does not. `--force` drops the CLI's record; the tabs stay open, and on the extension relay a session's tabs live in a tab group named after the session, so a fresh daemon under the same name meets them again. If one of those tabs has a busy renderer the name behaves exactly as before. The note now says so and names the two moves that work: close the tab, or use a different `--session` name.
+
+### Contributors
+
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.127
+
 ### New Features
 
 - **`script --keep <name>` / `--in <name>`: JS contexts that persist across calls** (#289). `script` built a fresh engine every call, so nothing survived between them. What that costs is round trips, not bytes: a single call could always do several steps, but an agent usually has to see one step's result before choosing the next, which meant re-deriving every handle each time. `--keep` runs in a named context and creates it on demand, `--in` requires one that already exists, `--drop <name>` releases one and `--contexts` lists them. Contexts are released with the session's daemon. A named context evaluates at top level so declarations survive, which has two consequences that now carry a hint instead of a bare SyntaxError: top-level `return` is invalid (end with the expression), and re-declaring a `const` the context still holds throws, as in a Node REPL.
@@ -16,7 +29,6 @@
 ### Contributors
 
 - @leeguooooo
-<!-- release:end -->
 
 ## 1.5.126
 
