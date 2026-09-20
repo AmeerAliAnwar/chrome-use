@@ -400,6 +400,10 @@ pub struct DaemonState {
     /// means the documented recovery has already been tried and did not work —
     /// repeating it is the loop #235 describes, so the error says so instead.
     pub last_unconfirmed_tab_switch: Option<(&'static str, String, std::time::Instant)>,
+    /// Named persistent `script` JS contexts (#289). Each holds a resident boa
+    /// engine on its own thread, so `const tab = …` in one call is still there
+    /// in the next. Dropped with the session's daemon.
+    pub script_contexts: super::script_js::JsContexts,
     /// Requests seen going out and not yet finished, as (requestId, start).
     /// Feeds the adaptive settle (#228): a click that fires an XHR leaves the
     /// DOM quiet for the whole round trip, so DOM stillness alone would report
@@ -485,6 +489,7 @@ impl DaemonState {
             tracked_requests: Vec::new(),
             request_tracking: false,
             last_unconfirmed_tab_switch: None,
+            script_contexts: Default::default(),
             in_flight_requests: Vec::new(),
             active_frame_id: None,
             last_snapshot: None,

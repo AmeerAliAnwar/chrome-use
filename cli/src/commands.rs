@@ -3208,6 +3208,28 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                             }
                         }
                     }
+                    // Named persistent JS contexts (#289): `--keep` runs in one
+                    // and creates it on demand, `--in` requires it to exist, and
+                    // `--drop` releases it.
+                    "--keep" => {
+                        i += 1;
+                        if i < rest.len() {
+                            cmd["keepContext"] = json!(rest[i]);
+                        }
+                    }
+                    "--in" => {
+                        i += 1;
+                        if i < rest.len() {
+                            cmd["inContext"] = json!(rest[i]);
+                        }
+                    }
+                    "--drop" => {
+                        i += 1;
+                        if i < rest.len() {
+                            cmd["dropContext"] = json!(rest[i]);
+                        }
+                    }
+                    "--contexts" => cmd["listContexts"] = json!(true),
                     s if !s.starts_with("--") => cmd["file"] = json!(s),
                     _ => {}
                 }

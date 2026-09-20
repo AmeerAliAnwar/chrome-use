@@ -3178,6 +3178,14 @@ fn main() {
 fn run_script(flags: &Flags, mut cmd: serde_json::Value) {
     use std::io::Read as _;
 
+    // Context management (#289) carries no program: `--drop <name>` and
+    // `--contexts` are answered by the daemon on their own. Reading stdin for
+    // them would just hang on a terminal, which is what a first try did.
+    if cmd.get("dropContext").is_some() || cmd.get("listContexts").is_some() {
+        dispatch_script(flags, cmd);
+        return;
+    }
+
     // Load the program: from a file arg, or stdin (`-` / no path).
     let src = match cmd.get("file").and_then(|v| v.as_str()) {
         Some(f) if f != "-" => {
@@ -3225,6 +3233,13 @@ fn run_script(flags: &Flags, mut cmd: serde_json::Value) {
         obj.remove("file");
     }
 
+    dispatch_script(flags, cmd);
+}
+
+/// Send a prepared `script` command and map its 3-way exit code.
+/// Split out of `run_script` so context management (#289), which has no program
+/// to load, can reach it without going through the stdin read.
+fn dispatch_script(flags: &Flags, cmd: serde_json::Value) {
     match send_command(cmd, &flags.session) {
         Ok(resp) => {
             let data = resp.data.clone().unwrap_or(serde_json::Value::Null);
@@ -3232,6 +3247,26 @@ fn run_script(flags: &Flags, mut cmd: serde_json::Value) {
                 println!("{}", serde_json::to_string(&data).unwrap_or_default());
             } else if let Some(e) = &resp.error {
                 eprintln!("{} {}", color::error_indicator(), e);
+            } else if let Some(contexts) = data.get("contexts").and_then(|v| v.as_array()) {
+                // `--drop` / `--contexts`: there is no program result to print,
+                // so report the surviving contexts instead of nothing at all.
+                if let Some(dropped) = data.get("dropped").and_then(|v| v.as_bool()) {
+                    let name = data.get("context").and_then(|v| v.as_str()).unwrap_or("");
+                    println!(
+                        "{}",
+                        if dropped {
+                            format!("dropped script context `{name}`")
+                        } else {
+                            format!("no script context named `{name}`")
+                        }
+                    );
+                }
+                if contexts.is_empty() {
+                    println!("no script contexts in this session");
+                } else {
+                    let names: Vec<&str> = contexts.iter().filter_map(|v| v.as_str()).collect();
+                    println!("script contexts: {}", names.join(", "));
+                }
             } else {
                 let ret = data
                     .get("return")

@@ -157,6 +157,34 @@ JS</code></pre>
         整条链路怎么走见 <a href="/how-it-works.html">它怎么工作</a>。
       </p>
 
+
+      <h2>跨调用持久的上下文（<code>--keep</code> / <code>--in</code>）</h2>
+      <p>
+        默认每次 <code>script</code> 都是全新引擎，跑完即弃。<code>--keep &lt;名字&gt;</code> 让这个会话留住一个具名上下文，
+        <code>--in &lt;名字&gt;</code> 在已存在的上下文里接着跑，声明和变量都还在：
+      </p>
+<pre><code>chrome-use script --keep repl &lt;&lt;'JS'
+  const title = cu.eval('document.title');
+  let seen = [title];
+  seen.length
+JS
+# 另一次调用，另一条命令 —— title / seen 还在
+chrome-use script --in repl &lt;&lt;'JS'
+  seen.push(cu.eval('location.host'));
+  ({ title: title, seen: seen })
+JS
+chrome-use script --contexts       # 列出本会话的上下文
+chrome-use script --drop repl      # 释放一个</code></pre>
+      <p>
+        省的不是字节，是<strong>往返</strong>：一次调用内部本来就能多步，但 agent 往往要看过上一步的结果才能决定下一步，
+        以前那意味着每次都重新取一遍句柄。上下文随会话的守护进程一起释放，<code>script --drop</code> 可以提前释放。
+      </p>
+      <p>
+        <strong>两点和一次性写法不同。</strong>具名上下文里程序是在<strong>顶层</strong>求值的（声明必须活下来），
+        所以顶层 <code>return</code> 是语法错误——直接以表达式结尾；同一个 <code>const</code> 在后一次调用里重复声明会抛错，
+        和 Node REPL 一样。这两种报错都带有说明怎么改的提示。
+      </p>
+
       <h2>实测：HN 翻 3 页</h2>
       <p>
         基准任务：Hacker News 翻 3 页，收集所有 ≥100 分的故事，输出 JSON。上一节的 JS 程序就是完整题解，

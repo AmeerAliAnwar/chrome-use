@@ -157,6 +157,38 @@ JS</code></pre>
         Nothing is reimplemented, so behavior inside a script matches the command line exactly. The full pipeline is on <a href="/en/how-it-works.html">How It Works</a>.
       </p>
 
+
+      <h2>Contexts that persist across calls (<code>--keep</code> / <code>--in</code>)</h2>
+      <p>
+        By default every <code>script</code> call gets a fresh engine and throws it away.
+        <code>--keep &lt;name&gt;</code> makes this session hold on to a named context, and
+        <code>--in &lt;name&gt;</code> runs in one that already exists, with its declarations intact:
+      </p>
+<pre><code>chrome-use script --keep repl &lt;&lt;'JS'
+  const title = cu.eval('document.title');
+  let seen = [title];
+  seen.length
+JS
+# A separate invocation — title and seen are still there
+chrome-use script --in repl &lt;&lt;'JS'
+  seen.push(cu.eval('location.host'));
+  ({ title: title, seen: seen })
+JS
+chrome-use script --contexts       # list this session's contexts
+chrome-use script --drop repl      # release one</code></pre>
+      <p>
+        What this saves is <strong>round trips</strong>, not bytes: a single call could always do several
+        steps, but an agent usually has to see one step's result before choosing the next, and that used to
+        mean re-deriving every handle each time. A context is released with the session's daemon, or earlier
+        with <code>script --drop</code>.
+      </p>
+      <p>
+        <strong>Two differences from the one-shot form.</strong> In a named context the program is evaluated
+        at <strong>top level</strong> — declarations have to survive — so a top-level <code>return</code> is a
+        syntax error; end with the expression instead. And re-declaring the same <code>const</code> in a later
+        call throws, exactly as in a Node REPL. Both errors carry a hint saying so.
+      </p>
+
       <h2>Measured: 3 HN pages</h2>
       <p>
         Benchmark task: paginate 3 pages of Hacker News, collect every story with ≥100 points, output JSON. The JS program above is the complete solution,

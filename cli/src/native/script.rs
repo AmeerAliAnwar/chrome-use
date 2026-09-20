@@ -56,8 +56,60 @@ impl Ctx {
 pub async fn handle_script(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     // JS engine path (Phase 2): a `source` string is a real JavaScript program
     // driven through the `cu.*` helpers. The JSON `program` path is below.
+    // Context management, before anything tries to run (#289).
+    if let Some(name) = cmd.get("dropContext").and_then(|v| v.as_str()) {
+        let dropped = state.script_contexts.drop_context(name);
+        return Ok(json!({
+            "ok": true,
+            "dropped": dropped,
+            "context": name,
+            "contexts": state.script_contexts.names(),
+        }));
+    }
+    if cmd
+        .get("listContexts")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return Ok(json!({ "ok": true, "contexts": state.script_contexts.names() }));
+    }
+
     if let Some(source) = cmd.get("source").and_then(|v| v.as_str()) {
         let timeout_ms = cmd.get("timeout_ms").and_then(|v| v.as_u64());
+
+        // A named context keeps its declarations between calls, so the program
+        // is evaluated at top level instead of inside an IIFE. `--keep` creates
+        // the context on demand; `--in` refuses an unknown name, because
+        // silently starting an empty one would lose exactly the state the
+        // caller was reaching for and only show up as a confusing
+        // `ReferenceError` further in.
+        let named = cmd
+            .get("keepContext")
+            .and_then(|v| v.as_str())
+            .map(|n| (n, true))
+            .or_else(|| {
+                cmd.get("inContext")
+                    .and_then(|v| v.as_str())
+                    .map(|n| (n, false))
+            });
+        if let Some((name, create)) = named {
+            return match super::script_js::run_js_in(name, source, create, state).await {
+                Ok(data) => {
+                    let mut obj = data;
+                    if let Some(m) = obj.as_object_mut() {
+                        m.insert("ok".to_string(), json!(true));
+                    }
+                    Ok(obj)
+                }
+                Err(e) => Ok(json!({
+                    "ok": false,
+                    "error": e,
+                    "return": Value::Null,
+                    "context": name,
+                })),
+            };
+        }
+
         return match super::script_js::run_js(source, timeout_ms, state).await {
             Ok(data) => {
                 let mut obj = data;
