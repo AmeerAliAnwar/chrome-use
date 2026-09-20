@@ -494,6 +494,21 @@ fn tab_switch_is_allowed(
     !browser_is_external || owned_targets.contains(target_id)
 }
 
+/// Refusal text for driving a tab this session neither created nor adopted.
+///
+/// The recovery hint must name the *targetId*, not the `t<N>` ref: `tab adopt`
+/// matches a spec against targetIds and URL substrings only (see
+/// `adopt_existing_target`), so `tab adopt t1` would just fail with "no open tab
+/// matching `t1`" and send the agent in circles.
+fn refuse_unowned_tab_message(tab_id: u32, target_id: &str) -> String {
+    format!(
+        "Refusing to select tab {} because this session did not create or adopt it \
+         (run `chrome-use tab adopt {}` to drive it)",
+        format_tab_id(tab_id),
+        target_id
+    )
+}
+
 /// Reports ownership only for external browsers, where deletion rights differ.
 fn tab_ownership(
     browser_is_external: bool,
@@ -4160,11 +4175,7 @@ impl BrowserManager {
             &target.target_id,
             &self.owned_targets(),
         ) {
-            return Err(format!(
-                "Refusing to select tab {} because this session did not create or adopt it (use `tab adopt {}` or `--adopt` to drive it)",
-                format_tab_id(target.tab_id),
-                format_tab_id(target.tab_id)
-            ));
+            return Err(refuse_unowned_tab_message(target.tab_id, &target.target_id));
         }
         self.tab_switch(index).await
     }
@@ -5142,6 +5153,23 @@ mod tests {
         assert!(tab_switch_is_allowed(true, "ADOPTED", &owned));
         assert!(!tab_switch_is_allowed(true, "FOREIGN", &owned));
         assert!(tab_switch_is_allowed(false, "FOREIGN", &owned));
+    }
+
+    /// The refusal must hand back a command that `tab adopt` can actually
+    /// resolve. `adopt_existing_target` matches a spec against targetIds and URL
+    /// substrings, never the per-session `t<N>` ref, so a hint naming `t1` would
+    /// be a dead end.
+    #[test]
+    fn unowned_tab_refusal_hints_adopt_by_target_id() {
+        let msg = refuse_unowned_tab_message(1, "FOREIGN-TARGET-ID");
+
+        assert!(msg.contains("did not create or adopt it"), "{msg}");
+        assert!(
+            msg.contains("chrome-use tab adopt FOREIGN-TARGET-ID"),
+            "{msg}"
+        );
+        assert!(!msg.contains("--adopt"), "{msg}");
+        assert!(!msg.contains("adopt t1"), "{msg}");
     }
 
     #[test]
