@@ -235,6 +235,16 @@ globalThis.cu = {
     }
     throw new Error('waitFor timed out: ' + selector);
   },
+  // Documented in the script guide but never defined here, so `cu.find(...)`
+  // threw "not a function". Mirrors the CLI: `find "<label>"` is the
+  // natural-language search (action `findfuzzy`), while a CSS selector lists
+  // matching elements (action `find`). Pass `{ selector }` for the latter.
+  find(spec) {
+    if (spec && typeof spec === 'object' && spec.selector) {
+      return this._call('find', { selector: spec.selector });
+    }
+    return this._call('findfuzzy', { query: spec });
+  },
   extract(schema) { return this._call('extract', { schema: schema }); },
   screenshot(path) { return this._call('screenshot', path ? { path: path } : {}); },
   text(selector) { return this._call('gettext', { selector: selector }); },
