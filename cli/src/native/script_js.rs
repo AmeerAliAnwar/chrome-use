@@ -259,6 +259,15 @@ struct Job {
 /// jobs. Dropping the handle closes the channel, which ends the thread.
 struct CtxHandle {
     jobs: stdmpsc::Sender<Job>,
+    /// True while a job is running on this context's thread.
+    ///
+    /// A context runs ONE program at a time, so a `cu.*` call that re-enters
+    /// `script --in <the same name>` would queue a job behind the very program
+    /// that is waiting for it: the thread cannot pick the new job up, nothing
+    /// ever closes the new run's bridge channel, and the daemon waits forever —
+    /// which surfaces as the session going unresponsive (#309's shape).
+    /// Refusing the re-entrant call outright is the whole guard.
+    busy: bool,
 }
 
 /// The session's named script contexts. Lives in `DaemonState`, so every context
@@ -318,6 +327,12 @@ pub async fn run_js_in(
             .insert(name.to_string(), spawn_context_thread()?);
     }
 
+    if state.script_contexts.map[name].busy {
+        return Err(format!(
+            "script context `{name}` is already running a program; a context runs one at a time, so a script cannot re-enter its own context (use a different context name)"
+        ));
+    }
+
     let (req_tx, mut req_rx) = tokio::sync::mpsc::channel::<CuRequest>(1);
     let (done_tx, done_rx) = stdmpsc::channel::<Result<Value, String>>();
     let job = Job {
@@ -335,6 +350,9 @@ pub async fn run_js_in(
              released — rerun to start a fresh one"
         ));
     }
+    if let Some(handle) = state.script_contexts.map.get_mut(name) {
+        handle.busy = true;
+    }
 
     // Same actor loop as a one-shot run: the thread drops its `cu_tx` when the
     // job finishes, which closes this channel and ends the loop.
@@ -351,7 +369,11 @@ pub async fn run_js_in(
         let _ = msg.reply.send(result);
     }
 
-    match done_rx.recv() {
+    let outcome = done_rx.recv();
+    if let Some(handle) = state.script_contexts.map.get_mut(name) {
+        handle.busy = false;
+    }
+    match outcome {
         Ok(Ok(ret)) => Ok(json!({ "return": ret, "logs": logs, "context": name })),
         Ok(Err(e)) => Err(e),
         Err(_) => {
@@ -371,7 +393,10 @@ fn spawn_context_thread() -> Result<CtxHandle, String> {
         .name("chrome-use-script-ctx".to_string())
         .spawn(move || context_thread_main(jobs_rx))
         .map_err(|e| format!("failed to start script context thread: {e}"))?;
-    Ok(CtxHandle { jobs: jobs_tx })
+    Ok(CtxHandle {
+        jobs: jobs_tx,
+        busy: false,
+    })
 }
 
 fn context_thread_main(jobs: stdmpsc::Receiver<Job>) {
@@ -495,6 +520,27 @@ mod persistent_context_tests {
     fn unrelated_errors_are_passed_through_unchanged() {
         let out = top_level_error("TypeError: cu.click is not a function");
         assert_eq!(out, "script error: TypeError: cu.click is not a function");
+    }
+
+    /// A context runs one program at a time. Before the busy flag, a `cu.*`
+    /// call that re-entered `script --in <the same name>` queued a job behind
+    /// the program waiting for it and the daemon hung forever — the session
+    /// would just look unresponsive. Verified live: the inner call is now
+    /// refused and the context stays usable afterwards.
+    #[test]
+    fn a_context_is_marked_busy_only_while_a_job_is_in_flight() {
+        let mut contexts = JsContexts::default();
+        contexts
+            .map
+            .insert("re".to_string(), spawn_context_thread().unwrap());
+        assert!(!contexts.map["re"].busy, "a fresh context is idle");
+
+        contexts.map.get_mut("re").unwrap().busy = true;
+        assert!(contexts.map["re"].busy);
+        // Dropping it must work even mid-job, so a wedged context is always
+        // recoverable with `script --drop`.
+        assert!(contexts.drop_context("re"));
+        assert!(contexts.names().is_empty());
     }
 
     #[test]

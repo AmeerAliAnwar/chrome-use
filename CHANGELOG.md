@@ -5,6 +5,8 @@
 <!-- release:start -->
 ### Bug Fixes
 
+- **A `script` context could deadlock the session.** A context runs one program at a time, so a `cu.*` call that re-entered `script --in <the same name>` queued a job behind the very program waiting for it: the thread could not pick it up, nothing closed the new run's bridge, and the daemon waited forever — the session simply looked unresponsive. The re-entrant call is now refused with an error that says why. Introduced with the feature in 1.5.127 and caught before it was used in anger.
+
 - **`AGENT_BROWSER_DEBUG=1` produces a daemon log on Windows too** (#327). The debug-log redirection sat inside a `#[cfg(unix)]` block, so on Windows the variable did nothing at all — no `<session>.log`, no daemon stderr anywhere. #327 is a Windows-only hang whose reporter offered to run with a verbose/debug variable, and there wasn't one for them. Windows now writes the same file; `eprintln!` goes through CRT fd 2, so the fd is re-pointed rather than only the Win32 stderr handle. Cross-checked against `x86_64-pc-windows-gnu`; not verified at runtime on Windows.
 
 - **`session stop <name> --force` no longer implies the name is clear** (#309). It reported "dropped its record", which reads as "this name works again" — and it does not. `--force` drops the CLI's record; the tabs stay open, and on the extension relay a session's tabs live in a tab group named after the session, so a fresh daemon under the same name meets them again. If one of those tabs has a busy renderer the name behaves exactly as before. The note now says so and names the two moves that work: close the tab, or use a different `--session` name.
