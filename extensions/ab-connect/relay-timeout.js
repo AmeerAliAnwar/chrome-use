@@ -11,8 +11,23 @@ export const RELAY_TIMEOUT_ERROR_NAME = 'RelayTimeoutError'
 //
 // 2ms/byte is ~4x the measured worst case, so a healthy renderer never trips
 // it; the cap keeps a pathological payload from hanging a session forever.
+//
+// The cap has to stay out of the way of that per-byte allowance, and at 120s it
+// did not. It began binding at 56 KB ((120000-8000)/2), and above that the
+// EFFECTIVE rate collapses: 0.8ms/byte at 150 KB, below the ~1.0ms/byte worst
+// case measured on chatgpt.com. So a perfectly healthy renderer was declared
+// failed — and because losing a `Promise.race` cancels nothing, the page kept
+// working on the insert for minutes afterwards, leaving the next command on
+// that tab to collide with a renderer we had already given up on (#315). #309
+// measured the same thing from outside: "the practical ceiling for a single
+// insert is around 100KB, not the ~265KB the budgets imply".
+//
+// 300s keeps the full 2ms/byte to 146 KB and stays at or above the measured
+// worst case out to ~300 KB, so the budgets now deliver the sizes they imply.
+// It only ever applies to a payload-scaled command the caller explicitly sent;
+// an ordinary command still fails at the flat 8s.
 export const PAYLOAD_MS_PER_BYTE = 2
-export const PAYLOAD_MAX_TIMEOUT_MS = 120000
+export const PAYLOAD_MAX_TIMEOUT_MS = 300000
 
 /**
  * Budget for one CDP command. Pure: takes the method and its params, returns
@@ -109,7 +124,9 @@ export async function withRelayTimeout(
                 (scaled
                   ? 'That budget already scaled with the payload size, so the page is taking ' +
                     'longer per byte than expected (a heavy rich-text editor, or a busy tab). ' +
-                    'Insert less at once, or retry with the tab in the foreground. '
+                    'The insert was NOT cancelled - nothing can cancel a dispatched CDP ' +
+                    'command - so the page may keep working on it for minutes; let the tab go ' +
+                    'quiet and re-read the field before sending anything else. '
                   : 'The Chrome debugger stopped responding; restart the session and retry. ') +
                 `[diag in-flight=${diag.inFlight} oldest-in-flight=${diag.oldestInFlightMs}ms ` +
                 `worker-age=${diag.workerAgeMs}ms]`,

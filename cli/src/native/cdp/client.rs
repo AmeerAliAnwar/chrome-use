@@ -56,7 +56,11 @@ const CDP_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// the measured worst case; the ceiling keeps a pathological payload from
 /// pinning a session.
 const CDP_PAYLOAD_MICROS_PER_BYTE: u64 = 4_000;
-const CDP_PAYLOAD_MAX_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+/// Ceiling for a payload-scaled CDP command. Must stay above the extension's
+/// own ceiling (`PAYLOAD_MAX_TIMEOUT_MS`, 300s) so the relay's more specific
+/// error reaches the caller instead of the daemon cutting it off first. Raised
+/// with the extension's in #315.
+const CDP_PAYLOAD_MAX_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(360);
 
 /// Budget for one CDP command. Pure so the scaling rule is testable without a
 /// browser. Anything without a size-proportional payload keeps the flat budget,
@@ -443,24 +447,46 @@ mod timeout_tests {
             command_timeout("Input.insertText", Some(&thirty_four_kb)).as_secs(),
             30 + 136
         );
-        // Capped, so a pathological payload cannot pin a session indefinitely.
+        // 80KB still scales at the full 4ms/byte: the old 180s ceiling cut in
+        // at 37.5KB, which is what made the budgets deliver far less than they
+        // implied (#309, #315).
+        let eighty_kb = json!({ "text": "a".repeat(80_000) });
+        assert_eq!(
+            command_timeout("Input.insertText", Some(&eighty_kb)).as_secs(),
+            30 + 320
+        );
+        // 150KB — the size #309 measured failing while the renderer was working
+        // correctly. Capped now, but at a ceiling that still outlasts the
+        // extension's own 300s, which is the invariant that matters.
+        let one_fifty_kb = json!({ "text": "a".repeat(150_000) });
+        assert_eq!(
+            command_timeout("Input.insertText", Some(&one_fifty_kb)).as_secs(),
+            360
+        );
+        // Still capped, so a pathological payload cannot pin a session
+        // indefinitely — just not so low that an ordinary large insert reaches
+        // it (#315).
         let huge = json!({ "text": "a".repeat(10_000_000) });
         assert_eq!(
             command_timeout("Input.insertText", Some(&huge)).as_secs(),
-            180
+            360
         );
     }
 
     #[test]
     fn the_daemon_budget_outlasts_the_extension_budget() {
         // The extension scales at 2ms/byte on top of its own 8s flat budget and
-        // caps at 120s. The daemon must always be the looser of the two, or it
+        // caps at 300s. The daemon must always be the looser of the two, or it
         // cuts the command off first and the relay's more specific error never
         // reaches the caller.
-        for len in [1_000u64, 20_000, 34_000, 100_000, 10_000_000] {
+        //
+        // The sizes span both ceilings: the daemon's binds at 82.5KB and the
+        // extension's at 146KB, so the invariant is checked while each is
+        // scaling and while each is capped.
+        for len in [1_000u64, 20_000, 34_000, 80_000, 100_000, 150_000, 300_000, 10_000_000] {
             let params = json!({ "text": "a".repeat(len as usize) });
             let daemon = command_timeout("Input.insertText", Some(&params)).as_millis() as u64;
-            let extension = std::cmp::min(8_000 + len * 2, 120_000);
+            let extension = std::cmp::min(8_000 + len * 2, 300_000);
             assert!(
                 daemon > extension,
                 "daemon budget {daemon}ms must outlast extension {extension}ms for {len} bytes"

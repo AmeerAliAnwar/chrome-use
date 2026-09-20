@@ -1491,8 +1491,11 @@ fn daemon_cdp_budget(cmd: &Value) -> Duration {
     if len == 0 {
         return Duration::from_secs(30);
     }
+    // Mirrors `native::cdp::client::command_timeout`; the test below pins the
+    // two together at several sizes so they cannot drift apart. The ceiling
+    // rose with the extension's in #315.
     (Duration::from_secs(30) + Duration::from_micros(len.saturating_mul(4_000)))
-        .min(Duration::from_secs(180))
+        .min(Duration::from_secs(360))
 }
 
 /// How long the socket read waits for the daemon's answer.
@@ -1674,7 +1677,7 @@ mod tests {
                 "client {client:?} must outlast daemon {daemon:?} for {len} bytes"
             );
             // And the daemon must outlast the extension's own scaled budget.
-            let extension = std::cmp::min(8_000 + (len as u64) * 2, 120_000);
+            let extension = std::cmp::min(8_000 + (len as u64) * 2, 300_000);
             assert!(
                 daemon.as_millis() as u64 > extension,
                 "daemon {daemon:?} must outlast extension {extension}ms for {len} bytes"

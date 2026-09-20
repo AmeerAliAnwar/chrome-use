@@ -103,6 +103,55 @@ test('a payload-sized command gets a budget proportional to its payload', () => 
   assert.equal(relayCommandBudgetMs('Input.insertText', { text: 'a'.repeat(10_000_000) }), PAYLOAD_MAX_TIMEOUT_MS)
 })
 
+// The cap exists to stop a PATHOLOGICAL payload pinning the session, so it must
+// not cut into the per-byte allowance an ordinary large insert depends on. At
+// 120s it did: it bound from 56KB up, and by 150KB the EFFECTIVE rate was
+// 0.8ms/byte — under the ~1.0ms/byte worst case measured on chatgpt.com. A
+// healthy renderer was therefore declared failed, and since losing a
+// `Promise.race` cancels nothing, the page kept working on the insert for
+// minutes while the next command collided with it (#315). #309 saw the same
+// thing from outside: a practical ceiling near 100KB, not the ~265KB implied.
+test('the cap does not cut into the per-byte allowance at ordinary sizes', () => {
+  const rate = (bytes) => relayCommandBudgetMs('Input.insertText', { text: 'a'.repeat(bytes) }) / bytes
+
+  // The full 2ms/byte must survive well past where the old cap bound (56KB).
+  for (const bytes of [56_000, 100_000, 146_000]) {
+    assert.equal(
+      relayCommandBudgetMs('Input.insertText', { text: 'a'.repeat(bytes) }),
+      8000 + bytes * 2,
+      `${bytes} bytes must still get the full per-byte allowance`,
+    )
+  }
+
+  // Past the cap the effective rate decays, but must stay at or above the
+  // measured worst case (1.0ms/byte) across the sizes we claim to support.
+  for (const bytes of [150_000, 200_000, 300_000]) {
+    assert.ok(
+      rate(bytes) >= 1.0,
+      `${bytes} bytes: effective ${rate(bytes)}ms/byte is under the measured worst case`,
+    )
+  }
+
+  // And the ceiling still exists.
+  assert.equal(relayCommandBudgetMs('Input.insertText', { text: 'a'.repeat(5_000_000) }), PAYLOAD_MAX_TIMEOUT_MS)
+})
+
+// The advice that used to be here — "Insert less at once" — is exactly what
+// #301 proved corrupts text at every chunk boundary, because a call returns on
+// dispatch and not on commit. The CLI-side hint was fixed; this one was not.
+test('the timeout text does not advise the chunking that corrupts text', async () => {
+  await assert.rejects(
+    withRelayTimeout(new Promise(() => {}), 'Input.insertText', 1, { payloadScaled: true }),
+    (e) => {
+      assert.doesNotMatch(e.message, /Insert less at once/)
+      // It must say the page is still working, or the caller sends the next
+      // command straight into a busy renderer.
+      assert.match(e.message, /NOT cancelled/)
+      return true
+    },
+  )
+})
+
 test('a scaled-budget timeout does not blame an unresponsive debugger', async () => {
   const never = new Promise(() => {})
   await assert.rejects(
