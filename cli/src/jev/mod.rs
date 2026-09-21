@@ -91,11 +91,21 @@ const TARGET_POINT: &str = r#"(action => {
   return {x,y};
 })"#;
 
-/// Names for `marker`'s positions, in the order snapshot.js builds them. Used
-/// only to report WHICH part of a page moved when a decision is discarded —
-/// "the text jittered" was a guess, and the first measurement said otherwise.
-const MARKER_FIELDS: &str =
-    r#"["timeOrigin","url","scrollX","scrollY","width","height","title","text","actions","doc"]"#;
+/// Names for `marker`'s positions, in the order snapshot.js builds them:
+/// `[timeOrigin, href, scrollX, scrollY, innerWidth, innerHeight, title, text,
+/// semantics, page_key[6]]`.
+///
+/// The last one is the form-control state `pageKey` collects (value, checked,
+/// selectedIndex, disabled, readOnly per input) — NOT a document identity.
+/// Calling it "doc" led me to read "the document was replaced" out of runs
+/// where it had not been: `timeOrigin` is what changes when a document is
+/// replaced, and across every run measured it never did. Named for what it is,
+/// so the next reading comes from the code rather than from my label.
+///
+/// Used only to report WHICH part of a page moved when a decision is
+/// discarded. "The text jittered" was a guess the first measurement refuted;
+/// this list exists so the next reading comes from data.
+const MARKER_FIELDS: &str = r#"["timeOrigin","url","scrollX","scrollY","width","height","title","text","actions","formState"]"#;
 
 /// Key-order-independent JSON, so a page value that crossed the daemon (whose
 /// objects come back with sorted keys) compares equal to the live one.
