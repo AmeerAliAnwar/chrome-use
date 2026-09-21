@@ -1,8 +1,27 @@
 # Changelog
 
-## 1.5.131
+## 1.5.132
 
 <!-- release:start -->
+### Improvements
+
+- **The agent skill's entry point is 73.9% smaller.** `core/SKILL.md` went from 9443 to 2460 tokens (o200k_base, measured — not inferred from line count), 204 lines. The default behaviour rules moved to the front, and plain `click` / `fill` / `select` / `pick` are now self-contained, so the common case loads no reference at all. Detail moved into `core/references/` — `reading`, `connection` and `site-adapters` are new — where frames, closed shadow roots, canvas, screenshot parameters, auth handoff and idle recovery all still live. This is a static routing budget: the token counts are real, the effect on task completion or latency was not measured and is not claimed.
+
+- **`jev run` reports where its time went** — `jev_ms`, `act_ms`, `observe_ms`, `fresh_ms`, plus decision, stale and eval counts. One measured run on a public site split 64% model round trips, 29% real page load, 6% the CLI's own commands, against separately measured costs of ~15ms per daemon-to-renderer eval and ~34ms per click. That is one task on one site from one location; the shape is what generalises, not the figures.
+
+- **`jev run --terminal-shadow`** (opt-in) asks, in the same request, whether the chosen action ends the goal, and records that claim against what the closing decision then decided, along with which parts of the page moved when a decision was discarded. It is a measurement tool, not an optimisation: it does not change the completion control flow, and across six runs the model never once predicted a terminal action, so the shortcut it was built to evaluate would have saved nothing. A cheap local check is not a completion test either — a checkout bounced to `/login` changes the page exactly as a success would.
+
+### Bug Fixes
+
+- **Three defects in the skill's quickstart**: it taught `npm i -g chrome-use`, which is the distribution path this project deliberately does not support (it ships GitHub Release binaries and an `install.sh` one-liner); it offered `close --all`, which reaches every session rather than the reader's; and an unclosed code fence swallowed the "Diagnosing install issues" section and everything after it.
+
+### Contributors
+
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.131
+
 ### Bug Fixes
 
 - **A large `Input.insertText` is no longer declared failed while it is working** (#315, #309). A timed-out insert cannot be cancelled — losing a `Promise.race` cancels nothing and CDP has no primitive to recall a dispatched command — so the page keeps working on it for minutes and the next command on that tab collides with a renderer we already gave up on. That damage was largely our own timeout: the extension's budget is 8s + 2ms/byte, "~4x the measured worst case", but the 120s cap started binding at 56KB and the *effective* rate collapsed above it — 0.8ms/byte at 150KB, under the ~1.0ms/byte worst case measured on chatgpt.com. A healthy renderer was failed at exactly the sizes the feature exists for, and #309 measured the same ceiling from outside ("around 100KB, not the ~265KB the budgets imply"). The extension cap moves to 300s and the daemon's to 360s, keeping "client outlasts daemon outlasts extension" at every size; the invariant test now spans both ceilings. The cap still exists for a pathological payload — it just no longer cuts into the per-byte allowance an ordinary large insert depends on.
@@ -14,7 +33,6 @@
 ### Contributors
 
 - @leeguooooo
-<!-- release:end -->
 
 ## 1.5.130
 
