@@ -3138,8 +3138,10 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         "jev" => {
             if rest.first() != Some(&"run") {
                 return Err(ParseError::InvalidValue {
-                    message: "Usage: chrome-use jev run --goal <text> [--url <url>]".to_string(),
-                    usage: "jev run --goal <text> [--url <url>]",
+                    message:
+                        "Usage: chrome-use jev run --goal <text> [--url <url>] [--terminal-shadow]"
+                            .to_string(),
+                    usage: "jev run --goal <text> [--url <url>] [--terminal-shadow]",
                 });
             }
             let mut cmd = json!({ "id": id, "action": "jev" });
@@ -3154,7 +3156,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                             .filter(|v| !v.starts_with("--"))
                             .ok_or_else(|| ParseError::InvalidValue {
                                 message: format!("jev run: {flag} needs a value"),
-                                usage: "jev run --goal <text> [--url <url>]",
+                                usage: "jev run --goal <text> [--url <url>] [--terminal-shadow]",
                             })?;
                         if flag == "--goal" {
                             goal.push(value);
@@ -3163,10 +3165,11 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         }
                         i += 1;
                     }
-                    // Skip the closing "am I done" decision when the model
-                    // named a locally checkable success condition and it holds.
-                    // Opt-in: it trades a model round trip for a local check.
-                    "--fast-terminal" => cmd["fastTerminal"] = json!(true),
+                    // Measure-only: ask the model whether this action ends
+                    // the goal and record whether a cheap local condition
+                    // agreed. Changes no outcome; collects the evidence that
+                    // skipping the closing decision would need.
+                    "--terminal-shadow" => cmd["terminalShadow"] = json!(true),
                     other => goal.push(other),
                 }
                 i += 1;
@@ -3174,7 +3177,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             if goal.is_empty() {
                 return Err(ParseError::InvalidValue {
                     message: "jev run needs a goal: --goal <text>".to_string(),
-                    usage: "jev run --goal <text> [--url <url>]",
+                    usage: "jev run --goal <text> [--url <url>] [--terminal-shadow]",
                 });
             }
             cmd["goal"] = json!(goal.join(" "));

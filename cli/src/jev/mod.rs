@@ -100,11 +100,11 @@ pub struct Options {
     pub goal: String,
     pub url: Option<String>,
     /// Ask, in the same Jev request, whether the chosen action is the last one
-    /// and how its success would show locally — then skip the "am I done"
-    /// decision when that condition actually holds. Off by default: it trades a
-    /// model round trip for a local check, and a wrong prediction that slipped
-    /// past the check would report a goal met that was not.
-    pub fast_terminal: bool,
+    /// and how its success would show locally, then record whether that
+    /// condition was actually observed. Changes no outcome — the closing
+    /// decision is still made — so this only ever costs a few tokens per
+    /// request and buys the agreement rate that skipping it would require.
+    pub terminal_shadow: bool,
 }
 
 enum Step {
@@ -288,35 +288,50 @@ impl<'a> Browser<'a> {
     }
 }
 
-/// Did the predicted terminal condition actually hold?
+/// Was the condition the model named actually visible in the next observation?
 ///
-/// The model's claim is never enough on its own (#codex review): an action
-/// reporting success is not the goal being met, so the shortcut only fires when
-/// the condition it named is visible in the observation we take anyway. Pure, so
-/// every branch below is testable without a browser or a model.
+/// This is NOT a completion test and must never end a run. Review by
+/// codex-01a0c18c showed the same predicate, used as one, accepting three
+/// reproducible failures: a checkout bounced to `/login` (the URL changed, the
+/// goal failed), an observation with no `guards` at all (absent evidence read
+/// as proof), and a "Payment failed" page whose submit button had merely left
+/// the actionable set. The last one is structural: `guards` holds only
+/// actionable elements, so a button that goes disabled or shows a spinner is
+/// "gone" by this measure while nothing was accomplished.
 ///
-/// `before` and `after` are the observations either side of the action; `node`
-/// is the element acted on. Anything missing, unchanged or undecidable answers
-/// `false`, which puts the run back on the ordinary decision loop.
-fn terminal_reached(terminal: Terminal, before: &Value, after: &Value, node: Option<i64>) -> bool {
+/// What it is good for is measuring how often a cheap signal WOULD have agreed
+/// with the model, which is the evidence needed before anything is allowed to
+/// skip a decision. Pure, so each branch is testable without a browser.
+fn condition_observed(
+    terminal: Terminal,
+    before: &Value,
+    after: &Value,
+    node: Option<i64>,
+) -> bool {
     match terminal {
         Terminal::No => false,
         Terminal::UrlChanges => {
             let (a, b) = (before["url"].as_str(), after["url"].as_str());
             match (a, b) {
-                // An empty or absent url is not evidence of anything.
                 (Some(a), Some(b)) if !a.is_empty() && !b.is_empty() => a != b,
                 _ => false,
             }
         }
         Terminal::TargetGone => {
             let Some(node) = node else { return false };
-            let key = node.to_string();
-            // The guard map is how an observation identifies the live nodes it
-            // saw. Present before and absent after is the element disappearing;
-            // absent in both means we never had a handle to judge with.
-            let was = before["guards"].get(&key).is_some();
-            let is = after["guards"].get(&key).is_some();
+            // Both observations must actually carry a guard map. Without one,
+            // "absent" is missing evidence, not evidence of absence — the bug
+            // the review caught, since `Value::Null.get(..)` is also `None`.
+            let (Some(was), Some(is)) = (
+                before["guards"]
+                    .as_object()
+                    .map(|g| g.contains_key(&node.to_string())),
+                after["guards"]
+                    .as_object()
+                    .map(|g| g.contains_key(&node.to_string())),
+            ) else {
+                return false;
+            };
             was && !is
         }
     }
@@ -843,9 +858,12 @@ pub fn run(flags: &Flags, opts: Options) -> Result<Value, String> {
     // being non-zero is the difference between a task that is model-bound and
     // one that is fighting the page. Counted rather than inferred.
     let mut stale_retries = 0usize;
-    // How often the terminal shortcut actually fired. Reported so the flag can
-    // be judged on how much it saved, not on whether it sounded like a good idea.
-    let mut terminal_shortcuts = 0usize;
+    // Shadow-mode tallies: how often the model claimed an action was the last
+    // one, and how often the condition it named was then visible. Their ratio,
+    // over real tasks, is what a decision to ever act on the prediction would
+    // have to rest on.
+    let mut terminal_predicted = 0usize;
+    let mut terminal_observed = 0usize;
     let started = Instant::now();
     let status = loop {
         if decisions >= MAX_STEPS * 2 {
@@ -855,7 +873,7 @@ pub fn run(flags: &Flags, opts: Options) -> Result<Value, String> {
             if !browser.fresh(&page, None)? {
                 page = browser.observe()?;
             }
-            let decision = models.choose(&page, &opts.goal, &history, opts.fast_terminal)?;
+            let decision = models.choose(&page, &opts.goal, &history, opts.terminal_shadow)?;
             decisions += 1;
             jev_ms += decision.latency_ms;
             if decision.choice == "DONE" || decision.choice == "BLOCKED" {
@@ -914,19 +932,26 @@ pub fn run(flags: &Flags, opts: Options) -> Result<Value, String> {
                 "page_changed": page["fingerprint"] != before["fingerprint"],
                 "elapsed_ms": started.elapsed().as_millis() as u64,
             }));
-            // The model said this action finishes the goal AND named a condition
-            // we could check ourselves — and the condition holds. Accept without
-            // spending another decision on "am I done". Any other outcome falls
-            // through to the ordinary loop, which re-decides from the new page;
-            // it never re-runs the action.
-            if terminal_reached(decision.terminal, &before, &page, action["node"].as_i64()) {
-                terminal_shortcuts += 1;
-                // Name the condition that fired, so a run report shows WHICH
-                // prediction saved the decision and not merely that one did.
-                if let Some(last) = history.last_mut() {
-                    last["terminal"] = json!(decision.terminal.id());
+            // Shadow mode: record what the model predicted and whether the
+            // condition it named showed up, then carry on to the ordinary
+            // decision. Nothing here can end a run — a predicate cheap enough to
+            // check locally is not a completion test, and using one as such
+            // accepted a checkout bounced to /login as a finished goal.
+            //
+            // The point is to collect, over real tasks, how often the prediction
+            // and the observation agree. That agreement rate is the evidence any
+            // decision to ever skip the closing call would have to rest on.
+            if decision.terminal != Terminal::No {
+                terminal_predicted += 1;
+                let observed =
+                    condition_observed(decision.terminal, &before, &page, action["node"].as_i64());
+                if observed {
+                    terminal_observed += 1;
                 }
-                return Ok(Some("done"));
+                if let Some(last) = history.last_mut() {
+                    last["terminal_predicted"] = json!(decision.terminal.id());
+                    last["terminal_condition_observed"] = json!(observed);
+                }
             }
             let last3: Vec<&Value> = history.iter().rev().take(3).collect();
             if last3.len() == 3
@@ -963,7 +988,8 @@ pub fn run(flags: &Flags, opts: Options) -> Result<Value, String> {
         "evals": browser.evals,
         "decisions": decisions,
         "stale_retries": stale_retries,
-        "terminal_shortcuts": terminal_shortcuts,
+        "terminal_predicted": terminal_predicted,
+        "terminal_condition_observed": terminal_observed,
         "actions": history.len(),
         "url": page["url"],
         "title": page["title"],
@@ -1030,8 +1056,8 @@ mod tests {
     /// without a browser or a model. The rule under test is that the model's
     /// claim alone never ends a run: the named condition has to be visible in
     /// the observation we already take.
-    mod terminal_gate {
-        use super::super::{terminal_reached, Terminal};
+    mod terminal_shadow {
+        use super::super::{condition_observed, Terminal};
         use serde_json::json;
 
         fn page(url: &str, guards: &[i64]) -> serde_json::Value {
@@ -1047,24 +1073,34 @@ mod tests {
             let before = page("https://a.example/one", &[7]);
             let after = page("https://a.example/two", &[]);
             // Even with both conditions visibly true, NO must not fire.
-            assert!(!terminal_reached(Terminal::No, &before, &after, Some(7)));
+            assert!(!condition_observed(Terminal::No, &before, &after, Some(7)));
         }
 
         #[test]
         fn url_changes_needs_a_real_change_on_both_sides() {
             let one = page("https://a.example/one", &[]);
             let two = page("https://a.example/two", &[]);
-            assert!(terminal_reached(Terminal::UrlChanges, &one, &two, None));
+            assert!(condition_observed(Terminal::UrlChanges, &one, &two, None));
 
             // Same page: the action may have succeeded, but the goal was not
             // shown to be met, which is the distinction that matters.
-            assert!(!terminal_reached(Terminal::UrlChanges, &one, &one, None));
+            assert!(!condition_observed(Terminal::UrlChanges, &one, &one, None));
 
             // A missing or empty url is not evidence either way.
             let blank = page("", &[]);
-            assert!(!terminal_reached(Terminal::UrlChanges, &blank, &two, None));
-            assert!(!terminal_reached(Terminal::UrlChanges, &one, &blank, None));
-            assert!(!terminal_reached(
+            assert!(!condition_observed(
+                Terminal::UrlChanges,
+                &blank,
+                &two,
+                None
+            ));
+            assert!(!condition_observed(
+                Terminal::UrlChanges,
+                &one,
+                &blank,
+                None
+            ));
+            assert!(!condition_observed(
                 Terminal::UrlChanges,
                 &json!({}),
                 &two,
@@ -1076,7 +1112,7 @@ mod tests {
         fn target_gone_needs_a_handle_that_was_there_and_then_was_not() {
             let before = page("https://a.example/", &[3, 9]);
             let after = page("https://a.example/", &[9]);
-            assert!(terminal_reached(
+            assert!(condition_observed(
                 Terminal::TargetGone,
                 &before,
                 &after,
@@ -1084,21 +1120,21 @@ mod tests {
             ));
 
             // Still present.
-            assert!(!terminal_reached(
+            assert!(!condition_observed(
                 Terminal::TargetGone,
                 &before,
                 &after,
                 Some(9)
             ));
             // Never had a handle to judge with, so "gone" proves nothing.
-            assert!(!terminal_reached(
+            assert!(!condition_observed(
                 Terminal::TargetGone,
                 &after,
                 &after,
                 Some(3)
             ));
             // No node at all (a wait or scroll).
-            assert!(!terminal_reached(
+            assert!(!condition_observed(
                 Terminal::TargetGone,
                 &before,
                 &after,
@@ -1114,11 +1150,60 @@ mod tests {
             let same = page("https://a.example/", &[1]);
             for t in [Terminal::UrlChanges, Terminal::TargetGone] {
                 assert!(
-                    !terminal_reached(t, &same, &same, Some(1)),
+                    !condition_observed(t, &same, &same, Some(1)),
                     "{} must not fire when nothing changed",
                     t.id()
                 );
             }
+        }
+
+        /// The three cases codex-01a0c18c reproduced against this predicate when
+        /// it was being used to END a run. They are kept as tests because they
+        /// are exactly why it no longer can: the first two are still `true`
+        /// here, and that is fine for a recorder and disqualifying for a
+        /// completion test.
+        #[test]
+        fn a_changed_url_is_not_evidence_the_goal_was_met() {
+            let checkout = page("https://shop.example/checkout", &[]);
+            let login = page("https://shop.example/login", &[]);
+            // Bounced back to the login page: the URL changed and the goal
+            // failed. The recorder notes the change; nothing may conclude from it.
+            assert!(condition_observed(
+                Terminal::UrlChanges,
+                &checkout,
+                &login,
+                None
+            ));
+        }
+
+        #[test]
+        fn a_missing_guard_map_is_missing_evidence_not_absence() {
+            let before = page("https://a.example/", &[7]);
+            // No `guards` key at all. `Value::Null.get(..)` is also `None`, so
+            // the first version read absent evidence as proof of absence.
+            assert!(!condition_observed(
+                Terminal::TargetGone,
+                &before,
+                &json!({"url": "https://a.example/"}),
+                Some(7)
+            ));
+        }
+
+        #[test]
+        fn a_control_leaving_the_actionable_set_is_not_success() {
+            let before = page("https://shop.example/pay", &[7]);
+            let mut failed = page("https://shop.example/pay", &[]);
+            failed["text"] = json!("Payment failed");
+            // `guards` holds only actionable elements, so a submit button that
+            // goes disabled or starts spinning is "gone" by this measure. The
+            // recorder still reports the observation — which is precisely the
+            // signal that must never stand in for completion on its own.
+            assert!(condition_observed(
+                Terminal::TargetGone,
+                &before,
+                &failed,
+                Some(7)
+            ));
         }
     }
 }
