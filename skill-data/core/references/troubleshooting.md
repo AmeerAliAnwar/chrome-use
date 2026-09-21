@@ -129,8 +129,8 @@ snapshot — fall back to `eval` in the iframe's origin or use the
 
 **Authentication expires mid-workflow**
 Use `--session-name <name>` or `state save`/`state load` so your session
-survives browser restarts. See [references/session-management.md](references/session-management.md)
-and [references/authentication.md](references/authentication.md).
+survives browser restarts. See [references/session-management.md](session-management.md)
+and [references/authentication.md](authentication.md).
 
 ## Diagnosing install issues
 
