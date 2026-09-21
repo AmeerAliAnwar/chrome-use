@@ -91,6 +91,12 @@ const TARGET_POINT: &str = r#"(action => {
   return {x,y};
 })"#;
 
+/// Names for `marker`'s positions, in the order snapshot.js builds them. Used
+/// only to report WHICH part of a page moved when a decision is discarded —
+/// "the text jittered" was a guess, and the first measurement said otherwise.
+const MARKER_FIELDS: &str =
+    r#"["timeOrigin","url","scrollX","scrollY","width","height","title","text","actions","doc"]"#;
+
 /// Key-order-independent JSON, so a page value that crossed the daemon (whose
 /// objects come back with sorted keys) compares equal to the live one.
 const CANON: &str = "(v => { const k = x => Array.isArray(x) ? x.map(k) : x && typeof x === 'object' ? \
@@ -136,6 +142,15 @@ struct Browser<'a> {
     act_ms: u128,
     fresh_ms: u128,
     evals: u32,
+    /// Where the strict marker check rejected, and where it rejected while the
+    /// same marker minus the page text would have accepted — i.e. every other
+    /// field was equal and only the text differed. Measurement only; `strict`
+    /// alone still decides.
+    stale_by_phase: std::collections::BTreeMap<&'static str, u32>,
+    /// Which combination of marker fields differed, as a category count. The
+    /// first measurement killed the "it is only the text" theory outright, so
+    /// this records the answer instead of assuming one.
+    stale_fields: std::collections::BTreeMap<String, u32>,
 }
 
 impl<'a> Browser<'a> {
@@ -205,18 +220,65 @@ impl<'a> Browser<'a> {
                      return {CANON}(c ? [c.pageKey(),c.guard(c.nodes.get({node}))] : null) === {CANON}({expected}); }})()"
                 )
             }
+            // Marker comparison, computed twice in ONE evaluation: strict (the
+            // whole marker, which drives behaviour exactly as before) and, for
+            // measurement only, the same comparison with the page text dropped.
+            //
+            // `marker` carries the entire page text at index 7 (snapshot.js), so
+            // any lazy image, relative timestamp or ticker invalidates a
+            // decision that is otherwise perfectly current. Measured on a
+            // Wikipedia article, 2 of every 5 decisions were discarded this way,
+            // identically across three runs. The pair says how much of that is
+            // text jitter rather than a page that actually moved. Nothing reads
+            // the loose value except the counter.
             _ => format!(
-                "{CANON}((() => {{ const s={READ_STATE}; return s?.marker ?? null; }})()) === {CANON}({})",
+                "(() => {{ const s = {READ_STATE}; const live = s?.marker ?? null; const want = {}; \
+                 if (!Array.isArray(live) || !Array.isArray(want)) return [false, null]; \
+                 const names = {MARKER_FIELDS}; const changed = []; \
+                 for (let i = 0; i < names.length; i++) \
+                   if ({CANON}(live[i]) !== {CANON}(want[i])) changed.push(names[i]); \
+                 return [changed.length === 0, changed]; }})()",
                 page["marker"]
             ),
         }
     }
 
-    fn fresh(&mut self, page: &Value, action: Option<&Value>) -> Result<bool, Step> {
+    fn fresh(
+        &mut self,
+        page: &Value,
+        action: Option<&Value>,
+        phase: &'static str,
+    ) -> Result<bool, Step> {
         let t0 = Instant::now();
         let out = self.eval(&Self::freshness_check(page, action));
         self.fresh_ms += t0.elapsed().as_millis();
-        Ok(out? == Value::Bool(true))
+        let out = out?;
+        // The click/select form answers with a bare bool; the marker form
+        // answers `[strict, loose]`. Only `strict` decides anything.
+        match out.as_array() {
+            Some(pair) => {
+                let strict = pair.first() == Some(&Value::Bool(true));
+                if !strict {
+                    // Attribute the reject, and record WHICH marker fields
+                    // moved — only categories, never the values themselves.
+                    *self.stale_by_phase.entry(phase).or_insert(0) += 1;
+                    let fields: Vec<String> = pair
+                        .get(1)
+                        .and_then(|c| c.as_array())
+                        .map(|c| {
+                            c.iter()
+                                .filter_map(|v| v.as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if !fields.is_empty() {
+                        *self.stale_fields.entry(fields.join("+")).or_insert(0) += 1;
+                    }
+                }
+                Ok(strict)
+            }
+            None => Ok(out == Value::Bool(true)),
+        }
     }
 
     fn act(&mut self, action: &Value, page: &Value, text: Option<&str>) -> Result<(), Step> {
@@ -229,7 +291,7 @@ impl<'a> Browser<'a> {
     fn act_inner(&mut self, action: &Value, page: &Value, text: Option<&str>) -> Result<(), Step> {
         let k = kind(action);
         if k == "wait" || k == "scroll" {
-            if !self.fresh(page, Some(action))? {
+            if !self.fresh(page, Some(action), "pre_action")? {
                 return Err(Step::Stale);
             }
             if k == "wait" {
@@ -849,6 +911,8 @@ pub fn run(flags: &Flags, opts: Options) -> Result<Value, String> {
         act_ms: 0,
         fresh_ms: 0,
         evals: 0,
+        stale_by_phase: Default::default(),
+        stale_fields: Default::default(),
     };
     if let Some(url) = &opts.url {
         browser.call(&["open", url])?;
@@ -880,6 +944,11 @@ pub fn run(flags: &Flags, opts: Options) -> Result<Value, String> {
     let mut terminal_predicted = 0usize;
     let mut terminal_observed = 0usize;
     let mut terminal_confirmed = 0usize;
+    // Claims the next surviving decision contradicted, by choosing another
+    // action or by answering BLOCKED. Claims that never met a surviving
+    // decision (the run ended, or the budget ran out) score neither way and
+    // show up as `predicted - confirmed - refuted`.
+    let mut terminal_refuted = 0usize;
     // Set when the last action carried a terminal claim, so the NEXT decision
     // can be scored against it.
     let mut terminal_pending = false;
@@ -889,26 +958,44 @@ pub fn run(flags: &Flags, opts: Options) -> Result<Value, String> {
             return Err("Reached the model-call budget".into());
         }
         let step = (|| -> Result<Option<&'static str>, Step> {
-            if !browser.fresh(&page, None)? {
+            if !browser.fresh(&page, None, "pre_choose")? {
                 page = browser.observe()?;
             }
             let decision = models.choose(&page, &opts.goal, &history, opts.terminal_shadow)?;
             decisions += 1;
             jev_ms += decision.latency_ms;
-            // Score the previous action's terminal claim against what the model
-            // actually decided once it saw the result. DONE means the claim held.
-            if std::mem::take(&mut terminal_pending) && decision.choice == "DONE" {
-                terminal_confirmed += 1;
-            }
             if decision.choice == "DONE" || decision.choice == "BLOCKED" {
-                if !browser.fresh(&page, None)? {
+                let phase = if decision.choice == "DONE" {
+                    "post_DONE"
+                } else {
+                    "post_BLOCKED"
+                };
+                if !browser.fresh(&page, None, phase)? {
+                    // Discarded before it decided anything, so it scores
+                    // nothing and the claim stays pending for the decision that
+                    // does. Counting it here credited a DONE this very branch
+                    // then threw away, and swallowed the pending claim with it.
                     return Err(Step::Stale);
+                }
+                // Scored only now: this decision survived its own freshness
+                // check and is the one that ends the run.
+                if std::mem::take(&mut terminal_pending) {
+                    if decision.choice == "DONE" {
+                        terminal_confirmed += 1;
+                    } else {
+                        terminal_refuted += 1;
+                    }
                 }
                 return Ok(Some(if decision.choice == "DONE" {
                     "done"
                 } else {
                     "blocked"
                 }));
+            }
+            // A decision that picks another action is itself a refutation: the
+            // model had claimed the previous action finished the goal.
+            if std::mem::take(&mut terminal_pending) {
+                terminal_refuted += 1;
             }
             let action = page["actions"]
                 .as_array()
@@ -920,7 +1007,7 @@ pub fn run(flags: &Flags, opts: Options) -> Result<Value, String> {
             }
             let mut text = None;
             if kind(&action) == "fill" {
-                if !browser.fresh(&page, None)? {
+                if !browser.fresh(&page, None, "pre_fill")? {
                     return Err(Step::Stale);
                 }
                 let recent: Vec<Value> = history
@@ -1011,11 +1098,14 @@ pub fn run(flags: &Flags, opts: Options) -> Result<Value, String> {
         "act_ms": browser.act_ms as u64,
         "fresh_ms": browser.fresh_ms as u64,
         "evals": browser.evals,
+        "stale_by_phase": browser.stale_by_phase,
+        "stale_fields": browser.stale_fields,
         "decisions": decisions,
         "stale_retries": stale_retries,
         "terminal_predicted": terminal_predicted,
         "terminal_condition_observed": terminal_observed,
         "terminal_confirmed_done": terminal_confirmed,
+        "terminal_refuted": terminal_refuted,
         "actions": history.len(),
         "url": page["url"],
         "title": page["title"],

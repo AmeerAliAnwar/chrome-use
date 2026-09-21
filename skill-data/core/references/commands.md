@@ -308,6 +308,28 @@ drift (logouts, other agents, account choosers), so each invocation re-verifies.
 not in the vault, or a stored session that has rotated — re-capture with
 `cookie-use add`.
 
+## Agent loop (experimental)
+
+```bash
+jev run --goal "<text>" [--url <url>] [--terminal-shadow]
+```
+
+Drives a goal end to end: TypeSafe's Jev picks each step's operation and target
+from an indexed element table, and a small model writes text only when a field
+needs typing. Needs `TYPESAFE_API_KEY` or `~/.config/typesafe/key`.
+
+A run reports where its time went. One measured run split 64% model round trips,
+29% real page load, 6% our own commands — so when a run feels slow, the model is
+usually the reason, not the browser.
+
+`--terminal-shadow` adds one question to the same request (whether the chosen
+action ends the goal) and records that claim against what the closing decision
+then decided, plus which parts of the page moved when a decision was discarded.
+It does not change the completion control flow: the closing decision is still
+made and still decides. Measurement only — a cheap local check is not a
+completion test, since a checkout bounced to `/login` changes the page exactly
+as a success would.
+
 ## Network
 
 ```bash
