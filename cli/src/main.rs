@@ -2957,6 +2957,7 @@ fn main() {
         let opts = jev::Options {
             goal: cmd["goal"].as_str().unwrap_or("").to_string(),
             url: cmd["url"].as_str().map(str::to_string),
+            fast_terminal: cmd["fastTerminal"].as_bool().unwrap_or(false),
         };
         match jev::run(&flags, opts) {
             Ok(result) => {

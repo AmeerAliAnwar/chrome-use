@@ -3163,6 +3163,10 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         }
                         i += 1;
                     }
+                    // Skip the closing "am I done" decision when the model
+                    // named a locally checkable success condition and it holds.
+                    // Opt-in: it trades a model round trip for a local check.
+                    "--fast-terminal" => cmd["fastTerminal"] = json!(true),
                     other => goal.push(other),
                 }
                 i += 1;
