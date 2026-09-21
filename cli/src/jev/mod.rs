@@ -220,17 +220,16 @@ impl<'a> Browser<'a> {
                      return {CANON}(c ? [c.pageKey(),c.guard(c.nodes.get({node}))] : null) === {CANON}({expected}); }})()"
                 )
             }
-            // Marker comparison, computed twice in ONE evaluation: strict (the
-            // whole marker, which drives behaviour exactly as before) and, for
-            // measurement only, the same comparison with the page text dropped.
+            // Marker comparison. The whole marker decides, exactly as before;
+            // the evaluation also returns WHICH fields differed, for the run
+            // report only.
             //
-            // `marker` carries the entire page text at index 7 (snapshot.js), so
-            // any lazy image, relative timestamp or ticker invalidates a
-            // decision that is otherwise perfectly current. Measured on a
-            // Wikipedia article, 2 of every 5 decisions were discarded this way,
-            // identically across three runs. The pair says how much of that is
-            // text jitter rather than a page that actually moved. Nothing reads
-            // the loose value except the counter.
+            // That list exists because a guess was wrong. `marker` carries the
+            // entire page text, so it looked obvious that lazy content was
+            // invalidating otherwise-current decisions. Measured across six
+            // runs: not once. Every reject also moved the actionable set, and
+            // most replaced the document. So the field list is recorded rather
+            // than a theory about it, and nothing reads it except the counter.
             _ => format!(
                 "(() => {{ const s = {READ_STATE}; const live = s?.marker ?? null; const want = {}; \
                  if (!Array.isArray(live) || !Array.isArray(want)) return [false, null]; \
@@ -992,11 +991,6 @@ pub fn run(flags: &Flags, opts: Options) -> Result<Value, String> {
                     "blocked"
                 }));
             }
-            // A decision that picks another action is itself a refutation: the
-            // model had claimed the previous action finished the goal.
-            if std::mem::take(&mut terminal_pending) {
-                terminal_refuted += 1;
-            }
             let action = page["actions"]
                 .as_array()
                 .and_then(|a| a.iter().find(|a| a["id"] == decision.choice.as_str()))
@@ -1043,6 +1037,14 @@ pub fn run(flags: &Flags, opts: Options) -> Result<Value, String> {
                 "page_changed": page["fingerprint"] != before["fingerprint"],
                 "elapsed_ms": started.elapsed().as_millis() as u64,
             }));
+            // Only now has this decision survived everything that could discard
+            // it — the pre-fill check and `act`'s own guards both return Stale.
+            // Scoring the refutation earlier credited one against a decision
+            // that was then thrown away, and ate the pending claim with it:
+            // the same mistake as on the DONE path, one branch further down.
+            if std::mem::take(&mut terminal_pending) {
+                terminal_refuted += 1;
+            }
             // Shadow mode: record what the model predicted and whether the
             // condition it named showed up, then carry on to the ordinary
             // decision. Nothing here can end a run — a predicate cheap enough to
