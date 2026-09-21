@@ -1,11 +1,26 @@
 # Changelog
 
-## 1.5.132
+## 1.5.133
 
 <!-- release:start -->
+### Corrections
+
+- **v1.5.132 overstated who benefits from the smaller skill.** It said "the agent skill's entry point is 73.9% smaller". The measured reduction is real, but it applies to `core/SKILL.md` — the file `chrome-use skills get core` serves. The entry point an installed agent actually reads is `skills/chrome-use/SKILL.md`, a separate 244-line manual with no `skills get core` indirection, which this change did not touch. So nothing about what an installed agent loads follows from that number, and the note now names the file instead of the entry point. Found by codex-01a0c18c auditing the real loading path rather than the file I had measured.
+
+### Bug Fixes
+
+- **`jev run` named one of its diagnostic fields wrongly, and the name was misleading enough to misread runs through.** The last entry in the `stale_fields` report was labelled `doc`, implying a document identity. It is the form-control state (`value`, `checked`, `selectedIndex`, `disabled`, `readOnly` per input); `timeOrigin` is what changes when a document is replaced. Read with the correct names, `timeOrigin` and `url` appear in no discarded decision at all — every one of them was the same document at the same URL, with the page's text, actionable set or form state still moving. The field is now called `formState`.
+
+### Contributors
+
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.132
+
 ### Improvements
 
-- **The agent skill's entry point is 73.9% smaller.** `core/SKILL.md` went from 9443 to 2460 tokens (o200k_base, measured — not inferred from line count), 204 lines. The default behaviour rules moved to the front, and plain `click` / `fill` / `select` / `pick` are now self-contained, so the common case loads no reference at all. Detail moved into `core/references/` — `reading`, `connection` and `site-adapters` are new — where frames, closed shadow roots, canvas, screenshot parameters, auth handoff and idle recovery all still live. This is a static routing budget: the token counts are real, the effect on task completion or latency was not measured and is not claimed.
+- **`core/SKILL.md` is 73.9% smaller.** It went from 9443 to 2460 tokens (o200k_base, measured — not inferred from line count), 204 lines. The default behaviour rules moved to the front, and plain `click` / `fill` / `select` / `pick` are now self-contained, so the common case loads no reference at all. Detail moved into `core/references/` — `reading`, `connection` and `site-adapters` are new — where frames, closed shadow roots, canvas, screenshot parameters, auth handoff and idle recovery all still live. This is a static routing budget: the token counts are real, the effect on task completion or latency was not measured and is not claimed.
 
 - **`jev run` reports where its time went** — `jev_ms`, `act_ms`, `observe_ms`, `fresh_ms`, plus decision, stale and eval counts. One measured run on a public site split 64% model round trips, 29% real page load, 6% the CLI's own commands, against separately measured costs of ~15ms per daemon-to-renderer eval and ~34ms per click. That is one task on one site from one location; the shape is what generalises, not the figures.
 
@@ -18,7 +33,6 @@
 ### Contributors
 
 - @leeguooooo
-<!-- release:end -->
 
 ## 1.5.131
 
