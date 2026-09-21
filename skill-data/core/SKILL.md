@@ -297,7 +297,7 @@ chrome-use site github/issues owner/repo --json   # run it → JSON (navigates t
 
 ```bash
 # Install once
-npm i -g chrome-use && chrome-use install
+curl -fsSL https://raw.githubusercontent.com/leeguooooo/chrome-use/main/install.sh | sh
 
 # Take a screenshot of a page
 chrome-use open https://example.com
@@ -316,7 +316,8 @@ chrome-use screenshot result.png
 ```
 
 The browser stays running across commands so these feel like a single
-session. Use `chrome-use close` (or `close --all`) when you're done.
+session. Use `chrome-use close` when you're done; `close --all` reaches every session,
+not just yours.
 
 ## Reading a page
 
@@ -580,6 +581,7 @@ SPA; form renders ~1s after load (wait --text). Cloudflare on /login.
 - Address pick: the `<li>` closes on blur — select with CLICK_MODE=dom.
 - Submit needs hidden `point_choice` set (eval), the UI never exposes it.
 - Stable selector for "Continue": button[data-testid=submit]
+```
 
 ## Diagnosing install issues
 
