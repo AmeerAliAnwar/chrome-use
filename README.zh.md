@@ -192,6 +192,27 @@ Agent 在你的 Chrome 里操作：你能实时看到开标签、加载、点击
 | `chrome-use session list` · `session stop [name]` | 管理会话 worker |
 | `chrome-use status` | 中继、profile、扩展与会话健康总览 |
 
+## Agent 循环（实验性）
+
+`jev run` 端到端地推进一个目标：由 TypeSafe 的 Jev 在带编号的元素表里选每一步的
+操作和目标，只有需要填字时才调用一个小模型。需要 `TYPESAFE_API_KEY`（或
+`~/.config/typesafe/key`）。
+
+```bash
+chrome-use jev run --goal "查苏黎世到伦敦的航班" --url https://www.google.com/travel/flights
+```
+
+每次运行会报告时间花在哪里——`jev_ms`（模型）、`act_ms`、`observe_ms`、
+`fresh_ms`——因为答案通常是「模型」而不是浏览器：实测一次运行是模型往返 64%、
+真实页面加载 29%、我们自己的命令 6%。
+
+`--terminal-shadow` 在同一次请求里多问一个问题：这个动作是不是就完成了目标；然后
+把这个断言和收尾决策的实际判断对照记录（`terminal_predicted`、
+`terminal_condition_observed`、`terminal_confirmed_done`）。它不改变完成判定的
+控制流——收尾决策照常做、照常说了算。它的存在是为了衡量「跳过那次决策」将来是否
+可能安全：单靠一个便宜的本地检查并不能判定完成，因为结账被踢回 `/login` 时，页面
+变化和成功时一模一样。
+
 ## 反检测
 
 <img src="assets/shield.png" alt="隐身盾牌" width="320" align="right" />

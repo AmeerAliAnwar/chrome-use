@@ -100,10 +100,15 @@ pub struct Options {
     pub goal: String,
     pub url: Option<String>,
     /// Ask, in the same Jev request, whether the chosen action is the last one
-    /// and how its success would show locally, then record whether that
-    /// condition was actually observed. Changes no outcome — the closing
-    /// decision is still made — so this only ever costs a few tokens per
-    /// request and buys the agreement rate that skipping it would require.
+    /// and how its success would show locally, then record that claim and what
+    /// the ordinary closing decision made of it.
+    ///
+    /// It does not change the completion control flow: the closing decision is
+    /// still made and still decides. It is NOT outcome-free in general, which
+    /// would be a stronger claim than the code can support — an extra question
+    /// in the same request can move the model's choice or its latency. That is
+    /// why it is opt-in and why the run report carries the counts rather than a
+    /// conclusion.
     pub terminal_shadow: bool,
 }
 
@@ -858,12 +863,26 @@ pub fn run(flags: &Flags, opts: Options) -> Result<Value, String> {
     // being non-zero is the difference between a task that is model-bound and
     // one that is fighting the page. Counted rather than inferred.
     let mut stale_retries = 0usize;
-    // Shadow-mode tallies: how often the model claimed an action was the last
-    // one, and how often the condition it named was then visible. Their ratio,
-    // over real tasks, is what a decision to ever act on the prediction would
-    // have to rest on.
+    // Shadow-mode tallies.
+    //
+    // The first two are cheap and say little on their own: how often the model
+    // called an action the last one, and how often the page change it named
+    // then appeared. Review by codex-01a0c18c is right that their ratio is a
+    // "predicted page change appeared" rate, NOT a completion-prediction
+    // accuracy — the /login bounce and the "Payment failed" page both change
+    // the page exactly as predicted while the goal fails.
+    //
+    // `terminal_confirmed` is the one that answers the real question: of the
+    // actions the model called last, how many did the ordinary closing decision
+    // then agree were DONE. That is the precision any future shortcut would be
+    // trading against, and it costs nothing extra to collect because the
+    // closing decision still runs.
     let mut terminal_predicted = 0usize;
     let mut terminal_observed = 0usize;
+    let mut terminal_confirmed = 0usize;
+    // Set when the last action carried a terminal claim, so the NEXT decision
+    // can be scored against it.
+    let mut terminal_pending = false;
     let started = Instant::now();
     let status = loop {
         if decisions >= MAX_STEPS * 2 {
@@ -876,6 +895,11 @@ pub fn run(flags: &Flags, opts: Options) -> Result<Value, String> {
             let decision = models.choose(&page, &opts.goal, &history, opts.terminal_shadow)?;
             decisions += 1;
             jev_ms += decision.latency_ms;
+            // Score the previous action's terminal claim against what the model
+            // actually decided once it saw the result. DONE means the claim held.
+            if std::mem::take(&mut terminal_pending) && decision.choice == "DONE" {
+                terminal_confirmed += 1;
+            }
             if decision.choice == "DONE" || decision.choice == "BLOCKED" {
                 if !browser.fresh(&page, None)? {
                     return Err(Step::Stale);
@@ -938,9 +962,9 @@ pub fn run(flags: &Flags, opts: Options) -> Result<Value, String> {
             // check locally is not a completion test, and using one as such
             // accepted a checkout bounced to /login as a finished goal.
             //
-            // The point is to collect, over real tasks, how often the prediction
-            // and the observation agree. That agreement rate is the evidence any
-            // decision to ever skip the closing call would have to rest on.
+            // The observation is the weak signal; the closing decision's verdict
+            // on the same claim (scored above as `terminal_confirmed`) is the
+            // one that would justify ever skipping it.
             if decision.terminal != Terminal::No {
                 terminal_predicted += 1;
                 let observed =
@@ -948,6 +972,7 @@ pub fn run(flags: &Flags, opts: Options) -> Result<Value, String> {
                 if observed {
                     terminal_observed += 1;
                 }
+                terminal_pending = true;
                 if let Some(last) = history.last_mut() {
                     last["terminal_predicted"] = json!(decision.terminal.id());
                     last["terminal_condition_observed"] = json!(observed);
@@ -990,6 +1015,7 @@ pub fn run(flags: &Flags, opts: Options) -> Result<Value, String> {
         "stale_retries": stale_retries,
         "terminal_predicted": terminal_predicted,
         "terminal_condition_observed": terminal_observed,
+        "terminal_confirmed_done": terminal_confirmed,
         "actions": history.len(),
         "url": page["url"],
         "title": page["title"],

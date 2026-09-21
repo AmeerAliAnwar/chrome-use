@@ -4755,6 +4755,19 @@ Batch:
   batch [--bail] ["cmd" ...]  Execute multiple commands sequentially (args or stdin)
                               --bail stops on first error (default: continue all)
 
+Agent loop (experimental):
+  jev run --goal <text> [--url <url>] [--terminal-shadow]
+                             Drive a goal with TypeSafe's Jev picking each step
+                             from an indexed element table. Needs TYPESAFE_API_KEY
+                             (or ~/.config/typesafe/key).
+                             --terminal-shadow additionally asks, in the same
+                             request, whether the chosen action ends the goal and
+                             records that claim against what the closing decision
+                             then decided. It does not change the completion
+                             control flow: the closing decision is still made.
+                             Reports terminal_predicted /
+                             terminal_condition_observed / terminal_confirmed_done.
+
 Site adapters:  turn a website into a structured-data CLI (runs as you, in your tab)
   site update                Fetch the community + official packs and configured extras
   site list                  List installed adapters (name/cmd)

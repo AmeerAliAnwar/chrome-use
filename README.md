@@ -202,6 +202,30 @@ The agent operates in your Chrome: you'll see tabs opening, pages loading, click
 | `chrome-use session list` · `session stop [name]` | Manage session workers |
 | `chrome-use status` | Relay, profile, extension, and session health |
 
+## Agent loop (experimental)
+
+`jev run` drives a goal end to end: TypeSafe's Jev picks each step's operation
+and target from an indexed element table, and a small model writes text only
+when a field needs typing. It needs `TYPESAFE_API_KEY` (or
+`~/.config/typesafe/key`).
+
+```bash
+chrome-use jev run --goal "find a flight from Zurich to London" --url https://www.google.com/travel/flights
+```
+
+A run reports where its time went — `jev_ms` (model), `act_ms`, `observe_ms`,
+`fresh_ms` — because the answer is usually "the model", not the browser: one
+measured run was 64% model round trips, 29% real page load, 6% our own commands.
+
+`--terminal-shadow` adds one question to the same request, asking whether the
+chosen action ends the goal, and records that claim against what the closing
+decision then decided (`terminal_predicted`, `terminal_condition_observed`,
+`terminal_confirmed_done`). It does not change the completion control flow: the
+closing decision is still made and still decides. It exists to measure whether
+skipping that decision could ever be safe — on its own, a cheap local check is
+not a completion test, since a checkout bounced to `/login` changes the page
+exactly as a success would.
+
 ## Anti-detection
 
 <img src="assets/shield.png" alt="stealth shield" width="320" align="right" />
