@@ -323,3 +323,44 @@ fi
    # ... login and perform actions ...
    chrome-use close  # Session ends, nothing persisted
    ```
+
+## Auth vault
+
+Credentials in shell history are a leak. For anything sensitive, use the
+auth vault (see the security guidance above):
+
+```bash
+chrome-use auth save my-app --url https://app.example.com/login \
+  --username user@example.com --password-stdin
+# (type password, Ctrl+D)
+
+chrome-use auth login my-app    # fills + clicks, waits for form
+```
+
+**Log in autonomously first — this is the default and the goal.** chrome-use is
+built to log in *by itself*: pull credentials from the auth vault or Bitwarden
+(`bwu get … | chrome-use fill … --stdin`), read TOTP/2FA codes, drive OAuth, and
+persist the session (`state save` / `--session-name`) so later runs start already
+logged in. Do NOT hand a login to the human just because it has a password or a
+2FA step — solve it. See the login patterns above and [session-management.md](session-management.md).
+
+**`session handoff` is a rare escape hatch, NOT how you log in.** Reach for it
+*only* when a step is genuinely impossible for the agent — an image/behavioral
+captcha you can't solve, an SMS/authenticator code you have no access to, a
+hardware-key tap, a bank's "approve on your phone" prompt. Try autonomously
+first; hand off only as a last resort:
+
+```bash
+chrome-use session handoff        # last resort: mark user-owned; tell the user exactly what to do
+# … the human does the one thing the agent truly can't …
+chrome-use session resume         # take control back — ONLY after they confirm they're done
+```
+
+While handed off, **any browser-driving command on that session is refused**
+(loud error with the exact `session resume` line), so the agent can't fight the
+user for the tab. It's **zero-impact until you call `handoff`** — the agent owns
+and drives every session by default, autonomous login included. Check state with
+`chrome-use session status`; `chrome-use session list` shows every session's owner.
+Never call `session resume` on your own to grab control back — wait for the user.
+A handed-off session is also **never reaped by the idle timer** — the window the
+human is working in stays open however long they take.

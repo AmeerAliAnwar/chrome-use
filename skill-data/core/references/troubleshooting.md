@@ -131,3 +131,24 @@ snapshot — fall back to `eval` in the iframe's origin or use the
 Use `--session-name <name>` or `state save`/`state load` so your session
 survives browser restarts. See [references/session-management.md](references/session-management.md)
 and [references/authentication.md](references/authentication.md).
+
+## Diagnosing install issues
+
+If a command fails unexpectedly (`Unknown command`, `Failed to connect`,
+stale daemons, version mismatches after `upgrade`, missing Chrome, etc.)
+run `doctor` before anything else:
+
+```bash
+chrome-use doctor                     # full diagnosis (env, Chrome, daemons, config, providers, network, launch test)
+chrome-use doctor --offline --quick   # fast, local-only
+chrome-use doctor --fix               # also run destructive repairs (reinstall Chrome, purge old state, ...)
+chrome-use doctor --json              # structured output for programmatic consumption
+chrome-use stealth status             # stealth self-check: mode + live probes
+chrome-use stealth status --json      #   (webdriver/chrome/plugins/UA) + applied
+                                         #   overrides. Gate a sensitive flow on this
+                                         #   instead of driving an external detector.
+```
+
+`doctor` auto-cleans stale socket/pid/version sidecar files on every run.
+Destructive actions require `--fix`. Exit code is `0` if all checks pass
+(warnings OK), `1` if any fail.

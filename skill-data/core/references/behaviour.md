@@ -119,3 +119,34 @@ next task.
 - A screenshot the user asked for goes in the answer as an image, not as a
   path. When you are testing a site for the user, capture the key moments
   and include them.
+
+## Remember a site's quirks (site notes)
+
+A site behaves the same every time you visit it. When you work out something
+durable — a working selector, a URL pattern, a hidden field a form needs, an
+anti-bot trap, what requires login — **write it down so the next run doesn't
+re-discover it.** Keep one markdown file per domain (these are your own notes,
+not shipped with the skill):
+
+```
+~/.chrome-use/site-patterns/<domain>.md
+```
+
+**Before** working on a domain, read its file if it exists (use your normal file
+tools — this is plain markdown you own). Treat it as *hints, not guarantees* —
+sites change; verify before relying. **After** a successful session that taught
+you something durable, create or update it. Suggested shape:
+
+```markdown
+---
+domain: app.example.com
+updated: 2026-06-05
+---
+## Platform traits
+SPA; form renders ~1s after load (wait --text). Cloudflare on /login.
+
+## Working patterns
+- Address pick: the `<li>` closes on blur — select with CLICK_MODE=dom.
+- Submit needs hidden `point_choice` set (eval), the UI never exposes it.
+- Stable selector for "Continue": button[data-testid=submit]
+```

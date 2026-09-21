@@ -48,11 +48,13 @@
         Get this loop flowing, then understand when <code>@ref</code> goes stale and when it self-heals, and you've got ninety percent of chrome-use's day-to-day usage.
       </p>
 
+      <p>The core skill includes the default observation and stopping rules, plus ordinary click and form commands. Load <code>core/reading</code>, <code>core/connection</code>, or <code>core/site-adapters</code> only when needed. Choose the cheapest check that answers the next question; do not request both DOM and screenshots by default. An authoritative page signal ends verification unless contradicted. Missing observations do not justify replaying an action.</p>
+
       <!-- ============ THE LOOP ============ -->
       <h2>The four-step loop</h2>
       <p>
         Each step decides based on the result of the last: <code>snapshot -i</code> gives you a structured view containing only interactive elements,
-        each carrying a short <code>@ref</code>; you take a ref to <code>click</code> / <code>type</code>; the moment the page changes, snapshot again to get fresh refs.
+        each carrying a short <code>@ref</code>; you take a ref to <code>click</code> / <code>type</code>; use the returned observation, and snapshot again only when target evidence is missing or stale.
       </p>
 
       <div class="du-code">

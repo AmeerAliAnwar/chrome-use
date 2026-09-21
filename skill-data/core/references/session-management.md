@@ -225,3 +225,35 @@ rm /tmp/auth-state.json
 # Set timeout for automated scripts
 timeout 60 chrome-use --session long-task get text body
 ```
+
+## Idle recovery and persisted session names
+
+Every other session's launched browser *is* closed after the daemon sits idle
+(`AGENT_BROWSER_IDLE_TIMEOUT_MS`, default `600000`; set `0` to keep it). If that
+happens, the next command launches a fresh browser rather than failing — and
+says so in a warning. Read it: the new window is empty, so a half-filled form,
+a logged-in tab, or anything typed into the old window is gone. That warning is
+the difference between "the page navigated away" (it did not) and "the browser
+was replaced" (it was). For a long-running flow with idle gaps, set
+`AGENT_BROWSER_IDLE_TIMEOUT_MS=0` or keep the session busy.
+
+To reclaim daemon workers without restarting every browser connection, use
+`chrome-use session stop [name]` for one session or `chrome-use session prune`
+for all active session daemons. Both commands stop workers gracefully.
+
+### Persist session across runs
+
+```bash
+# Log in once, save cookies + localStorage
+chrome-use state save ./auth.json
+
+# Later runs start already-logged-in
+chrome-use --state ./auth.json open https://app.example.com
+```
+
+Or use `--session-name` for auto-save/restore:
+
+```bash
+AGENT_BROWSER_SESSION_NAME=my-app chrome-use open https://app.example.com
+# State is auto-saved and restored on subsequent runs with the same name.
+```

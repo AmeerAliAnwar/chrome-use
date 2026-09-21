@@ -708,6 +708,11 @@ pub fn run(flags: &Flags, opts: Options) -> Result<Value, String> {
     let mut decisions = 0usize;
     let mut jev_ms = 0u128;
     let mut text_ms = 0u128;
+    // A decision thrown away because the page moved under it. Each one costs a
+    // whole model round trip (~590ms measured), so `decisions - actions - 1`
+    // being non-zero is the difference between a task that is model-bound and
+    // one that is fighting the page. Counted rather than inferred.
+    let mut stale_retries = 0usize;
     let started = Instant::now();
     let status = loop {
         if decisions >= MAX_STEPS * 2 {
@@ -790,6 +795,7 @@ pub fn run(flags: &Flags, opts: Options) -> Result<Value, String> {
             Ok(Some(status)) => break status,
             Ok(None) => {}
             Err(Step::Stale) => {
+                stale_retries += 1;
                 page = browser.observe().map_err(fatal)?;
             }
             Err(Step::Fatal(e)) => return Err(e),
@@ -809,6 +815,7 @@ pub fn run(flags: &Flags, opts: Options) -> Result<Value, String> {
         "fresh_ms": browser.fresh_ms as u64,
         "evals": browser.evals,
         "decisions": decisions,
+        "stale_retries": stale_retries,
         "actions": history.len(),
         "url": page["url"],
         "title": page["title"],

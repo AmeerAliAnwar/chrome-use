@@ -172,6 +172,8 @@ Free for 7 days, then **US$4.99 one-time for up to 3 Macs**. Notarized `.dmg`; m
 
 ## Usage
 
+`chrome-use skills get core` includes the everyday action loop and ordinary form commands. Load `core/reading`, `core/connection`, or `core/site-adapters` only when that task needs the detail; an ordinary click does not require another reference. Use the cheapest state check that answers the next question, and stop once an authoritative page signal confirms the goal.
+
 The core loop: open, read, act, re-read only what changed.
 
 ```bash

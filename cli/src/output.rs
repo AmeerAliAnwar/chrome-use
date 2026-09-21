@@ -4425,7 +4425,10 @@ Two different things can be out of date, and only one of them needs `update`:
 Examples:
   chrome-use skills
   chrome-use skills list
-  chrome-use skills get core
+  chrome-use skills get core             # ordinary actions and observation rules
+  chrome-use skills get core/reading     # frames, shadow roots, scoped reads
+  chrome-use skills get core/connection  # extension and profile setup
+  chrome-use skills get core/site-adapters
   chrome-use skills get core --full
   chrome-use skills get electron --full
   chrome-use skills get --all

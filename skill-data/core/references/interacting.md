@@ -359,3 +359,53 @@ Rules of thumb for these apps:
   export/download/API to confirm the content actually landed, before reporting done.
 - A one-token probe costs one round-trip and saves the classic failure of a whole
   document typed into the title bar.
+
+## Two ways to drive a page — and when to drop to `eval`
+
+You have a **real Chrome with the user's DOM**. Two layers, mix them freely:
+
+1. **Structured** (`snapshot` + `@ref`, `find`, typed actions) — convenient and
+   readable; best for straightforward forms and navigation. Its limit is what
+   the a11y view *cannot see*: hidden inputs never appear in it, and overlays
+   can still block a coordinate click. (Refs themselves survive ordinary
+   re-renders — see the self-heal note above; when relocation genuinely fails
+   you are told, rather than left pointing at the wrong element.)
+2. **eval-first** (`chrome-use eval "<js>"`) — your eyes and hands on the real
+   DOM: read hidden inputs, reach into Shadow DOM / iframes, inspect
+   `form.elements` and `.validity`, extract the exact shape you want, or call
+   `el.click()` directly. **Inspect blockers first; use `eval` when the dedicated commands cannot
+   answer the diagnostic question** — it's the fast way to find *why* something
+   failed (e.g. a hidden `point_choice=none` the UI never exposes).
+
+```bash
+# "what's actually in this form / why won't it submit?"
+chrome-use eval "[...document.forms[0].elements].map(e=>[e.name,e.type,e.value,e.checked])"
+chrome-use eval "document.querySelector('[name=point_choice]')?.value"
+chrome-use eval "[...document.forms[0].elements].filter(e=>!e.validity.valid).map(e=>e.name+': '+e.validationMessage)"
+chrome-use eval "document.querySelector('#stubborn').click()"   # direct DOM click, bypasses overlays
+```
+
+> **`eval` shows you *why*; the verb *does the thing*.** The snippets above are
+> for introspection (`.validity`, hidden inputs, `form.elements`) and the cases
+> no verb covers — that's exactly where `eval` shines. But for a **standard
+> operation**, don't hand-roll JS: there's a dedicated command that's shorter and
+> smarter (it heals stale refs, pierces cross-origin iframes, fires the events
+> React/Vue listen for, and returns structured output — raw `eval` gets none of
+> that). Reach for the verb first:
+>
+> | Instead of `eval …` | Use |
+> |---|---|
+> | `querySelector('article,main').innerText` | `read` / `get text --main` |
+> | `querySelector('#x').click()` | `click @ref` / `click <sel>` (DOM-dispatch bypasses overlays) |
+> | `el.value = …` on an input | `fill @ref <v>` (native setter → React/Vue register it) |
+> | clicking a `<select>` / combobox option | `select @ref <text>` / `pick` (portal-aware) |
+> | `querySelector('[name=x]').value` | `get value @ref` |
+> | `querySelectorAll('.x').length` | `get count <sel>` |
+> | `getAttribute('href')` | `get attr @ref href` |
+> | `el.scrollIntoView()` | `scroll --selector <sel>` |
+> | polling a condition in a loop | `wait --text` / `--selector` / `--function`, or `expect` |
+> | scraping a repeating list into JSON | `extract --schema` |
+> | reading a whole article / docs page | `read` (see the reading section) |
+>
+> Drop to `eval` when the verb genuinely doesn't fit (custom widget, closed
+> shadow, a page global) — not as the default for things a verb already does.

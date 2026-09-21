@@ -37,7 +37,9 @@ struct SkillInfo {
 ///   here, since they exist only to redirect external agents to
 ///   `skills get core`.
 /// - `skill-data/` — runtime skill content served by the CLI (`core`,
-///   `electron`, `slack`, `dogfood`, etc.).
+///   `electron`, `slack`, `dogfood`, etc.). Core keeps ordinary actions and
+///   observation rules in its entry point; task-specific reading, connection,
+///   and adapter details are retrieved as `core/<reference>`.
 ///
 /// Both are shipped in the npm package and searched by `discover_skills`.
 const SKILL_DIRS: &[&str] = &["skills", "skill-data"];
