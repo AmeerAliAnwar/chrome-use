@@ -577,7 +577,7 @@ JS</code></pre>
       </p>
 
       <!-- ============================================================ -->
-      <h2>Agent 循环（实验性）</h2>
+      <h2 id="jev">Agent 循环（实验性）</h2>
       <p>
         <code>jev run</code> 端到端推进一个目标：由 TypeSafe 的 Jev 在带编号的元素表里选每一步的操作和目标，
         只有需要填字时才调用一个小模型。需要 <code>TYPESAFE_API_KEY</code>（或 <code>~/.config/typesafe/key</code>）。
@@ -592,13 +592,9 @@ JS</code></pre>
 <span class="du-cmt"># 额外问一句「这个动作是不是就完成了目标」，并把它和收尾决策的实际判断对照记录</span>
 <span class="du-prompt">$</span> chrome-use jev run <span class="du-flag">--goal</span> <span class="du-str">"..."</span> <span class="du-flag">--terminal-shadow</span></code></pre>
       </div>
-      <p class="cmp-mut" style="font-size:.85rem;">
-        每次运行报告时间去向：<code>jev_ms</code>（模型）、<code>act_ms</code>、<code>observe_ms</code>、<code>fresh_ms</code>。
-        实测一次运行是<strong>模型往返 64%、真实页面加载 29%、CLI 自身命令 6%</strong>——跑得慢通常是模型，不是浏览器。
-        <code>--terminal-shadow</code> <strong>不改变完成判定的控制流</strong>：收尾决策照常做、照常说了算，它只是记录
-        （<code>terminal_predicted</code> / <code>terminal_confirmed_done</code> / <code>stale_fields</code>）。
-        单靠一个便宜的本地检查判定不了完成——结账被踢回 <code>/login</code> 时，页面变化和成功时一模一样。
-      </p>
+      <p>结果包含 <code>elapsed_ms</code>、<code>jev_ms</code>、<code>text_ms</code>、<code>observe_ms</code>、<code>act_ms</code>、<code>fresh_ms</code> 及决策、动作计数。应测量实际任务，不能把某个页面或 provider 的耗时比例推广到其他场景。</p>
+      <p><code>--terminal-shadow</code> 在模型请求中增加完成预测问题，记录 <code>terminal_predicted</code>、<code>terminal_condition_observed</code>、<code>terminal_confirmed_done</code> 和 <code>terminal_refuted</code>，不会跳过正常的完成决策。与后续模型判断一致不等于任务已通过独立验收；增加问题也可能影响模型选择和延迟。</p>
+      <p><code>stale_by_phase</code> 和 <code>stale_fields</code> 按类别记录 marker 新鲜度检查的拒绝原因，不写入原始正文。click/select 的 guard 拒绝不包含在这些分类统计中。URL 改变或控件离开可操作集合都不能证明目标完成，这些计数也不能证明哪些模型调用可以安全省掉。</p>
 
       <!-- ============================================================ -->
       <h2>状态管理</h2>
@@ -838,14 +834,6 @@ AGENT_BROWSER_ADAPTIVE_REF=<span class="du-str">"0"</span>        <span class="d
         <code>hint</code>，直到你用 <code>AGENT_BROWSER_CAPTURE_CONSOLE=1</code> 启动会话 —— 这样常见自动化路径下
         CDP <code>Runtime</code> 域始终禁用。跑不通时可对照 <a href="/troubleshooting.html">故障排查</a>。
       </div>
-
-      <h2 id="jev">实验性：Jev 目标执行</h2>
-      <p><code>jev run</code> 执行自然语言目标，由 TypeSafe 的 Jev 选择操作和目标，文本模型按需生成字段内容。需要 <code>TYPESAFE_API_KEY</code> 或 <code>~/.config/typesafe/key</code>。</p>
-      <div class="du-code"><pre><code>chrome-use jev run --goal "打开文档" --url https://example.com
-chrome-use jev run --goal "打开文档" --url https://example.com --terminal-shadow</code></pre></div>
-      <p>结果包含 <code>elapsed_ms</code>、<code>jev_ms</code>、<code>text_ms</code>、<code>observe_ms</code>、<code>act_ms</code>、<code>fresh_ms</code> 及决策、动作计数。应测量实际任务，不能把某个页面或 provider 的耗时比例推广到其他场景。</p>
-      <p><code>--terminal-shadow</code> 在模型请求中增加完成预测问题，记录 <code>terminal_predicted</code>、<code>terminal_condition_observed</code>、<code>terminal_confirmed_done</code> 和 <code>terminal_refuted</code>，不会跳过正常的完成决策。与后续模型判断一致不等于任务已通过独立验收；增加问题也可能影响模型选择和延迟。</p>
-      <p><code>stale_by_phase</code> 和 <code>stale_fields</code> 按类别记录 marker 新鲜度检查的拒绝原因，不写入原始正文。click/select 的 guard 拒绝不包含在这些分类统计中。URL 改变或控件离开可操作集合都不能证明目标完成，这些计数也不能证明哪些模型调用可以安全省掉。</p>
 
     </main>
     <!-- ========================== /PAGE CONTENT =========================== -->

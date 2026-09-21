@@ -597,7 +597,7 @@ JS</code></pre>
       </p>
 
       <!-- ============================================================ -->
-      <h2>Agent loop (experimental)</h2>
+      <h2 id="jev">Agent loop (experimental)</h2>
       <p>
         <code>jev run</code> drives a goal end to end: TypeSafe's Jev picks each step's operation and
         target from an indexed element table, and a small model writes text only when a field needs
@@ -614,17 +614,9 @@ JS</code></pre>
 <span class="du-cmt"># against what the closing decision then decided</span>
 <span class="du-prompt">$</span> chrome-use jev run <span class="du-flag">--goal</span> <span class="du-str">"..."</span> <span class="du-flag">--terminal-shadow</span></code></pre>
       </div>
-      <p class="cmp-mut" style="font-size:.85rem;">
-        A run reports where its time went: <code>jev_ms</code> (model), <code>act_ms</code>,
-        <code>observe_ms</code>, <code>fresh_ms</code>. One measured run split
-        <strong>64% model round trips, 29% real page load, 6% the CLI's own commands</strong> — when a
-        run is slow the model is usually the reason, not the browser.
-        <code>--terminal-shadow</code> <strong>does not change the completion control flow</strong>:
-        the closing decision is still made and still decides, and the flag only records
-        (<code>terminal_predicted</code> / <code>terminal_confirmed_done</code> / <code>stale_fields</code>).
-        A cheap local check is not a completion test — a checkout bounced to <code>/login</code>
-        changes the page exactly as a success would.
-      </p>
+      <p>The run reports <code>elapsed_ms</code>, <code>jev_ms</code>, <code>text_ms</code>, <code>observe_ms</code>, <code>act_ms</code>, <code>fresh_ms</code>, and decision/action counts. Measure the actual task; timing proportions from one page or provider do not generalize.</p>
+      <p><code>--terminal-shadow</code> adds a completion-prediction question to the model request. It records <code>terminal_predicted</code>, <code>terminal_condition_observed</code>, <code>terminal_confirmed_done</code>, and <code>terminal_refuted</code>. It does not skip the normal completion decision. Agreement with a later model decision is not independent proof of task success; adding a question can also affect model choices and latency.</p>
+      <p><code>stale_by_phase</code> and <code>stale_fields</code> describe marker-based freshness rejections using categories rather than raw page text. Click/select guard rejections are not included in those breakdowns. A changed URL or a control leaving the actionable set is not a completion test. These counters do not establish safely removable model calls.</p>
 
       <!-- ============================================================ -->
       <h2>State management</h2>
@@ -874,14 +866,6 @@ AGENT_BROWSER_ADAPTIVE_REF=<span class="du-str">"0"</span>        <span class="d
         CDP <code>Runtime</code> domain disabled on the common automation paths. When something doesn't work, cross-check
         <a href="/en/troubleshooting.html">Troubleshooting</a>.
       </div>
-
-      <h2 id="jev">Experimental: Jev goal runner</h2>
-      <p><code>jev run</code> drives a natural-language goal. TypeSafe's Jev chooses operations and targets; a text model supplies field values when needed. Requires <code>TYPESAFE_API_KEY</code> or <code>~/.config/typesafe/key</code>.</p>
-      <div class="du-code"><pre><code>chrome-use jev run --goal "Open the documentation" --url https://example.com
-chrome-use jev run --goal "Open the documentation" --url https://example.com --terminal-shadow</code></pre></div>
-      <p>The run reports <code>elapsed_ms</code>, <code>jev_ms</code>, <code>text_ms</code>, <code>observe_ms</code>, <code>act_ms</code>, <code>fresh_ms</code>, and decision/action counts. Measure the actual task; timing proportions from one page or provider do not generalize.</p>
-      <p><code>--terminal-shadow</code> adds a completion-prediction question to the model request. It records <code>terminal_predicted</code>, <code>terminal_condition_observed</code>, <code>terminal_confirmed_done</code>, and <code>terminal_refuted</code>. It does not skip the normal completion decision. Agreement with a later model decision is not independent proof of task success; adding a question can also affect model choices and latency.</p>
-      <p><code>stale_by_phase</code> and <code>stale_fields</code> describe marker-based freshness rejections using categories rather than raw page text. Click/select guard rejections are not included in those breakdowns. A changed URL or a control leaving the actionable set is not a completion test. These counters do not establish safely removable model calls.</p>
 
     </main>
     <!-- ========================== /PAGE CONTENT =========================== -->
