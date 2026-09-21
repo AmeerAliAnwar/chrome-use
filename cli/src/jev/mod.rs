@@ -111,6 +111,15 @@ struct Browser<'a> {
     flags: &'a Flags,
     settle_for: Option<Value>,
     prefetched: Option<Value>,
+    /// Wall-clock spent in each phase, so the run report says where the time
+    /// actually went instead of leaving `elapsed - jev - text` as one opaque
+    /// remainder. Measured because the obvious suspect (our CDP layer) turned
+    /// out to cost ~15ms a call, while a single settle after a navigation cost
+    /// well over a second — optimising the wrong one is free to do and useless.
+    observe_ms: u128,
+    act_ms: u128,
+    fresh_ms: u128,
+    evals: u32,
 }
 
 impl<'a> Browser<'a> {
@@ -125,7 +134,8 @@ impl<'a> Browser<'a> {
         }
     }
 
-    fn eval(&self, script: &str) -> Result<Value, Step> {
+    fn eval(&mut self, script: &str) -> Result<Value, Step> {
+        self.evals += 1;
         let b64 = base64::engine::general_purpose::STANDARD.encode(script);
         match self.call(&["eval", "-b", &b64]) {
             Ok(data) => Ok(data.get("result").cloned().unwrap_or(Value::Null)),
@@ -143,6 +153,13 @@ impl<'a> Browser<'a> {
     }
 
     fn observe(&mut self) -> Result<Value, Step> {
+        let t0 = Instant::now();
+        let out = self.observe_inner();
+        self.observe_ms += t0.elapsed().as_millis();
+        out
+    }
+
+    fn observe_inner(&mut self) -> Result<Value, Step> {
         let mut action = self.settle_for.take();
         let mut prefetched = self.prefetched.take();
         for attempt in 0..10 {
@@ -179,11 +196,21 @@ impl<'a> Browser<'a> {
         }
     }
 
-    fn fresh(&self, page: &Value, action: Option<&Value>) -> Result<bool, Step> {
-        Ok(self.eval(&Self::freshness_check(page, action))? == Value::Bool(true))
+    fn fresh(&mut self, page: &Value, action: Option<&Value>) -> Result<bool, Step> {
+        let t0 = Instant::now();
+        let out = self.eval(&Self::freshness_check(page, action));
+        self.fresh_ms += t0.elapsed().as_millis();
+        Ok(out? == Value::Bool(true))
     }
 
     fn act(&mut self, action: &Value, page: &Value, text: Option<&str>) -> Result<(), Step> {
+        let t0 = Instant::now();
+        let out = self.act_inner(action, page, text);
+        self.act_ms += t0.elapsed().as_millis();
+        out
+    }
+
+    fn act_inner(&mut self, action: &Value, page: &Value, text: Option<&str>) -> Result<(), Step> {
         let k = kind(action);
         if k == "wait" || k == "scroll" {
             if !self.fresh(page, Some(action))? {
@@ -668,6 +695,10 @@ pub fn run(flags: &Flags, opts: Options) -> Result<Value, String> {
         flags,
         settle_for: None,
         prefetched: None,
+        observe_ms: 0,
+        act_ms: 0,
+        fresh_ms: 0,
+        evals: 0,
     };
     if let Some(url) = &opts.url {
         browser.call(&["open", url])?;
@@ -769,6 +800,14 @@ pub fn run(flags: &Flags, opts: Options) -> Result<Value, String> {
         "elapsed_ms": started.elapsed().as_millis() as u64,
         "jev_ms": jev_ms as u64,
         "text_ms": text_ms as u64,
+        // Where the non-model time actually goes. `observe_ms` includes the
+        // page settle, which after a real navigation dominates everything else
+        // we do; `fresh_ms` and the eval count are the round trips our own
+        // layer adds, measured so nobody optimises them on a hunch.
+        "observe_ms": browser.observe_ms as u64,
+        "act_ms": browser.act_ms as u64,
+        "fresh_ms": browser.fresh_ms as u64,
+        "evals": browser.evals,
         "decisions": decisions,
         "actions": history.len(),
         "url": page["url"],
