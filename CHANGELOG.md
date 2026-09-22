@@ -1,8 +1,23 @@
 # Changelog
 
-## 1.5.133
+## 1.5.134
 
 <!-- release:start -->
+### Improvements
+
+- **The installed skill now hands off to the guide the binary carries.** `skills/chrome-use/SKILL.md` — the entry point an installed agent actually reads — was a separate 244-line manual that never loaded `core`, so v1.5.132's smaller `core/SKILL.md` did not reach it. It is now a 41-line entry that loads `chrome-use skills get core`, and upgrading the binary updates the guide an agent follows. On what that buys: in a small cross-harness comparison on synthetic local tasks, DeepSeek V4.1 Flash needed 7 outer tool calls with the new guide against 10 with the old one and about 35% lower host-reported cost on the paired basic task; Claude Code did not show that pattern, and native MCP did not consistently reduce model turns against the CLI. That is a few observations under uneven host load, not a general speedup or success-rate claim. The harness and full report are in `bench/skill-eval/` and `bench/reports/`.
+
+### Bug Fixes
+
+- **A `wait` that hit its deadline is no longer reported as a dead connection.** `Wait timed out after …` used to be rewritten as "the session's browser connection is unresponsive … Reconnect with `connect`, or close the session". In one recorded run an agent waited for `Saved` while the page already read `Delivery saved`, spent its 25-second budget on the case mismatch, was told to throw the session away, and the very next `get text` worked. The hint now says the condition was not observed and that the timeout alone does not establish a connection failure — it does not claim the opposite either, since the poller retries failed probes until its deadline. It also states that `--text` is case-sensitive and that an already-visible receipt does not need a second wait. Genuine CDP/relay timeouts keep their existing diagnosis, and `wait` matching itself is unchanged.
+
+### Contributors
+
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.133
+
 ### Corrections
 
 - **v1.5.132 overstated who benefits from the smaller skill.** It said "the agent skill's entry point is 73.9% smaller". The measured reduction is real, but it applies to `core/SKILL.md` — the file `chrome-use skills get core` serves. The entry point an installed agent actually reads is `skills/chrome-use/SKILL.md`, a separate 244-line manual with no `skills get core` indirection, which this change did not touch. So nothing about what an installed agent loads follows from that number, and the note now names the file instead of the entry point. Found by codex-01a0c18c auditing the real loading path rather than the file I had measured.
@@ -14,7 +29,6 @@
 ### Contributors
 
 - @leeguooooo
-<!-- release:end -->
 
 ## 1.5.132
 
