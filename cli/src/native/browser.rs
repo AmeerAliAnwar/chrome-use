@@ -706,6 +706,18 @@ pub fn to_ai_friendly_error(error: &str) -> String {
     // `sessions` still reports the daemon alive (issue #117). Keep the concrete
     // failing method and spell out recovery instead of leaving a bare timeout.
     if lower.contains("timed out") {
+        // Polling can reach this deadline after false results or failed probes.
+        // The deadline alone cannot diagnose transport health.
+        if lower.contains("wait timed out after") {
+            return format!(
+                "{error}\nHint: the condition was not observed within the budget. This timeout \
+                 alone does not establish a connection failure. Check the current page and \
+                 the wait condition before reconnecting.\n\
+                 For `--text`, matching is case-sensitive (`Saved` does not match `saved`). \
+                 Use the page's actual wording. If the requested receipt or confirmation is \
+                 already visible, do not wait for a second confirmation."
+            );
+        }
         // A payload-sized command that ran out its (payload-scaled) budget is a
         // different situation: the connection is fine, the command legitimately
         // needed longer than we allowed. Sending that caller to `connect` or to
@@ -4642,6 +4654,53 @@ mod tests {
         let other = to_ai_friendly_error("CDP command timed out after 30s: Runtime.evaluate");
         assert!(other.contains("stale relay/service-worker"), "got: {other}");
         assert!(!other.contains("size limit"), "got: {other}");
+    }
+
+    /// A wait that reached its deadline must not be diagnosed either way.
+    ///
+    /// `poll_until_true` swallows a probe that timed out or errored and keeps
+    /// polling, so this message is identical whether every probe answered or
+    /// none did. The old generic branch asserted a stale relay and sent the
+    /// caller to reconnect; a first version of this branch asserted the
+    /// opposite ("the connection is fine"). Both claim more than the code can
+    /// support, and the second is the more dangerous when the connection really
+    /// has died.
+    #[test]
+    fn a_wait_whose_condition_never_held_is_not_a_dead_connection() {
+        let out = to_ai_friendly_error("Wait timed out after 25000ms");
+
+        // Must not diagnose a dead connection...
+        assert!(
+            !out.contains("stale relay/service-worker"),
+            "must not blame the connection: {out}"
+        );
+        assert!(
+            !out.contains("Reconnect with `connect`"),
+            "must not send the caller to reconnect: {out}"
+        );
+        // ...and must not claim a healthy one either. Every probe may have
+        // failed; this message cannot tell the difference.
+        assert!(
+            !out.contains("connection is fine"),
+            "must not vouch for the connection: {out}"
+        );
+        assert!(
+            out.contains("does not establish a connection failure"),
+            "{out}"
+        );
+
+        // What is actually known, and where to look first.
+        assert!(out.contains("not observed within the budget"), "{out}");
+        assert!(out.contains("case-sensitive"), "{out}");
+        assert!(
+            out.contains("do not wait for a second confirmation"),
+            "an already-visible answer is the answer: {out}"
+        );
+
+        // A genuine CDP/relay timeout keeps its own diagnosis.
+        let relay = to_ai_friendly_error("CDP command timed out after 30s: Page.enable");
+        assert!(relay.contains("stale relay/service-worker"), "{relay}");
+        assert!(!relay.contains("case-sensitive"), "{relay}");
     }
 
     use super::*;

@@ -84,8 +84,15 @@ chrome-use uncheck @e5
 chrome-use scroll down 500
 chrome-use get value @e2
 chrome-use get text @e6
-chrome-use wait --text "Saved"
+chrome-use wait --text "<expected page text>"  # case-sensitive substring
 ```
+
+`wait --text` matches an exact, case-sensitive substring of the page's visible
+text. Replace the placeholder above with actual expected page wording;
+`Saved` will not match `Delivery saved.` When a
+receipt or confirmation is already visible, that is the answer; waiting for it
+again only spends the budget. A `Wait timed out` says the condition was not
+observed — on its own it tells you nothing about the connection.
 
 Prefer dedicated verbs over handwritten JavaScript: they check ref identity,
 handle frames, and dispatch the events widgets expect. For an autocomplete,
