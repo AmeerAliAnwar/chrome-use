@@ -274,26 +274,41 @@ if (chrome.windows && chrome.windows.onFocusChanged) {
 // not the whole window. (Issue: banner occludes the user's foreground tab.)
 const ownedTabs = new Set();
 let ownedLoaded = false;
+let loadOwnedPromise = null;
+
 async function loadOwnedTabs() {
   if (ownedLoaded) return;
-  try {
-    const g = await chrome.storage.local.get('ab_owned_tabs');
-    for (const id of g.ab_owned_tabs || []) ownedTabs.add(id);
-  } catch {}
-  ownedLoaded = true;
+  if (!loadOwnedPromise) {
+    loadOwnedPromise = (async () => {
+      try {
+        const g = await chrome.storage.local.get('ab_owned_tabs');
+        for (const id of g.ab_owned_tabs || []) ownedTabs.add(id);
+      } catch {}
+      ownedLoaded = true;
+    })();
+  }
+  return loadOwnedPromise;
 }
+
+// Eagerly initiate loading on worker startup
+void loadOwnedTabs();
+
 function persistOwnedTabs() {
   try {
     chrome.storage.local.set({ ab_owned_tabs: [...ownedTabs] });
   } catch {}
 }
-function markOwned(tabId) {
+
+async function markOwned(tabId) {
+  await loadOwnedTabs();
   if (tabId != null && !ownedTabs.has(tabId)) {
     ownedTabs.add(tabId);
     persistOwnedTabs();
   }
 }
-function unmarkOwned(tabId) {
+
+async function unmarkOwned(tabId) {
+  await loadOwnedTabs();
   if (ownedTabs.delete(tabId)) persistOwnedTabs();
 }
 
@@ -411,9 +426,22 @@ async function buildHelloIdentity() {
   return extra;
 }
 
+const MAX_NATIVE_MESSAGE_BYTES = 1000000; // Chrome native messaging hard ceiling is 1MB (1,048,576 bytes)
+
 function postToHost(msg) {
+  if (!port) return;
   try {
-    if (port) port.postMessage(msg);
+    const serialized = JSON.stringify(msg);
+    if (serialized.length > MAX_NATIVE_MESSAGE_BYTES) {
+      if (msg && msg.id != null) {
+        port.postMessage({
+          id: msg.id,
+          error: `payload_exceeds_1mb_limit (${serialized.length} bytes)`,
+        });
+      }
+      return;
+    }
+    port.postMessage(msg);
   } catch (e) {
     // port died; onDisconnect will reconnect.
   }
@@ -1076,10 +1104,22 @@ async function handleForwardCdpCommand(msg) {
         : undefined;
     const commands = Array.isArray(params?.commands) ? params.commands : [];
     const results = [];
-    for (const cmd of commands) {
+    const stopOnError = params?.stopOnError !== false;
+    for (let i = 0; i < commands.length; i++) {
+      const cmd = commands[i];
       if (!cmd || typeof cmd.method !== 'string') continue;
-      const res = await dispatchToTab(tabId, cmd.method, cmd.params, childSid);
-      results.push(res);
+      try {
+        const res = await dispatchToTab(tabId, cmd.method, cmd.params, childSid);
+        results.push({ index: i, method: cmd.method, success: true, result: res });
+      } catch (err) {
+        results.push({
+          index: i,
+          method: cmd.method,
+          success: false,
+          error: err?.message || String(err),
+        });
+        if (stopOnError) break;
+      }
     }
     return { results };
   }
@@ -1097,23 +1137,50 @@ async function handleForwardCdpCommand(msg) {
         : undefined;
     const maxElements = Number(params?.maxElements) || 50;
     const expression = `(() => {
-      const interactive = document.querySelectorAll('button, a[href], input, select, textarea, [role="button"], [role="link"], [role="checkbox"], [role="radio"], [role="tab"], [tabindex]:not([tabindex="-1"])');
+      const collectInteractive = (root) => {
+        let nodes = Array.from(root.querySelectorAll('button, a[href], input, select, textarea, [role="button"], [role="link"], [role="checkbox"], [role="radio"], [role="tab"], [tabindex]:not([tabindex="-1"])'));
+        const all = root.querySelectorAll('*');
+        for (let i = 0; i < all.length; i++) {
+          if (all[i].shadowRoot) {
+            nodes = nodes.concat(collectInteractive(all[i].shadowRoot));
+          }
+        }
+        return nodes;
+      };
+
+      const interactive = collectInteractive(document);
       const visible = [];
       const vh = window.innerHeight;
       const vw = window.innerWidth;
       for (let i = 0; i < interactive.length && visible.length < ${maxElements}; i++) {
         const el = interactive[i];
+        const style = window.getComputedStyle(el);
+        if (style.visibility === 'hidden' || style.display === 'none' || style.opacity === '0') continue;
         const r = el.getBoundingClientRect();
-        if (r.width > 0 && r.height > 0 && r.top < vh && r.bottom > 0 && r.left < vw && r.right > 0) {
-          visible.push({
-            tag: el.tagName.toLowerCase(),
-            role: el.getAttribute('role') || el.type || '',
-            name: (el.innerText?.trim()?.slice(0, 50) || el.getAttribute('aria-label') || el.placeholder || el.title || '').trim(),
-            id: el.id || '',
-            className: el.className && typeof el.className === 'string' ? el.className.trim().split(/\\s+/)[0] : '',
-            rect: { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) }
-          });
-        }
+        if (r.width <= 0 || r.height <= 0 || r.bottom <= 0 || r.top >= vh || r.right <= 0 || r.left >= vw) continue;
+
+        // Verify element is not occluded by modal backdrop or overlay
+        const cx = Math.max(0, Math.min(vw - 1, r.left + r.width / 2));
+        const cy = Math.max(0, Math.min(vh - 1, r.top + r.height / 2));
+        const topEl = document.elementFromPoint(cx, cy);
+        if (topEl && !el.contains(topEl) && !topEl.contains(el)) continue;
+
+        const refIndex = visible.length + 1;
+        const ref = '@e' + refIndex;
+        try {
+          el.setAttribute('data-cu-ref', 'e' + refIndex);
+        } catch {}
+
+        visible.push({
+          ref,
+          tag: el.tagName.toLowerCase(),
+          role: el.getAttribute('role') || el.type || '',
+          name: (el.innerText?.trim()?.slice(0, 50) || el.getAttribute('aria-label') || el.placeholder || el.title || '').trim(),
+          id: el.id || '',
+          className: el.className && typeof el.className === 'string' ? el.className.trim().split(/\\s+/)[0] : '',
+          selector: '[data-cu-ref="e' + refIndex + '"]',
+          rect: { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) }
+        });
       }
       return visible;
     })()`;
@@ -1132,7 +1199,20 @@ async function handleForwardCdpCommand(msg) {
 
   // Browser-level Target methods that map onto chrome.tabs.
   if (method === 'Target.createTarget') {
-    const url = typeof params?.url === 'string' && params.url ? params.url : 'about:blank';
+    let url = typeof params?.url === 'string' && params.url ? params.url.trim() : 'about:blank';
+    if (
+      url &&
+      url !== 'about:blank' &&
+      !/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(url) &&
+      !url.startsWith('about:') &&
+      !url.startsWith('chrome:') &&
+      !url.startsWith('chrome-extension:') &&
+      !url.startsWith('data:') &&
+      !url.startsWith('javascript:') &&
+      !url.startsWith('file:')
+    ) {
+      url = (url.startsWith('localhost') || url.startsWith('127.0.0.1') ? 'http://' : 'https://') + url;
+    }
     // `dedicatedWindow` (opt-in daemon hint): put agent tabs in a separate
     // window in the same profile instead of the user's active window.
     const dedicated = params?.dedicatedWindow === true;
@@ -1140,7 +1220,7 @@ async function handleForwardCdpCommand(msg) {
       ? await createAgentTab(url)
       : await chrome.tabs.create({ url, active: false });
     if (!tab || !tab.id) throw new Error('createTarget: no tab id');
-    markOwned(tab.id); // agent-created → ours to attach (and re-attach after SW restart)
+    await markOwned(tab.id); // agent-created → ours to attach (and re-attach after SW restart)
     // Per-session tab grouping (non-CDP hint from the daemon). Best-effort.
     // Group before attaching so tabScopeHints reads the assigned group on initial attach announcement.
     const group = typeof params?.agentGroup === 'string' ? params.agentGroup.trim() : '';
@@ -1605,9 +1685,13 @@ async function reannounceAttachedTabs() {
 const HIGH_FREQUENCY_IGNORED_EVENTS = new Set([
   'Network.dataReceived',
   'Network.resourceChangedPriority',
+  'Network.requestWillBeSentExtraInfo',
+  'Network.responseReceivedExtraInfo',
   'DOM.childNodeCountUpdated',
   'DOM.attributeModified',
   'DOM.characterDataModified',
+  'DOM.distributedNodesUpdated',
+  'Log.entryAdded',
 ]);
 
 chrome.debugger.onEvent.addListener(
