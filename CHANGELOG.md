@@ -1,8 +1,24 @@
 # Changelog
 
-## 1.5.134
+## 1.5.135
 
 <!-- release:start -->
+### Bug Fixes
+
+- **`press Meta+a` now selects all on macOS.** It never did: Chrome resolves Cmd+A there through the OS text system, which a synthetic CDP key event does not reach, so the key was delivered, nothing was selected, and the next `keyboard inserttext` appended to what the field held. A field reading `hello` became `helloX` instead of `X`. That broke the documented `click <input>` then `press Meta+a` pattern for every agent on macOS. The platform select-all chord (Cmd+A on macOS, Ctrl+A elsewhere, with no other modifier) now goes through the same editor command `fill` already used. Ctrl+A on macOS keeps its own meaning. Copy, paste, cut and undo were not reproduced and are unchanged.
+- **`jev run` no longer reads a checkbox's or radio's value attribute as its state.** An unchecked terms box was presented to the model as "current value `on`" and an unselected radio as its own option name, so the model skipped both as already set. They now carry an empty value beside the real `checked` state. Together with the select-all fix, a re-filled field is replaced instead of appended to, and a skipped radio is now selected. The 16-question form that exposed both still does not complete: with only radios, checkboxes and Submit left, Jev weighs TYPE_TEXT (~0.52) over CLICK (~0.30) and re-types a finished field. That is recorded as open, not fixed.
+
+### Improvements
+
+- **`JEV_TRACE=<file>`** writes one JSON line per `jev run` decision: the candidates the model was shown, its choice, and Jev's answer probabilities. Off unless set. It records field labels and current values, including anything typed, so treat the file as sensitive. The run report also splits `act_ms` into `act_read_ms`, `cmd_click_ms`, `cmd_press_ms` and `cmd_insert_ms`.
+
+### Contributors
+
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.134
+
 ### Improvements
 
 - **The installed skill now hands off to the guide the binary carries.** `skills/chrome-use/SKILL.md` — the entry point an installed agent actually reads — was a separate 244-line manual that never loaded `core`, so v1.5.132's smaller `core/SKILL.md` did not reach it. It is now a 41-line entry that loads `chrome-use skills get core`, and upgrading the binary updates the guide an agent follows. On what that buys: in a small cross-harness comparison on synthetic local tasks, DeepSeek V4.1 Flash needed 7 outer tool calls with the new guide against 10 with the old one and about 35% lower host-reported cost on the paired basic task; Claude Code did not show that pattern, and native MCP did not consistently reduce model turns against the CLI. That is a few observations under uneven host load, not a general speedup or success-rate claim. The harness and full report are in `bench/skill-eval/` and `bench/reports/`.
@@ -14,7 +30,6 @@
 ### Contributors
 
 - @leeguooooo
-<!-- release:end -->
 
 ## 1.5.133
 
