@@ -596,7 +596,7 @@ function connectHost() {
         // state read (0.5.25). The daemon feature-detects on these names, so a
         // CLI that wants them on an older extension says "update" instead of
         // sending a method Chrome answers with "wasn't found".
-        capabilities: ['nativeTabDuplicate', 'downloadsApi', `call:${POLICY_VERSION}`, 'state'],
+        capabilities: ['nativeTabDuplicate', 'downloadsApi', `call:${POLICY_VERSION}`, 'state', 'batchCommands', 'viewportInteractive'],
         ...extra,
       });
     } catch {}
@@ -612,6 +612,8 @@ function connectHost() {
 
 async function onHostMessage(msg) {
   if (!msg || typeof msg !== 'object') return;
+  // Active host commands refresh the keepalive window so working sessions never go cold.
+  scheduleKeepalivePing();
   // Optional keepalive.
   if (msg.method === 'pong') return;
   if (msg.method === 'ping') {
@@ -628,6 +630,22 @@ async function onHostMessage(msg) {
     try {
       const result = await handleForwardCdpCommand(msg);
       postToHost({ id: msg.id, result });
+    } catch (err) {
+      postToHost({ id: msg.id, error: err instanceof Error ? err.message : String(err) });
+    }
+  } else if (typeof msg.id !== 'undefined' && msg.method === 'forwardCDPBatch') {
+    try {
+      const commands = Array.isArray(msg.params?.commands) ? msg.params.commands : [];
+      const results = [];
+      for (const item of commands) {
+        const itemResult = await handleForwardCdpCommand({
+          ...msg,
+          method: 'forwardCDPCommand',
+          params: item,
+        });
+        results.push(itemResult);
+      }
+      postToHost({ id: msg.id, result: { results } });
     } catch (err) {
       postToHost({ id: msg.id, error: err instanceof Error ? err.message : String(err) });
     }
@@ -694,7 +712,7 @@ async function recoverSessionTab(sessionId) {
         if (isPermanentAttachError(e)) break;
         // mid-swap: tab exists but isn't attachable yet — back off and retry.
       }
-      await new Promise((r) => setTimeout(r, 120 + i * 150));
+      await new Promise((r) => setTimeout(r, 40 + i * 80));
     }
   }
   // 2) The Chrome tabId is gone, but the CDP targetId is STABLE across the nav.
@@ -740,7 +758,7 @@ async function recoverSessionTab(sessionId) {
           }
         }
       }
-      await new Promise((r) => setTimeout(r, 300 + i * 300));
+      await new Promise((r) => setTimeout(r, 100 + i * 150));
     }
   }
   return null;
@@ -1045,6 +1063,73 @@ async function handleForwardCdpCommand(msg) {
     };
   }
 
+  // Atomic batch command execution: dispatches multiple commands in a single IPC roundtrip.
+  if (method === 'ABExt.batchCommands') {
+    const tabId =
+      resolveSessionTab(sessionId, sessionToTab, childSessionToTab) ??
+      (typeof params?.targetId === 'string' ? tabForTarget(params.targetId) : null) ??
+      anyConnectedTab();
+    if (tabId == null) throw new Error('no attached tab for ABExt.batchCommands');
+    const childSid =
+      sessionId && tabIdFromSession(sessionId) == null && childSessionToTab.has(sessionId)
+        ? sessionId
+        : undefined;
+    const commands = Array.isArray(params?.commands) ? params.commands : [];
+    const results = [];
+    for (const cmd of commands) {
+      if (!cmd || typeof cmd.method !== 'string') continue;
+      const res = await dispatchToTab(tabId, cmd.method, cmd.params, childSid);
+      results.push(res);
+    }
+    return { results };
+  }
+
+  // Fast in-page viewport scanner: returns visible interactive elements without full AX tree serialization.
+  if (method === 'ABExt.getViewportInteractive') {
+    const tabId =
+      resolveSessionTab(sessionId, sessionToTab, childSessionToTab) ??
+      (typeof params?.targetId === 'string' ? tabForTarget(params.targetId) : null) ??
+      anyConnectedTab();
+    if (tabId == null) throw new Error('no attached tab for ABExt.getViewportInteractive');
+    const childSid =
+      sessionId && tabIdFromSession(sessionId) == null && childSessionToTab.has(sessionId)
+        ? sessionId
+        : undefined;
+    const maxElements = Number(params?.maxElements) || 50;
+    const expression = `(() => {
+      const interactive = document.querySelectorAll('button, a[href], input, select, textarea, [role="button"], [role="link"], [role="checkbox"], [role="radio"], [role="tab"], [tabindex]:not([tabindex="-1"])');
+      const visible = [];
+      const vh = window.innerHeight;
+      const vw = window.innerWidth;
+      for (let i = 0; i < interactive.length && visible.length < ${maxElements}; i++) {
+        const el = interactive[i];
+        const r = el.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0 && r.top < vh && r.bottom > 0 && r.left < vw && r.right > 0) {
+          visible.push({
+            tag: el.tagName.toLowerCase(),
+            role: el.getAttribute('role') || el.type || '',
+            name: (el.innerText?.trim()?.slice(0, 50) || el.getAttribute('aria-label') || el.placeholder || el.title || '').trim(),
+            id: el.id || '',
+            className: el.className && typeof el.className === 'string' ? el.className.trim().split(/\\s+/)[0] : '',
+            rect: { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) }
+          });
+        }
+      }
+      return visible;
+    })()`;
+    const evalRes = await sendCdpToTab(
+      tabId,
+      'Runtime.evaluate',
+      {
+        expression,
+        returnByValue: true,
+        awaitPromise: true,
+      },
+      childSid
+    );
+    return { elements: evalRes?.result?.value || [] };
+  }
+
   // Browser-level Target methods that map onto chrome.tabs.
   if (method === 'Target.createTarget') {
     const url = typeof params?.url === 'string' && params.url ? params.url : 'about:blank';
@@ -1064,8 +1149,13 @@ async function handleForwardCdpCommand(msg) {
         await groupTabInto(tab.id, group);
       } catch {}
     }
-    await new Promise((r) => setTimeout(r, 100));
-    const t = await attachTab(tab.id);
+    let t;
+    try {
+      t = await attachTab(tab.id);
+    } catch {
+      await new Promise((r) => setTimeout(r, 30));
+      t = await attachTab(tab.id);
+    }
     return { targetId: t.targetId };
   }
   if (method === 'Target.closeTarget') {
@@ -1180,7 +1270,7 @@ async function dispatchToTab(tabId, method, params, childSid) {
   if (method === 'Runtime.enable') {
     try {
       await sendCdpToTab(tabId, 'Runtime.disable', undefined, childSid);
-      await new Promise((r) => setTimeout(r, 30));
+      await new Promise((r) => setTimeout(r, 5));
     } catch {}
     return await sendCdpToTab(tabId, 'Runtime.enable', params, childSid);
   }
@@ -1511,6 +1601,15 @@ async function reannounceAttachedTabs() {
 
 // ---- chrome.debugger events ----------------------------------------------
 
+// High-frequency events that flood the Native Messaging IPC pipe without being consumed by daemon.
+const HIGH_FREQUENCY_IGNORED_EVENTS = new Set([
+  'Network.dataReceived',
+  'Network.resourceChangedPriority',
+  'DOM.childNodeCountUpdated',
+  'DOM.attributeModified',
+  'DOM.characterDataModified',
+]);
+
 chrome.debugger.onEvent.addListener(
   (source, method, params) =>
     void whenReady(() => {
@@ -1524,6 +1623,7 @@ chrome.debugger.onEvent.addListener(
       if (method === 'Target.detachedFromTarget' && params?.sessionId) {
         childSessionToTab.delete(String(params.sessionId));
       }
+      if (HIGH_FREQUENCY_IGNORED_EVENTS.has(method)) return;
       postToHost({
         method: 'forwardCDPEvent',
         params: { sessionId: source.sessionId || entry.sessionId, method, params },
