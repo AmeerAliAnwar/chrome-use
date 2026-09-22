@@ -151,6 +151,15 @@ struct Browser<'a> {
     observe_ms: u128,
     act_ms: u128,
     fresh_ms: u128,
+    /// `act_ms` split by what it spends: the settle-and-read that rides along
+    /// at the end of every action, and each daemon command it sends. The split
+    /// earned its place by contradicting a guess: in the user's own Chrome a
+    /// coordinate click inside `act` averaged 2.5s, in a freshly launched
+    /// browser 33ms — the environment, not jev, and only the split showed it.
+    act_read_ms: u128,
+    cmd_click_ms: u128,
+    cmd_press_ms: u128,
+    cmd_insert_ms: u128,
     evals: u32,
     /// Where the strict marker check rejected, and where it rejected while the
     /// same marker minus the page text would have accepted — i.e. every other
@@ -344,19 +353,28 @@ impl<'a> Browser<'a> {
         if k != "select" {
             let x = target["x"].as_f64().unwrap_or(0.0).round().to_string();
             let y = target["y"].as_f64().unwrap_or(0.0).round().to_string();
+            let t = Instant::now();
             self.call(&["click", &x, &y]).map_err(|_| Step::Stale)?;
+            self.cmd_click_ms += t.elapsed().as_millis();
             if k == "fill" {
                 let select_all = if cfg!(target_os = "macos") {
                     "Meta+a"
                 } else {
                     "Control+a"
                 };
+                let t = Instant::now();
                 self.call(&["press", select_all])?;
+                self.cmd_press_ms += t.elapsed().as_millis();
+                let t = Instant::now();
                 self.call(&["keyboard", "inserttext", text.unwrap_or("")])?;
+                self.cmd_insert_ms += t.elapsed().as_millis();
             }
         }
         // The next observation rides along: settle, then read.
-        match self.eval(&Self::settle_and_read(Some(action))) {
+        let t_read = Instant::now();
+        let ride = self.eval(&Self::settle_and_read(Some(action)));
+        self.act_read_ms += t_read.elapsed().as_millis();
+        match ride {
             Ok(v) if !v.is_null() => self.prefetched = Some(v),
             _ => self.settle_for = Some(action.clone()),
         }
@@ -535,8 +553,13 @@ struct Decision {
     choice: String,
     latency_ms: u128,
     /// The model's claim that this action finishes the goal, as a condition we
-    /// can check ourselves. Never trusted on its own — see `terminal_reached`.
+    /// can check ourselves. Only ever recorded — see `condition_observed`.
     terminal: Terminal,
+    /// Jev's raw answers, probabilities included. Kept only for `JEV_TRACE`: a
+    /// wrong choice made confidently and one that narrowly beat the right
+    /// option call for different fixes, and the choice alone cannot tell them
+    /// apart.
+    answers: Value,
 }
 
 /// How the success of a final action would be visible without asking the model
@@ -811,6 +834,7 @@ impl Models {
                 operation
             };
         Ok(Decision {
+            answers: answers.clone(),
             choice,
             terminal: if ask_terminal {
                 Terminal::parse(&answers["terminal"])
@@ -919,6 +943,10 @@ pub fn run(flags: &Flags, opts: Options) -> Result<Value, String> {
         observe_ms: 0,
         act_ms: 0,
         fresh_ms: 0,
+        act_read_ms: 0,
+        cmd_click_ms: 0,
+        cmd_press_ms: 0,
+        cmd_insert_ms: 0,
         evals: 0,
         stale_by_phase: Default::default(),
         stale_fields: Default::default(),
@@ -971,6 +999,48 @@ pub fn run(flags: &Flags, opts: Options) -> Result<Value, String> {
                 page = browser.observe()?;
             }
             let decision = models.choose(&page, &opts.goal, &history, opts.terminal_shadow)?;
+            // `JEV_TRACE=<file>`: one JSON line per decision with what the model
+            // was shown and what it picked. Off unless set. The run report
+            // records actions taken; a run that stalls needs the other half —
+            // which candidates were on offer when it chose — to be diagnosable
+            // without guessing.
+            if let Ok(path) = std::env::var("JEV_TRACE") {
+                let shown: Vec<Value> = page["actions"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .map(|a| {
+                                json!([
+                                    a["id"],
+                                    a["kind"],
+                                    a["label"],
+                                    a.get("current_value")
+                                        .or_else(|| a.get("value"))
+                                        .cloned()
+                                        .unwrap_or(Value::Null),
+                                    a.get("checked").cloned().unwrap_or(Value::Null)
+                                ])
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let line = json!({
+                    "decision": decisions,
+                    "scroll": page["scroll"],
+                    "viewport_h": page["h"],
+                    "choice": decision.choice,
+                    "answers": decision.answers,
+                    "shown": shown,
+                });
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                {
+                    use std::io::Write as _;
+                    let _ = writeln!(f, "{line}");
+                }
+            }
             decisions += 1;
             jev_ms += decision.latency_ms;
             if decision.choice == "DONE" || decision.choice == "BLOCKED" {
@@ -1108,6 +1178,10 @@ pub fn run(flags: &Flags, opts: Options) -> Result<Value, String> {
         // layer adds, measured so nobody optimises them on a hunch.
         "observe_ms": browser.observe_ms as u64,
         "act_ms": browser.act_ms as u64,
+        "act_read_ms": browser.act_read_ms as u64,
+        "cmd_click_ms": browser.cmd_click_ms as u64,
+        "cmd_press_ms": browser.cmd_press_ms as u64,
+        "cmd_insert_ms": browser.cmd_insert_ms as u64,
         "fresh_ms": browser.fresh_ms as u64,
         "evals": browser.evals,
         "stale_by_phase": browser.stale_by_phase,

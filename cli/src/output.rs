@@ -4774,6 +4774,10 @@ Agent loop (experimental):
                              control flow: the closing decision is still made.
                              Reports terminal_predicted /
                              terminal_condition_observed / terminal_confirmed_done.
+                             JEV_TRACE=<file> appends one JSON line per decision:
+                             the candidates shown, the choice, and Jev's answer
+                             probabilities. Off unless set. It records field
+                             labels and current values, so treat it as sensitive.
 
 Site adapters:  turn a website into a structured-data CLI (runs as you, in your tab)
   site update                Fetch the community + official packs and configured extras

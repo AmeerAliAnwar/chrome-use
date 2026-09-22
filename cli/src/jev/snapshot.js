@@ -73,7 +73,12 @@
       const editable=!e.readOnly && e.getAttribute('aria-readonly')!=='true' &&
         (['textbox','searchbox','spinbutton'].includes(rname) ||
           (rname==='combobox' && ['INPUT','TEXTAREA'].includes(e.tagName)));
-      const value='value' in e ? String(e.value) :
+      // A checkbox's or radio's `value` is what it submits ("on" by default, or
+      // the option name), not whether it is set; its state is `checked`, above.
+      // Reported as the current value it read as "already on": an unchecked
+      // terms box showed `on`, an unselected "Series A" radio showed `Series A`,
+      // and the model skipped both as done and went looking for other work.
+      const value=['checkbox','radio'].includes(e.type) ? '' : 'value' in e ? String(e.value) :
         e.isContentEditable || rname==='combobox' ? e.innerText.trim() : '';
       actions.push({...base,kind:editable?'fill':'click',value});
       if (editable) actions.push({...base,kind:'click',value,label:'Open '+base.label});

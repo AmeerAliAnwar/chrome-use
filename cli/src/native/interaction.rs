@@ -1941,6 +1941,28 @@ pub async fn commit_with_enter(client: &CdpClient, session_id: &str) -> Result<(
     Ok(())
 }
 
+/// The CDP modifier bit for the platform's command key: Meta (Cmd) on macOS,
+/// Control elsewhere.
+fn platform_command_modifier() -> i32 {
+    if cfg!(target_os = "macos") {
+        4
+    } else {
+        2
+    }
+}
+
+/// Is this chord the platform's select-all — Cmd+A on macOS, Ctrl+A elsewhere,
+/// with no other modifier held?
+///
+/// Deliberately exact. Ctrl+A on macOS is not select-all (it moves to the start
+/// of the line in a text field), Cmd+Shift+A is a different chord, and only the
+/// one command whose failure was observed is mapped: copy, paste, cut and undo
+/// may well have the same macOS gap, but they touch the clipboard and history,
+/// and changing them without a reproduction would be a guess.
+fn is_platform_select_all(key: &str, modifiers: Option<i32>) -> bool {
+    key.eq_ignore_ascii_case("a") && modifiers == Some(platform_command_modifier())
+}
+
 pub async fn press_key(client: &CdpClient, session_id: &str, key: &str) -> Result<(), String> {
     press_key_with_modifiers(client, session_id, key, None).await
 }
@@ -1958,6 +1980,25 @@ pub async fn press_key_with_modifiers(
     key: &str,
     modifiers: Option<i32>,
 ) -> Result<(), String> {
+    // The platform's select-all chord has to carry the editing command. On macOS
+    // Chrome resolves Cmd+A through the OS text system, which a synthetic CDP key
+    // event never reaches: the keyDown is delivered, nothing is selected, and the
+    // caret stays where it was. The next `insertText` then appends instead of
+    // replacing — observed through `jev run`, where re-filling a field that
+    // already read `casey@example.test` produced
+    // `casey@example.testcasey@example.test`, and every attempt to correct it
+    // appended again until the run gave up. `commands: ["selectAll"]` is how CDP
+    // asks the editor itself to select, and fill's own select-all already uses it.
+    if is_platform_select_all(key, modifiers) {
+        return dispatch_editor_command(
+            client,
+            session_id,
+            "a",
+            platform_command_modifier(),
+            "selectAll",
+        )
+        .await;
+    }
     let (key_name, code, key_code) = named_key_info(key);
 
     // Suppress text insertion when Control (2) or Meta (4) modifiers are active,
@@ -3811,6 +3852,57 @@ async fn active_element_object_id(client: &CdpClient, session_id: &str) -> Resul
     result.result.object_id.ok_or_else(|| {
         "paste needs a target: pass a selector/@ref, or focus a field first.".to_string()
     })
+}
+
+#[cfg(test)]
+mod select_all_chord_tests {
+    use super::is_platform_select_all;
+
+    // CDP modifier bits: 1 Alt, 2 Control, 4 Meta, 8 Shift.
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn cmd_a_is_select_all_on_macos_and_ctrl_a_is_not() {
+        assert!(is_platform_select_all("a", Some(4)));
+        assert!(is_platform_select_all("A", Some(4)));
+        // Ctrl+A on macOS moves to the start of the line; mapping it would
+        // turn "go to line start" into "select everything".
+        assert!(!is_platform_select_all("a", Some(2)));
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn ctrl_a_is_select_all_off_macos_and_meta_a_is_not() {
+        assert!(is_platform_select_all("a", Some(2)));
+        assert!(is_platform_select_all("A", Some(2)));
+        assert!(!is_platform_select_all("a", Some(4)));
+    }
+
+    #[test]
+    fn only_the_exact_chord_is_select_all() {
+        let cmd = if cfg!(target_os = "macos") { 4 } else { 2 };
+        assert!(
+            !is_platform_select_all("a", None),
+            "a bare `a` types a letter"
+        );
+        assert!(
+            !is_platform_select_all("a", Some(cmd | 8)),
+            "Shift makes it another chord"
+        );
+        assert!(
+            !is_platform_select_all("a", Some(cmd | 1)),
+            "Alt makes it another chord"
+        );
+        assert!(
+            !is_platform_select_all("c", Some(cmd)),
+            "copy is deliberately not mapped"
+        );
+        assert!(
+            !is_platform_select_all("v", Some(cmd)),
+            "paste is deliberately not mapped"
+        );
+        assert!(!is_platform_select_all("Enter", Some(cmd)));
+    }
 }
 
 #[cfg(test)]
