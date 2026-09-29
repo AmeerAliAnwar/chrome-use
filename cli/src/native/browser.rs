@@ -350,6 +350,35 @@ fn strict_session_index(
     ))
 }
 
+/// Whether `url` is named by an `adopt` spec: a case-insensitive substring.
+/// An empty spec names nothing.
+fn url_matches_adopt_spec(url: &str, spec: &str) -> bool {
+    let spec = spec.trim();
+    !spec.is_empty() && url.to_lowercase().contains(&spec.to_lowercase())
+}
+
+/// Set once a `chrome-use adopt <spec>` directive has been carried out.
+///
+/// The directive arrives as `AGENT_BROWSER_ADOPT` in the daemon's environment,
+/// which lives as long as the daemon does. Every later reconnect (relay
+/// restart, dead-connection relaunch) re-ran discovery and re-adopted by that
+/// spec — and once the adopted page had navigated on (a login redirect), each
+/// reconnect failed with `adopt: no open tab matching …`, so the session stayed
+/// broken after the page itself had recovered (#357). It applies to the first
+/// connect that succeeds, and never again.
+static ADOPT_DIRECTIVE_DONE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn pending_adopt_directive() -> Option<String> {
+    if ADOPT_DIRECTIVE_DONE.load(std::sync::atomic::Ordering::SeqCst) {
+        return None;
+    }
+    std::env::var("AGENT_BROWSER_ADOPT")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// Strip zero-width / invisible / bidi-format Unicode from a page title before
 /// we store it. Some sites prepend runs of ZWJ / word-joiner / invisible-times /
 /// BOM to `document.title` (badging, watermarking, anti-scrape); left in, they
@@ -1358,23 +1387,25 @@ impl BrowserManager {
     /// group), tracks + pins it. Errors if nothing matches (never creates a tab).
     async fn adopt_existing_target(&mut self, spec: &str) -> Result<(), String> {
         let all = self.collect_all_targets().await?;
-        let spec_l = spec.to_lowercase();
-        let target = match all
-            .iter()
-            .find(|t| t.target_id == spec)
-            .or_else(|| all.iter().find(|t| t.url.to_lowercase().contains(&spec_l)))
-        {
+        let via_relay = self.via_relay();
+        let target = match all.iter().find(|t| t.target_id == spec) {
             Some(t) => t.clone(),
-            // Not in the already-attached set. Since we no longer eagerly attach
-            // the user's tabs (so Chrome's debugger banner stays off their pages),
-            // ask the extension to discover the tab by URL/targetId via chrome.tabs
-            // metadata and attach JUST that one on demand, then adopt it.
-            None if self.via_relay() => self.adopt_by_url_on_demand(spec).await?,
-            None => {
-                return Err(format!(
-                    "No open tab matching {spec:?}; run `tab list` for available targets"
-                ))
-            }
+            // On the relay, match URLs only against what Chrome reports for its
+            // tabs now. The relay's target list keeps the url each tab had when
+            // it was attached, so a tab that has since navigated elsewhere still
+            // "matched", and `adopt <baijiahao url>` took an unrelated
+            // xiaohongshu tab (#357). The extension resolves the spec against
+            // live chrome.tabs metadata and attaches only that one tab — which
+            // also covers user tabs we never attached (no debugger banner).
+            None if via_relay => self.adopt_by_url_on_demand(spec).await?,
+            None => match all.iter().find(|t| url_matches_adopt_spec(&t.url, spec)) {
+                Some(t) => t.clone(),
+                None => {
+                    return Err(format!(
+                        "No open tab matching {spec:?}; run `tab list` for available targets"
+                    ))
+                }
+            },
         };
 
         let attach: AttachToTargetResult = self
@@ -1452,6 +1483,21 @@ impl BrowserManager {
             .map_err(|e| format!("adopt: discovery failed ({e})"))?;
 
         if let Some(tid) = resp.get("targetId").and_then(|v| v.as_str()) {
+            let url = resp
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            // Never adopt a tab the spec does not name. The extension matches on
+            // the same url it returns, so this only trips on a build that picks
+            // differently — and then refusing beats pinning the user's
+            // unrelated tab (#357).
+            if tid != spec && !url_matches_adopt_spec(&url, spec) {
+                return Err(format!(
+                    "adopt: the extension offered {url:?}, which does not match `{spec}`; \
+                     nothing was adopted. Run `tab list` and pass the exact targetId."
+                ));
+            }
             return Ok(TargetInfo {
                 target_id: tid.to_string(),
                 target_type: "page".to_string(),
@@ -1460,11 +1506,7 @@ impl BrowserManager {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string(),
-                url: resp
-                    .get("url")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
+                url,
                 attached: Some(true),
                 browser_context_id: None,
             });
@@ -1509,10 +1551,10 @@ impl BrowserManager {
         // directive rides in via env so it takes effect at first connect (before
         // any about:blank would be made). If nothing matches, error out rather
         // than fall back to creating a tab.
-        if let Ok(spec) = std::env::var("AGENT_BROWSER_ADOPT") {
-            if !spec.trim().is_empty() {
-                return self.adopt_existing_target(spec.trim()).await;
-            }
+        if let Some(spec) = pending_adopt_directive() {
+            self.adopt_existing_target(&spec).await?;
+            ADOPT_DIRECTIVE_DONE.store(true, std::sync::atomic::Ordering::SeqCst);
+            return Ok(());
         }
 
         let page_targets: Vec<TargetInfo> = self.collect_page_targets().await?;
@@ -2647,6 +2689,48 @@ impl BrowserManager {
     pub fn pinned_tab_summary(&self) -> Option<(String, String)> {
         let pinned = self.active_target_id.as_deref()?;
         let page = self.pages.iter().find(|p| p.target_id == pinned)?;
+        Some((format_tab_id(page.tab_id), page.url.clone()))
+    }
+
+    /// Like `pinned_tab_summary`, but with the url Chrome reports for the tab
+    /// right now. While debugger access is blocked the daemon receives no page
+    /// events, so its cached url stays on the page where the block began. After
+    /// the user logs in and the tab moves on, the note kept naming the old page
+    /// (#357). `chrome.tabs` metadata needs no debugger access, so ask it and
+    /// refresh the cache. Falls back to the cached url when it cannot ask.
+    pub async fn live_pinned_tab_summary(&mut self) -> Option<(String, String)> {
+        let pinned = self.active_target_id.clone()?;
+        let index = self.pages.iter().position(|p| p.target_id == pinned)?;
+        if self.on_relay() {
+            let page = &self.pages[index];
+            let live: Option<Value> = self
+                .client
+                .send_command_typed(
+                    "ABExt.inspectTab",
+                    &json!({ "sessionId": page.session_id, "targetId": page.target_id }),
+                    None,
+                )
+                .await
+                .ok();
+            if let Some(url) = live
+                .as_ref()
+                .and_then(|v| v.get("url"))
+                .and_then(|v| v.as_str())
+                .filter(|u| !u.is_empty())
+            {
+                let title = live
+                    .as_ref()
+                    .and_then(|v| v.get("title"))
+                    .and_then(|v| v.as_str())
+                    .map(sanitize_title);
+                let page = &mut self.pages[index];
+                page.url = url.to_string();
+                if let Some(title) = title {
+                    page.title = title;
+                }
+            }
+        }
+        let page = &self.pages[index];
         Some((format_tab_id(page.tab_id), page.url.clone()))
     }
 
@@ -4683,6 +4767,30 @@ async fn resolve_cdp_url(input: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    use super::url_matches_adopt_spec;
+
+    #[test]
+    fn adopt_spec_matches_only_urls_that_contain_it() {
+        let spec = "https://baijiahao.baidu.com/builder/theme/bjh/login";
+        assert!(url_matches_adopt_spec(
+            "https://baijiahao.baidu.com/builder/theme/bjh/login?redirect=x",
+            spec
+        ));
+        assert!(url_matches_adopt_spec(
+            "HTTPS://BAIJIAHAO.BAIDU.COM/builder/theme/bjh/login",
+            spec
+        ));
+        assert!(!url_matches_adopt_spec(
+            "https://www.xiaohongshu.com/",
+            spec
+        ));
+        assert!(!url_matches_adopt_spec(
+            "https://baijiahao.baidu.com/builder/rc/home",
+            spec
+        ));
+        assert!(!url_matches_adopt_spec("https://anything/", "   "));
+    }
+
     use super::to_ai_friendly_error;
 
     #[test]
