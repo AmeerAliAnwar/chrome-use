@@ -455,6 +455,37 @@ impl RelayState {
                     }
                     return vec![];
                 }
+                // Keep each target's url current. It was recorded once at attach
+                // and never updated, so `getAllTargets` described tabs by pages
+                // they had long left, and URL-based adoption picked the wrong
+                // tab (#357). Updated here and still forwarded below.
+                "Page.frameNavigated" => {
+                    let frame = inner_params.get("frame");
+                    let top_level = frame
+                        .map(|f| f.get("parentId").map_or(true, Value::is_null))
+                        .unwrap_or(false);
+                    if let (true, Some(sid), Some(url)) = (
+                        top_level,
+                        session_id,
+                        frame.and_then(|f| f.get("url")).and_then(|u| u.as_str()),
+                    ) {
+                        for entry in self.targets.values_mut().filter(|e| e.session_id == sid) {
+                            entry.target_info["url"] = json!(url);
+                        }
+                    }
+                }
+                "Target.targetInfoChanged" => {
+                    if let Some(info) = inner_params.get("targetInfo") {
+                        let tid = info.get("targetId").and_then(|t| t.as_str());
+                        if let Some(entry) = tid.and_then(|tid| self.targets.get_mut(tid)) {
+                            for key in ["url", "title"] {
+                                if let Some(v) = info.get(key).filter(|v| v.is_string()) {
+                                    entry.target_info[key] = v.clone();
+                                }
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
 
@@ -1057,5 +1088,75 @@ mod tests {
         );
         assert!(get_target_ids(&mut s, 1).is_empty());
         assert!(!s.target_group.contains_key("ta"));
+    }
+
+    fn all_target_urls(s: &mut RelayState) -> Vec<(String, String)> {
+        match s.route_client_command(9, &json!({ "id": 1, "method": "ABRelay.getAllTargets" })) {
+            ClientRoute::Local(v) => {
+                let mut rows: Vec<(String, String)> = v["result"]["targetInfos"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|t| {
+                        (
+                            t["targetId"].as_str().unwrap().to_string(),
+                            t["url"].as_str().unwrap_or("").to_string(),
+                        )
+                    })
+                    .collect();
+                rows.sort();
+                rows
+            }
+            _ => panic!("getAllTargets must be local"),
+        }
+    }
+
+    /// A tab that navigates away must stop matching its old url, or URL-based
+    /// adoption takes an unrelated tab (#357).
+    #[test]
+    fn top_level_navigation_updates_the_cached_target_url() {
+        let mut s = RelayState::new();
+        s.handle_ext_message(&attached_event("ta", "sa"), "");
+        s.handle_ext_message(&attached_event("tb", "sb"), "");
+
+        // A child frame navigating changes nothing.
+        s.handle_ext_message(
+            &json!({ "method": "forwardCDPEvent", "params": {
+                "sessionId": "sa", "method": "Page.frameNavigated",
+                "params": { "frame": { "id": "f2", "parentId": "f1", "url": "https://captcha.example/" } }
+            }}),
+            "",
+        );
+        assert_eq!(
+            all_target_urls(&mut s),
+            vec![
+                ("ta".into(), "https://x".into()),
+                ("tb".into(), "https://x".into())
+            ]
+        );
+
+        let out = s.handle_ext_message(
+            &json!({ "method": "forwardCDPEvent", "params": {
+                "sessionId": "sa", "method": "Page.frameNavigated",
+                "params": { "frame": { "id": "f1", "url": "https://www.xiaohongshu.com/" } }
+            }}),
+            "",
+        );
+        // Still forwarded to clients.
+        assert_eq!(out.len(), 1);
+        s.handle_ext_message(
+            &json!({ "method": "forwardCDPEvent", "params": {
+                "sessionId": "sb", "method": "Target.targetInfoChanged",
+                "params": { "targetInfo": { "targetId": "tb", "url": "https://b.example/home", "title": "B" } }
+            }}),
+            "",
+        );
+        assert_eq!(
+            all_target_urls(&mut s),
+            vec![
+                ("ta".into(), "https://www.xiaohongshu.com/".into()),
+                ("tb".into(), "https://b.example/home".into()),
+            ]
+        );
     }
 }

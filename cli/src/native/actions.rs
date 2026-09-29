@@ -2107,13 +2107,15 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
             // Say which page the failure was about. Without it a blocked
             // debugger access is indistinguishable from a permissions problem
             // and the reader has nothing to check (#217).
+            // The url comes from chrome.tabs, not the daemon's cache: while access
+            // is blocked no page events arrive, so the cache still names the page
+            // where the block began even after the tab has moved on (#357).
             if super::browser::is_debugger_access_denied(&e) {
-                if let Some(note) = state
-                    .browser
-                    .as_ref()
-                    .and_then(|mgr| mgr.pinned_tab_summary())
-                    .map(|(tab, url)| pinned_tab_note(&tab, &url))
-                {
+                let summary = match state.browser.as_mut() {
+                    Some(mgr) => mgr.live_pinned_tab_summary().await,
+                    None => None,
+                };
+                if let Some(note) = summary.map(|(tab, url)| pinned_tab_note(&tab, &url)) {
                     msg.push_str(&note);
                 }
             }
@@ -5334,7 +5336,14 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
     // blank image under a `✓`. A screenshot is the one verb whose output an
     // agent cannot sanity-check, so a target it cannot confirm must fail loudly
     // rather than write a plausible-looking file.
-    let live_url = mgr.get_url().await.unwrap_or_default();
+    // A blocked read is not a drifted session. Reporting it as "attached to
+    // an unknown target" and advising `adopt` sent agents to re-adopt the very
+    // tab Chrome was refusing (#357); surface the real error instead.
+    let live_url = match mgr.get_url().await {
+        Ok(url) => url,
+        Err(e) if super::browser::is_debugger_access_denied(&e) => return Err(e),
+        Err(_) => String::new(),
+    };
     let tracked_url = mgr.cached_active_url();
     if is_blank_capture_target(&live_url) && !is_blank_capture_target(&tracked_url) {
         return Err(format!(
@@ -15471,7 +15480,11 @@ fn pinned_tab_note(tab: &str, url: &str) -> String {
     } else {
         " — the pin did not move, so this is not the session driving somebody else's tab. \
          A child frame on the page (an embedded extension widget) is the likely target of \
-         the block; `tab inspect` still reads browser-level metadata."
+         the block; `tab inspect` still reads browser-level metadata. Chrome re-checks \
+         every command and this session caches no blocked state: the tab works again once \
+         that frame is gone. To keep going now, open the page in a fresh tab of this same \
+         session with `chrome-use tab new <url>` — no new --session is needed, and \
+         re-adopting this tab does not help."
     };
     format!("\nThis session is driving {tab} ({url}){diagnosis}")
 }
