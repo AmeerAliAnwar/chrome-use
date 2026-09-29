@@ -1,8 +1,10 @@
 #!/bin/sh
 # Release chrome-use: bump package.json (sync-version.js carries it into cli/Cargo.toml + Cargo.lock),
-# run the fast CI preflight checks, commit "chore(release): prepare vX", push main + the vX tag, wait
-# for release-binaries.yml to build and publish the GitHub Release, then sync the plugin marketplace
-# so Claude Code plugin installs pick the new version up right away (no token: uses your `gh` login).
+# run the fast CI preflight checks, commit "chore(release): prepare vX", push only the vX tag, wait for
+# release-binaries.yml to build and publish the GitHub Release, then push main and sync the plugin
+# marketplace so Claude Code plugin installs pick the new version up right away (uses your `gh` login).
+# main goes last because the marketplace reads the version from main: pushed earlier, the hourly sync
+# could advertise a version whose binaries do not exist yet.
 # Write the CHANGELOG.md entry (release markers) and both docs/*changelog.html entries first (AGENTS.md).
 #   scripts/release.sh [--dry-run] 1.5.145
 set -eu
@@ -36,27 +38,35 @@ if [ -n "$DRY" ]; then git --no-pager diff; echo "dry run: checks done, version 
 
 if ! git diff --quiet; then git commit -qam "chore(release): prepare v$V"; fi
 git tag "v$V"
-git push -q origin main "v$V"
+git push -q origin "v$V"
 
-# The tag push starts release-binaries.yml, which builds seven binaries and creates the Release.
-# Wait for it: the plugin must not update before its binaries exist.
+# The tag push starts release-binaries.yml, which builds seven binaries from the tag's commit and
+# creates the Release. main stays unpushed until it succeeds.
+retry() {
+  echo "main was NOT pushed. Retry: gh run rerun $1 -R $REPO --failed, and once it is green:" >&2
+  echo "  git push origin main && gh workflow run auto-sync-versions.yml -R $MARKETPLACE" >&2
+  echo "Or abandon: gh release delete v$V -R $REPO --cleanup-tag -y 2>/dev/null || git push origin :refs/tags/v$V" >&2
+  echo "  then: git tag -d v$V && git reset --hard origin/main" >&2
+  exit 1
+}
 RUN=
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
   sleep 5
   RUN=$(gh run list -R "$REPO" -w release-binaries.yml -b "v$V" -e push -L 1 --json databaseId -q '.[0].databaseId')
   [ -n "$RUN" ] && break
 done
-[ -n "$RUN" ] || die "no release-binaries run for v$V; see https://github.com/$REPO/actions"
+[ -n "$RUN" ] || { echo "error: no release-binaries run for v$V; see https://github.com/$REPO/actions" >&2; retry "<run-id>"; }
 echo "waiting for release build $RUN"
-gh run watch "$RUN" -R "$REPO" --exit-status >/dev/null || die "release build $RUN failed; marketplace not synced"
+gh run watch "$RUN" -R "$REPO" --exit-status >/dev/null || { echo "error: release build $RUN failed" >&2; retry "$RUN"; }
 echo "released https://github.com/$REPO/releases/tag/v$V"
 
 # A release prepared as "(Unreleased)" gets its publication date now, as the repo does by hand.
 if grep -q "v$V</strong>（未发布）" docs/changelog.html || grep -q "v$V</strong> (Unreleased)" docs/en/changelog.html; then
   sed -i.bak "s|v$V</strong>（未发布）|v$V</strong>（$(date +%F)）|" docs/changelog.html && rm docs/changelog.html.bak
   sed -i.bak "s|v$V</strong> (Unreleased)|v$V</strong> ($(LC_ALL=C date '+%B %-d, %Y'))|" docs/en/changelog.html && rm docs/en/changelog.html.bak
-  git commit -qam "docs: record v$V publication date" && git push -q origin main || echo "warn: could not push the publication date" >&2
+  git commit -qam "docs: record v$V publication date"
 fi
+git push -q origin main || die "binaries are out but main was not pushed; git pull --no-rebase && git push origin main, then gh workflow run auto-sync-versions.yml -R $MARKETPLACE"
 
 # The marketplace reads the version from package.json on main; run its sync now instead of waiting for the hourly cron.
 PREV=$(gh run list -R "$MARKETPLACE" -w auto-sync-versions.yml -e workflow_dispatch -L 1 --json databaseId -q '.[0].databaseId')
