@@ -511,6 +511,9 @@ struct Reanchor {
     target: Option<i64>,
     /// How many nodes carry the ref's role + name right now.
     candidates: usize,
+    /// Every live node with the ref's role, and its current name — the pool
+    /// the failure message draws usable locators from (#356).
+    same_role: Vec<(i64, String)>,
 }
 
 /// Read the full accessibility tree and return the node the ref names.
@@ -548,13 +551,22 @@ async fn reanchor_ref(
         .await
         .ok()?;
 
-    let live: Vec<(i64, String)> = tree
+    let role_nodes: Vec<_> = tree
         .nodes
         .iter()
         .filter(|n| !n.ignored.unwrap_or(false))
-        .filter(|n| {
-            extract_ax_string(&n.role) == entry.role && extract_ax_string(&n.name) == entry.name
+        .filter(|n| extract_ax_string(&n.role) == entry.role)
+        .collect();
+    let same_role: Vec<(i64, String)> = role_nodes
+        .iter()
+        .filter_map(|n| {
+            n.backend_d_o_m_node_id
+                .map(|id| (id, extract_ax_string(&n.name)))
         })
+        .collect();
+    let live: Vec<(i64, String)> = role_nodes
+        .iter()
+        .filter(|n| extract_ax_string(&n.name) == entry.name)
         .filter_map(|n| {
             n.backend_d_o_m_node_id
                 .map(|id| (id, extract_ax_string(&n.value)))
@@ -566,6 +578,7 @@ async fn reanchor_ref(
         return Some(Reanchor {
             target: Some(id),
             candidates: matches.len(),
+            same_role,
         });
     }
 
@@ -579,6 +592,7 @@ async fn reanchor_ref(
     Some(Reanchor {
         target: by_value,
         candidates: matches.len(),
+        same_role,
     })
 }
 
@@ -705,6 +719,37 @@ async fn confirmed_backend_node_id(
         return Ok(id);
     }
 
+    // React often throws the input away and mounts a fresh one on re-render
+    // (#356: zhihu.com/signin's phone box, rejected right after `snapshot`).
+    // The old node lingers detached for a while, so its stable DOM attributes
+    // — `name`, `id`, `data-testid`, … — can still be read and matched against
+    // the node that replaced it. Only accepted when that match is unique and
+    // the AX identity agrees; see [`dom_heal_accepts`].
+    let dom_heal = tokio::time::timeout(
+        recovery_budget,
+        heal_by_dom_identity(client, effective_session_id, backend_node_id),
+    )
+    .await
+    .ok()
+    .flatten();
+    let mut replaced_by = None;
+    if let Some(heal) = dom_heal {
+        if dom_heal_accepts(
+            &entry.role,
+            &entry.name,
+            &heal.hint.role,
+            &heal.hint.name,
+            &heal.hint.selector,
+        ) {
+            eprintln!(
+                "[ref] {ref_id} re-bound to its replacement `{}` -> backendNodeId {} ({} \"{}\")",
+                heal.hint.selector, heal.backend_node_id, heal.hint.role, heal.hint.name
+            );
+            return Ok(heal.backend_node_id);
+        }
+        replaced_by = Some(heal.hint);
+    }
+
     match tokio::time::timeout(
         recovery_budget,
         relocate_stale_ref(client, ref_id, entry, session_id, iframe_sessions),
@@ -717,10 +762,332 @@ async fn confirmed_backend_node_id(
         // "No element with that role and name" reads like the first even when
         // it is the second, which sends the agent looking for something that
         // has not happened (#224).
-        _ => Err(match reanchor.map(|r| r.candidates) {
-            Some(n) if n > 1 => indistinguishable_ref_error(ref_id, entry, n),
-            _ => err,
-        }),
+        _ => {
+            let base = match reanchor.as_ref().map(|r| r.candidates) {
+                Some(n) if n > 1 => indistinguishable_ref_error(ref_id, entry, n),
+                Some(_) => err,
+                // The tree read never finished, so "not on the page" is a
+                // claim nobody checked.
+                None => err.replace(NOT_ON_PAGE, REANCHOR_UNFINISHED),
+            };
+            // A refusal that only offers "disable the check" leaves the agent
+            // nowhere to go (#356). Name locators that work right now. They
+            // are CSS selectors against the top document, so a ref inside a
+            // frame gets none rather than ones that would miss.
+            let mut hints: Vec<LocatorHint> = Vec::new();
+            if entry.frame_id.is_none() {
+                hints.extend(replaced_by);
+                if let Some(r) = reanchor.as_ref() {
+                    let more = tokio::time::timeout(
+                        identity_probe_budget(),
+                        locator_hints(client, effective_session_id, entry, &r.same_role),
+                    )
+                    .await
+                    .unwrap_or_default();
+                    for h in more {
+                        if !hints.iter().any(|x| x.selector == h.selector) {
+                            hints.push(h);
+                        }
+                    }
+                }
+            }
+            Err(insert_locator_hints(&base, &hints))
+        }
+    }
+}
+
+/// A CSS selector that addresses one live element, with the AX identity it
+/// carries now, so the agent can judge whether it is the one it meant.
+#[derive(Debug, Clone, PartialEq)]
+struct LocatorHint {
+    role: String,
+    name: String,
+    selector: String,
+}
+
+/// The node that replaced a ref's detached one, found by its stable DOM
+/// attributes.
+struct DomHeal {
+    backend_node_id: i64,
+    hint: LocatorHint,
+}
+
+/// Roles whose accessible name is usually a placeholder or label that the page
+/// rewrites as state changes ("手机号" → "手机号或邮箱"), while the control
+/// itself stays the same field.
+fn is_text_entry_role(role: &str) -> bool {
+    matches!(role, "textbox" | "searchbox" | "combobox" | "spinbutton")
+}
+
+/// Whether a node found by DOM attributes may stand in for a ref.
+///
+/// The role must match. The name must match too — a replaced button with the
+/// same `data-testid` but a new label is the #162 hazard ("Add post" became
+/// "Post all"). The one relaxation is a text-entry control matched by its `id`
+/// or form `name`: those attributes are what the form submits, so they name the
+/// field more reliably than a placeholder the page rewrites.
+fn dom_heal_accepts(
+    want_role: &str,
+    want_name: &str,
+    role: &str,
+    name: &str,
+    selector: &str,
+) -> bool {
+    if role != want_role {
+        return false;
+    }
+    if name == want_name {
+        return true;
+    }
+    is_text_entry_role(role) && (selector.starts_with('#') || selector.contains("[name="))
+}
+
+/// Run on an element (`this`). Mode `describe` reports whether the element is
+/// still in the document, whether it is visible, and — for a connected one —
+/// the first stable-attribute selector that matches it and nothing else
+/// (`own`), or — for a detached one — the first that matches exactly one
+/// other visible, connected element (`heal`). Mode `pick` returns that element.
+/// Generated ids (`:r1:`, `react-1234`) are skipped: they do not survive the
+/// re-render this exists to bridge.
+const STABLE_SELECTOR_JS: &str = r#"function(mode, sel) {
+  const el = this;
+  if (!el || el.nodeType !== 1) return null;
+  const doc = el.ownerDocument;
+  const quote = v => '"' + String(v).replace(/["\\]/g, '\\$&') + '"';
+  const vis = e => {
+    const r = e.getBoundingClientRect();
+    if (!(r.width > 0 || r.height > 0)) return false;
+    const s = getComputedStyle(e);
+    return s.visibility !== 'hidden' && s.display !== 'none';
+  };
+  const others = s => {
+    try { return Array.from(doc.querySelectorAll(s)).filter(e => e !== el && e.isConnected && vis(e)); }
+    catch (_) { return []; }
+  };
+  if (mode === 'pick') { const m = others(sel); return m.length === 1 ? m[0] : null; }
+  const tag = el.localName;
+  const cands = [];
+  const id = el.getAttribute('id');
+  if (id && !/\d{3,}|:/.test(id)) cands.push('#' + (window.CSS && CSS.escape ? CSS.escape(id) : id));
+  const name = el.getAttribute('name');
+  const type = el.getAttribute('type');
+  if (name) cands.push(tag + '[name=' + quote(name) + ']');
+  if (name && type) cands.push(tag + '[name=' + quote(name) + '][type=' + quote(type) + ']');
+  for (const a of ['data-testid', 'data-test-id', 'data-test', 'aria-label', 'placeholder']) {
+    const v = el.getAttribute(a);
+    if (v) cands.push(tag + '[' + a + '=' + quote(v) + ']');
+  }
+  if (el.isConnected) {
+    for (const s of cands) {
+      let all;
+      try { all = doc.querySelectorAll(s); } catch (_) { continue; }
+      if (all.length === 1 && all[0] === el) return JSON.stringify({ connected: true, visible: vis(el), own: s });
+    }
+    return JSON.stringify({ connected: true, visible: vis(el), own: null });
+  }
+  for (const s of cands) if (others(s).length === 1) return JSON.stringify({ connected: false, heal: s });
+  return JSON.stringify({ connected: false, heal: null });
+}"#;
+
+/// What [`STABLE_SELECTOR_JS`] reports in `describe` mode.
+#[derive(Debug, Default, serde::Deserialize)]
+struct StableSelector {
+    connected: bool,
+    #[serde(default)]
+    visible: bool,
+    own: Option<String>,
+    heal: Option<String>,
+}
+
+async fn backend_object_id(
+    client: &CdpClient,
+    session_id: &str,
+    backend_node_id: i64,
+) -> Option<String> {
+    let resolved: Value = client
+        .send_command(
+            "DOM.resolveNode",
+            Some(serde_json::json!({
+                "backendNodeId": backend_node_id,
+                "objectGroup": "chrome-use-ref-heal",
+            })),
+            Some(session_id),
+        )
+        .await
+        .ok()?;
+    resolved
+        .pointer("/object/objectId")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
+async fn call_stable_selector(
+    client: &CdpClient,
+    session_id: &str,
+    object_id: &str,
+    mode: &str,
+    sel: Option<&str>,
+    by_value: bool,
+) -> Option<Value> {
+    client
+        .send_command(
+            "Runtime.callFunctionOn",
+            Some(serde_json::json!({
+                "objectId": object_id,
+                "functionDeclaration": STABLE_SELECTOR_JS,
+                "arguments": [{"value": mode}, {"value": sel}],
+                "returnByValue": by_value,
+            })),
+            Some(session_id),
+        )
+        .await
+        .ok()
+        .and_then(|v| v.get("result").cloned())
+}
+
+async fn describe_stable_selector(
+    client: &CdpClient,
+    session_id: &str,
+    object_id: &str,
+) -> Option<StableSelector> {
+    let result =
+        call_stable_selector(client, session_id, object_id, "describe", None, true).await?;
+    serde_json::from_str(result.get("value")?.as_str()?).ok()
+}
+
+/// Current AX role + name of one node.
+async fn ax_identity(
+    client: &CdpClient,
+    session_id: &str,
+    backend_node_id: i64,
+) -> Option<(String, String)> {
+    let tree: GetFullAXTreeResult = client
+        .send_command_typed(
+            "Accessibility.getPartialAXTree",
+            &serde_json::json!({ "backendNodeId": backend_node_id, "fetchRelatives": false }),
+            Some(session_id),
+        )
+        .await
+        .ok()?;
+    let node = tree
+        .nodes
+        .iter()
+        .find(|n| n.backend_d_o_m_node_id == Some(backend_node_id))?;
+    Some((extract_ax_string(&node.role), extract_ax_string(&node.name)))
+}
+
+/// Find the element that replaced a detached cached node, by the stable DOM
+/// attributes the old node still carries. `None` when the cached node is still
+/// in the document (a reused node whose identity changed is the #162 case, not
+/// a replacement), is gone for good, or no attribute singles out one successor.
+async fn heal_by_dom_identity(
+    client: &CdpClient,
+    session_id: &str,
+    cached: i64,
+) -> Option<DomHeal> {
+    let object_id = backend_object_id(client, session_id, cached).await?;
+    let described = describe_stable_selector(client, session_id, &object_id).await?;
+    if described.connected {
+        return None;
+    }
+    let selector = described.heal?;
+    let picked = call_stable_selector(
+        client,
+        session_id,
+        &object_id,
+        "pick",
+        Some(&selector),
+        false,
+    )
+    .await?;
+    let picked_id = picked.get("objectId")?.as_str()?;
+    let node: Value = client
+        .send_command(
+            "DOM.describeNode",
+            Some(serde_json::json!({ "objectId": picked_id })),
+            Some(session_id),
+        )
+        .await
+        .ok()?;
+    let backend_node_id = node.pointer("/node/backendNodeId")?.as_i64()?;
+    let (role, name) = ax_identity(client, session_id, backend_node_id).await?;
+    Some(DomHeal {
+        backend_node_id,
+        hint: LocatorHint {
+            role,
+            name,
+            selector,
+        },
+    })
+}
+
+/// How many live same-role elements to offer as alternatives.
+const MAX_LOCATOR_HINTS: usize = 3;
+
+/// The same-role candidates most like the ref, closest name first.
+fn rank_hint_candidates(want_name: &str, same_role: &[(i64, String)]) -> Vec<(i64, String)> {
+    let mut ranked: Vec<(f64, i64, String)> = same_role
+        .iter()
+        .map(|(id, name)| {
+            (
+                adaptive::string_similarity(want_name, name),
+                *id,
+                name.clone(),
+            )
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.into_iter().map(|(_, id, name)| (id, name)).collect()
+}
+
+/// Selectors for the visible same-role elements closest to the ref.
+async fn locator_hints(
+    client: &CdpClient,
+    session_id: &str,
+    entry: &RefEntry,
+    same_role: &[(i64, String)],
+) -> Vec<LocatorHint> {
+    let mut hints = Vec::new();
+    for (id, name) in rank_hint_candidates(&entry.name, same_role) {
+        if hints.len() >= MAX_LOCATOR_HINTS {
+            break;
+        }
+        let Some(object_id) = backend_object_id(client, session_id, id).await else {
+            continue;
+        };
+        let Some(d) = describe_stable_selector(client, session_id, &object_id).await else {
+            continue;
+        };
+        if let (true, true, Some(selector)) = (d.connected, d.visible, d.own) {
+            hints.push(LocatorHint {
+                role: entry.role.clone(),
+                name,
+                selector,
+            });
+        }
+    }
+    hints
+}
+
+/// Put the usable locators ahead of the "disable the check" last resort, so the
+/// first way out the agent reads is one that keeps the guard on.
+fn insert_locator_hints(err: &str, hints: &[LocatorHint]) -> String {
+    if hints.is_empty() {
+        return err.to_string();
+    }
+    let mut block = String::from(
+        "Usable right now without a ref (CSS selectors that match exactly one element — \
+         check the current name is the control you meant):",
+    );
+    for h in hints {
+        block.push_str(&format!(
+            "\n  [{} \"{}\"] → `{}`",
+            h.role, h.name, h.selector
+        ));
+    }
+    match err.find(LAST_RESORT_MARKER) {
+        Some(i) => format!("{}{}\n{}", &err[..i], block, &err[i..]),
+        None => format!("{err}\n{block}"),
     }
 }
 
@@ -1293,11 +1660,16 @@ fn unconfirmed_ref_error(
 ) -> String {
     format!(
         "Ref {} could not be resolved to the element it named [{} \"{}\"]: {}, \
-         and no element with that role and name is on the page now.\n\
+         {NOT_ON_PAGE}.\n\
          {}",
         ref_id, expected_role, expected_name, why, REF_RECOVERY_HINT,
     )
 }
+
+const NOT_ON_PAGE: &str = "and no element with that role and name is on the page now";
+const REANCHOR_UNFINISHED: &str =
+    "and re-reading the accessibility tree to re-anchor it did not finish in time";
+const LAST_RESORT_MARKER: &str = "(Last resort:";
 
 const REF_RECOVERY_HINT: &str =
     "The DOM mutated between snapshot and interaction (typical with React/Vue \
@@ -2977,6 +3349,105 @@ mod tests {
             err.contains("fresh `snapshot`") && err.contains("CSS selector"),
             "{err}"
         );
+    }
+
+    /// #356: a replaced node found by its stable DOM attributes may stand in
+    /// for the ref only when its AX identity agrees — with one relaxation for
+    /// a text field matched by `id` / form `name`, whose placeholder the page
+    /// is free to rewrite.
+    #[test]
+    fn a_replaced_node_found_by_dom_attributes_heals_only_when_identity_agrees() {
+        // Same role + same name: the plain React remount.
+        assert!(dom_heal_accepts(
+            "textbox",
+            "手机号",
+            "textbox",
+            "手机号",
+            "input[name=\"username\"]"
+        ));
+        // Text field, placeholder rewritten, but matched by its form name.
+        assert!(dom_heal_accepts(
+            "textbox",
+            "手机号",
+            "textbox",
+            "手机号或邮箱",
+            "input[name=\"username\"]"
+        ));
+        assert!(dom_heal_accepts(
+            "textbox", "Email", "textbox", "", "#email"
+        ));
+        // ...but not when only a placeholder/aria-label selector matched it.
+        assert!(!dom_heal_accepts(
+            "textbox",
+            "手机号",
+            "textbox",
+            "邮箱",
+            "input[placeholder=\"邮箱\"]"
+        ));
+        // A button with the same testid but a new label is the #162 hazard.
+        assert!(!dom_heal_accepts(
+            "button",
+            "Add post",
+            "button",
+            "Post all",
+            "#tweetButton"
+        ));
+        // A different kind of control is never the same element.
+        assert!(!dom_heal_accepts(
+            "textbox",
+            "手机号",
+            "button",
+            "手机号",
+            "input[name=\"username\"]"
+        ));
+    }
+
+    /// #356: the refusal must lead with locators that keep the guard on, not
+    /// with "disable the check".
+    #[test]
+    fn a_refusal_offers_usable_selectors_before_the_last_resort() {
+        let base = unconfirmed_ref_error(
+            "e41",
+            "textbox",
+            "手机号",
+            "the node is no longer in the accessibility tree",
+        );
+        let hints = vec![LocatorHint {
+            role: "textbox".to_string(),
+            name: "手机号".to_string(),
+            selector: "input[name=\"username\"]".to_string(),
+        }];
+        let err = insert_locator_hints(&base, &hints);
+        let hint_at = err
+            .find("input[name=\"username\"]")
+            .expect("selector offered");
+        let last_resort_at = err.find("AGENT_BROWSER_VERIFY_REF=0").expect("kept");
+        assert!(hint_at < last_resort_at, "{err}");
+        assert!(err.contains("[textbox \"手机号\"]"), "{err}");
+        // No hints: message unchanged.
+        assert_eq!(insert_locator_hints(&base, &[]), base);
+    }
+
+    #[test]
+    fn locator_hint_candidates_are_ranked_by_name_closeness() {
+        let pool = vec![
+            (1, "搜索".to_string()),
+            (2, "手机号或邮箱".to_string()),
+            (3, "手机号".to_string()),
+        ];
+        let ranked: Vec<i64> = rank_hint_candidates("手机号", &pool)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(ranked, vec![3, 2, 1]);
+    }
+
+    #[test]
+    fn an_unfinished_reanchor_does_not_claim_the_element_is_gone() {
+        let err = unconfirmed_ref_error("e1", "textbox", "x", "the probe timed out");
+        assert!(err.contains(NOT_ON_PAGE));
+        let reworded = err.replace(NOT_ON_PAGE, REANCHOR_UNFINISHED);
+        assert!(!reworded.contains("is on the page now"), "{reworded}");
     }
 
     #[test]
