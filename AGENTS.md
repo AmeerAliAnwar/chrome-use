@@ -197,6 +197,8 @@ not publish to npm. The release body comes from the current version's
 `release:start` / `release:end` block in `CHANGELOG.md`; the tag and package version
 must match. Chrome Web Store extension distribution is a separate step.
 
+`scripts/release.sh <version>` (`--dry-run` to only check) does the bump, tag and push from a clean, current `main` once the changelog entries are in, waits for the release build, then syncs the `leeguooooo/plugins` marketplace.
+
 ### Writing the changelog
 
 Review the git log since the last release and write the entry in `CHANGELOG.md`. Follow the existing format and voice. Group changes under `### New Features`, `### Bug Fixes`, `### Improvements`, etc. Bold the feature/fix name, then describe it concisely. Reference PR numbers in parentheses.
