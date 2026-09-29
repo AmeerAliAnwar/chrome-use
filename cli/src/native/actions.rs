@@ -6033,6 +6033,21 @@ async fn handle_type(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     let clear = cmd.get("clear").and_then(|v| v.as_bool()).unwrap_or(false);
     let delay = cmd.get("delay").and_then(|v| v.as_u64());
 
+    // What the field held before, so the read-back can tell "the page
+    // reformatted my text" from "none of it landed" (#355).
+    let before = if clear || commit_enter {
+        Some(String::new())
+    } else {
+        interaction::read_editable_value(
+            &mgr.client,
+            &session_id,
+            &state.ref_map,
+            selector,
+            &state.iframe_sessions,
+        )
+        .await
+    };
+
     interaction::type_text(
         &mgr.client,
         &session_id,
@@ -6049,28 +6064,23 @@ async fn handle_type(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         interaction::commit_with_enter(&mgr.client, &session_id).await?;
         return Ok(json!({ "typed": text, "committed": commit_enter }));
     }
-    // Read the field back and say so when the page rewrote what was typed. A
-    // Latin-only address form silently dropped every CJK character while `type`
-    // still reported ✓ Done (issue #203); the keystrokes were delivered, the
-    // page's own input filter discarded them. Warning, not error: masks and
-    // formatters legitimately rewrite input, and the read-back lets the agent
-    // judge.
+    // Read the field back. A page that rewrote what was typed gets a warning
+    // (a Latin-only address form silently dropped every CJK character, #203 —
+    // masks and formatters legitimately rewrite input, so the agent judges).
+    // A field left exactly as it was is an error: nothing typed landed, and
+    // `✓ Done` there sent agents off to submit empty login forms (#355).
     let mut out = json!({ "typed": text, "committed": commit_enter });
-    if let Some((read_back, warning)) = interaction::read_back_after_type(
+    interaction::verify_type_read_back(
         &mgr.client,
         &session_id,
         &state.ref_map,
         selector,
         text,
+        before.as_deref(),
         &state.iframe_sessions,
+        &mut out,
     )
-    .await
-    {
-        out["readBack"] = json!(read_back);
-        if let Some(w) = warning {
-            out["warning"] = json!(w);
-        }
-    }
+    .await?;
     Ok(out)
 }
 
@@ -11561,15 +11571,296 @@ async fn handle_mainframe(state: &mut DaemonState) -> Result<Value, String> {
 // Semantic locator handlers
 // ---------------------------------------------------------------------------
 
+/// The subaction a `find` command asked for. Without one, `find` only
+/// locates: "find it" and "click it" have very different consequences, and an
+/// implicit click on whatever matched first once opened an account menu
+/// instead of pressing the button the caller was looking for (#354).
+fn find_subaction(cmd: &Value) -> &str {
+    cmd.get("subaction")
+        .and_then(|v| v.as_str())
+        .unwrap_or("locate")
+}
+
+/// Drop every marker a previous `find` may have left behind (a daemon that
+/// died between locating and cleaning up), so this run's `querySelector`
+/// cannot pick up a stale node.
+fn with_located_marker_reset(locate_js: &str) -> String {
+    format!(
+        "(() => {{ document.querySelectorAll('[data-chrome-use-located]')\
+         .forEach(e => e.removeAttribute('data-chrome-use-located')); return {locate_js}; }})()"
+    )
+}
+
+/// A locate script returns `true`, or `{found: true, count, visibleCount}`
+/// when it can say how many nodes matched. `Some(extra)` when found.
+fn located_outcome(value: Option<&Value>) -> Option<Value> {
+    match value? {
+        Value::Bool(true) => Some(json!({})),
+        Value::Object(o) if o.get("found").and_then(|v| v.as_bool()) == Some(true) => {
+            let mut extra = o.clone();
+            extra.remove("found");
+            Some(Value::Object(extra))
+        }
+        _ => None,
+    }
+}
+
+/// Describe the located node — and, for a click, first move the marker to the
+/// nearest clickable ancestor. A text match lands on the innermost node that
+/// holds the words (a `<span>` inside a `div[role=button]`); a coordinate click
+/// on that span can still miss the control's hit area, and a DOM click on it
+/// fires nothing the control listens for (#354).
+fn located_target_js(retarget_to_clickable: bool) -> String {
+    format!(
+        r#"(() => {{
+            const el0 = document.querySelector('[data-chrome-use-located]');
+            if (!el0) return null;
+            const CLICKABLE = 'a[href], button, summary, label, select, input, textarea, '
+                + '[role=button], [role=link], [role=menuitem], [role=menuitemcheckbox], '
+                + '[role=menuitemradio], [role=tab], [role=option], [role=checkbox], '
+                + '[role=radio], [role=switch], [role=treeitem], [onclick]';
+            const norm = s => (s == null ? '' : String(s)).replace(/\s+/g, ' ').trim();
+            const describe = el => {{
+                const r = el.getBoundingClientRect();
+                let visible = r.width > 0 && r.height > 0;
+                if (visible && typeof el.checkVisibility === 'function') {{
+                    visible = el.checkVisibility({{ checkOpacity: true, checkVisibilityCSS: true }});
+                }}
+                const text = norm(el.innerText || el.textContent);
+                const name = norm(el.getAttribute('aria-label') || el.getAttribute('title')
+                    || el.getAttribute('alt') || el.getAttribute('placeholder') || text);
+                const out = {{
+                    tag: el.tagName.toLowerCase(),
+                    visible,
+                    box: {{ x: Math.round(r.left), y: Math.round(r.top),
+                           width: Math.round(r.width), height: Math.round(r.height) }},
+                }};
+                const role = el.getAttribute('role');
+                if (role) out.role = role;
+                if (name) out.name = name.slice(0, 80);
+                if (text && text !== name) out.text = text.slice(0, 80);
+                return out;
+            }};
+            let el = el0, from = null;
+            if ({retarget} && el0.closest) {{
+                const c = el0.closest(CLICKABLE);
+                if (c && c !== el0 && c !== document.body && c !== document.documentElement) {{
+                    from = describe(el0);
+                    el0.removeAttribute('data-chrome-use-located');
+                    c.setAttribute('data-chrome-use-located', 'true');
+                    el = c;
+                }}
+            }}
+            const d = describe(el);
+            if (from) d.retargetedFrom = from;
+            return d;
+        }})()"#,
+        retarget = retarget_to_clickable,
+    )
+}
+
+/// Evaluate an expression in the main frame of the active page, by value.
+/// `None` on any failure — every caller treats that as "cannot tell".
+async fn eval_main_by_value(
+    client: &super::cdp::client::CdpClient,
+    session_id: &str,
+    js: String,
+) -> Option<Value> {
+    let result: super::cdp::types::EvaluateResult = client
+        .send_command_typed(
+            "Runtime.evaluate",
+            &super::cdp::types::EvaluateParams {
+                expression: js,
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            Some(session_id),
+        )
+        .await
+        .ok()?;
+    if result.exception_details.is_some() {
+        return None;
+    }
+    result.result.value
+}
+
+/// Watch the page across a `find … click`: DOM mutations, navigation, focus
+/// moves and form events. A click that produces none of them within a short
+/// window almost always landed on something that does not handle clicks —
+/// which used to be reported as a plain success (#354).
+const CLICK_WATCH_ARM_JS: &str = r#"(() => {
+    try {
+        const prev = window.__chromeUseClickWatch;
+        if (prev && prev.obs) prev.obs.disconnect();
+        if (prev && prev.onEvent) ['input', 'change', 'submit', 'toggle'].forEach(t => document.removeEventListener(t, prev.onEvent, true));
+        const st = { n: 0, url: location.href, focus: document.activeElement };
+        st.obs = new MutationObserver(ms => { st.n += ms.length; });
+        st.obs.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+        st.onEvent = () => { st.n += 1; };
+        ['input', 'change', 'submit', 'toggle'].forEach(t => document.addEventListener(t, st.onEvent, true));
+        window.__chromeUseClickWatch = st;
+        return true;
+    } catch (e) { return false; }
+})()"#;
+
+const CLICK_WATCH_READ_JS: &str = r#"(() => {
+    const st = window.__chromeUseClickWatch;
+    if (!st) return { reacted: true };
+    return { reacted: st.n > 0 || location.href !== st.url || document.activeElement !== st.focus };
+})()"#;
+
+const CLICK_WATCH_DISARM_JS: &str = r#"(() => {
+    const st = window.__chromeUseClickWatch;
+    if (!st) return;
+    if (st.obs) st.obs.disconnect();
+    if (st.onEvent) ['input', 'change', 'submit', 'toggle'].forEach(t => document.removeEventListener(t, st.onEvent, true));
+    delete window.__chromeUseClickWatch;
+})()"#;
+
+/// How long a located click may take to show any reaction before it is
+/// reported as having done nothing.
+const CLICK_REACTION_WINDOW_MS: u64 = 800;
+
+/// `Some(false)` when the watched click provably produced no reaction,
+/// `Some(true)` when it did (or the document went away — a navigation),
+/// `None` when the watch could not be read.
+async fn click_reacted(client: &super::cdp::client::CdpClient, session_id: &str) -> Option<bool> {
+    let started = std::time::Instant::now();
+    loop {
+        let read = eval_main_by_value(client, session_id, CLICK_WATCH_READ_JS.to_string()).await;
+        let reacted = match read {
+            Some(v) => v.get("reacted").and_then(|r| r.as_bool()),
+            // The execution context is gone: the click navigated.
+            None => Some(true),
+        };
+        if reacted != Some(false)
+            || started.elapsed() >= std::time::Duration::from_millis(CLICK_REACTION_WINDOW_MS)
+        {
+            let _ = eval_main_by_value(client, session_id, CLICK_WATCH_DISARM_JS.to_string()).await;
+            return reacted;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+/// Everything a semantic `find` does once its locate script has marked a node:
+/// describe it, answer a bare `find` with that description, refuse to click a
+/// node nobody can see, run the requested action, and say when a click
+/// changed nothing.
+async fn finish_located(
+    cmd: &Value,
+    state: &mut DaemonState,
+    selector: &str,
+    locate_extra: Value,
+    retarget_to_clickable: bool,
+) -> Result<Value, String> {
+    let subaction = find_subaction(cmd);
+    let target = match state.browser.as_ref() {
+        Some(mgr) => match mgr.active_session_id() {
+            Ok(sid) => {
+                let sid = sid.to_string();
+                eval_main_by_value(
+                    &mgr.client,
+                    &sid,
+                    located_target_js(retarget_to_clickable && subaction == "click"),
+                )
+                .await
+                .filter(|v| v.is_object())
+            }
+            Err(_) => None,
+        },
+        None => None,
+    };
+
+    if subaction == "locate" {
+        let mut out = json!({ "located": target.clone().unwrap_or(Value::Null) });
+        if let Some(extra) = locate_extra.as_object() {
+            for (k, v) in extra {
+                out[k.as_str()] = v.clone();
+            }
+        }
+        return Ok(out);
+    }
+
+    if subaction == "click" {
+        if let Some(t) = target.as_ref() {
+            if t.get("visible").and_then(|v| v.as_bool()) == Some(false) {
+                return Err(format!(
+                    "The element that matched is not visible ({}), so clicking it would do nothing. \
+                     Run the same `find` without an action to see what matched, or `snapshot -i` \
+                     and click the control by @ref.",
+                    describe_located(t)
+                ));
+            }
+        }
+        if let Some(mgr) = state.browser.as_ref() {
+            if let Ok(sid) = mgr.active_session_id() {
+                let sid = sid.to_string();
+                let _ = eval_main_by_value(&mgr.client, &sid, CLICK_WATCH_ARM_JS.to_string()).await;
+            }
+        }
+    }
+
+    let mut out = execute_subaction(cmd, state, selector).await?;
+    if let Some(t) = target.as_ref() {
+        out["target"] = t.clone();
+    }
+    if subaction == "click" {
+        let reacted = match state.browser.as_ref() {
+            Some(mgr) => match mgr.active_session_id() {
+                Ok(sid) => {
+                    let sid = sid.to_string();
+                    click_reacted(&mgr.client, &sid).await
+                }
+                Err(_) => None,
+            },
+            None => None,
+        };
+        if reacted == Some(false) {
+            let what = target
+                .as_ref()
+                .map(describe_located)
+                .unwrap_or_else(|| "the matched element".to_string());
+            out["warning"] = json!(format!(
+                "Clicked {what}, but the page did not react within {CLICK_REACTION_WINDOW_MS}ms \
+                 (no DOM change, no navigation, no focus move). It is probably not the control you \
+                 meant, or it ignores this kind of click — run the same `find` without an action to \
+                 see what matched, or `snapshot -i` and click the control by @ref."
+            ));
+        }
+    }
+    Ok(out)
+}
+
+/// `<div role=button> "请求编入索引" at (812,344)` — one line for messages.
+fn describe_located(t: &Value) -> String {
+    let tag = t.get("tag").and_then(|v| v.as_str()).unwrap_or("element");
+    let mut s = match t.get("role").and_then(|v| v.as_str()) {
+        Some(role) => format!("<{tag} role={role}>"),
+        None => format!("<{tag}>"),
+    };
+    if let Some(name) = t.get("name").and_then(|v| v.as_str()) {
+        s.push_str(&format!(" {name:?}"));
+    }
+    if let Some(b) = t.get("box") {
+        let n = |k: &str| b.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
+        s.push_str(&format!(
+            " at ({},{}) {}x{}",
+            n("x"),
+            n("y"),
+            n("width"),
+            n("height")
+        ));
+    }
+    s
+}
+
 async fn execute_subaction(
     cmd: &Value,
     state: &mut DaemonState,
     selector: &str,
 ) -> Result<Value, String> {
-    let subaction = cmd
-        .get("subaction")
-        .and_then(|v| v.as_str())
-        .unwrap_or("click");
+    let subaction = find_subaction(cmd);
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
@@ -11586,6 +11877,67 @@ async fn execute_subaction(
             )
             .await?;
             Ok(json!({ "clicked": selector }))
+        }
+        "type" => {
+            let value = cmd
+                .get("value")
+                .and_then(|v| v.as_str())
+                .ok_or("Missing 'value' for type subaction")?;
+            let before = interaction::read_editable_value(
+                &mgr.client,
+                &session_id,
+                &state.ref_map,
+                selector,
+                &state.iframe_sessions,
+            )
+            .await;
+            interaction::type_text(
+                &mgr.client,
+                &session_id,
+                &state.ref_map,
+                selector,
+                value,
+                false,
+                None,
+                &state.iframe_sessions,
+                false,
+            )
+            .await?;
+            let mut out = json!({ "typed": value });
+            interaction::verify_type_read_back(
+                &mgr.client,
+                &session_id,
+                &state.ref_map,
+                selector,
+                value,
+                before.as_deref(),
+                &state.iframe_sessions,
+                &mut out,
+            )
+            .await?;
+            Ok(out)
+        }
+        "focus" => {
+            interaction::focus(
+                &mgr.client,
+                &session_id,
+                &state.ref_map,
+                selector,
+                &state.iframe_sessions,
+            )
+            .await?;
+            Ok(json!({ "focused": selector }))
+        }
+        "uncheck" => {
+            interaction::uncheck(
+                &mgr.client,
+                &session_id,
+                &state.ref_map,
+                selector,
+                &state.iframe_sessions,
+            )
+            .await?;
+            Ok(json!({ "unchecked": selector }))
         }
         "fill" => {
             let value = cmd
@@ -11721,18 +12073,27 @@ async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         })
         .unwrap_or_else(|| "true".to_string());
 
+    // Prefer a match the user can see: the first node in document order is
+    // often a hidden duplicate (a collapsed menu, an off-screen template).
     let js = format!(
         r#"(() => {{
             const els = document.querySelectorAll({selector});
+            const matches = [];
             for (const el of els) {{
                 const __an = (el.getAttribute('aria-label') || el.getAttribute('title')
                     || el.getAttribute('alt') || el.value || el.textContent || '').trim();
-                if ({name_match}) {{
-                    el.setAttribute('data-chrome-use-located', 'true');
-                    return true;
-                }}
+                if ({name_match}) matches.push(el);
             }}
-            return false;
+            if (!matches.length) return false;
+            const visible = el => {{
+                const r = el.getBoundingClientRect();
+                if (!(r.width > 0 && r.height > 0)) return false;
+                return typeof el.checkVisibility !== 'function'
+                    || el.checkVisibility({{ checkOpacity: true, checkVisibilityCSS: true }});
+            }};
+            const shown = matches.filter(visible);
+            (shown[0] || matches[0]).setAttribute('data-chrome-use-located', 'true');
+            return {{ found: true, count: matches.length, visibleCount: shown.length }};
         }})()"#,
         selector = serde_json::to_string(&role_to_query(role)).unwrap_or_default(),
         name_match = name_match,
@@ -11743,7 +12104,7 @@ async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         .send_command_typed(
             "Runtime.evaluate",
             &super::cdp::types::EvaluateParams {
-                expression: js,
+                expression: with_located_marker_reset(&js),
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
@@ -11751,19 +12112,13 @@ async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         )
         .await?;
 
-    if !result
-        .result
-        .value
-        .as_ref()
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
+    let Some(extra) = located_outcome(result.result.value.as_ref()) else {
         let desc = build_role_selector(role, name, exact);
         return Err(format!("No element found: {}", desc));
-    }
+    };
 
     let selector = "[data-chrome-use-located='true']";
-    let result = execute_subaction(cmd, state, selector).await;
+    let result = finish_located(cmd, state, selector, extra, true).await;
 
     // Clean up the marker attribute
     if let Some(ref browser) = state.browser {
@@ -11780,6 +12135,61 @@ async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     result
 }
 
+/// Locate script for `find text`. The old version took the first *leaf* in
+/// document order whose text contained the words — which is often a hidden
+/// duplicate, or a `<script>`/`<title>`, and never a control whose label is
+/// split across child nodes. That is how `find text "请求编入索引"` ended up
+/// clicking an account avatar, then clicking nothing at all (#354).
+///
+/// Now: the deepest element whose (whitespace-normalized) text holds the
+/// words, skipping non-rendered elements; ranked visible first, then an exact
+/// text match, then the shortest text; ties keep document order.
+fn text_locate_js(value: &str, exact: bool) -> String {
+    format!(
+        r#"(() => {{
+            const norm = s => (s == null ? '' : String(s)).replace(/\s+/g, ' ').trim();
+            const want = norm({want});
+            if (!want) return false;
+            const exact = {exact};
+            const SKIP = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'HEAD', 'TITLE', 'META', 'LINK']);
+            const holds = el => norm(el.textContent).includes(want);
+            const equals = el => norm(el.textContent) === want;
+            const found = [];
+            // Text containment is monotone upwards, so only subtrees that hold
+            // the words need visiting.
+            const visit = el => {{
+                const kids = Array.from(el.children).filter(c => !SKIP.has(c.tagName) && holds(c));
+                if (exact) {{
+                    if (equals(el) && !kids.some(equals)) found.push(el);
+                }} else if (!kids.length && el !== root) {{
+                    // `root` holding the words with no child that does means
+                    // they sit in a skipped element (a <script>), not on screen.
+                    found.push(el);
+                }}
+                kids.forEach(visit);
+            }};
+            const root = document.body || document.documentElement;
+            if (!root || !holds(root)) return false;
+            visit(root);
+            if (!found.length) return false;
+            const visible = el => {{
+                const r = el.getBoundingClientRect();
+                if (!(r.width > 0 && r.height > 0)) return false;
+                return typeof el.checkVisibility !== 'function'
+                    || el.checkVisibility({{ checkOpacity: true, checkVisibilityCSS: true }});
+            }};
+            const ranked = found.map((el, i) => ({{
+                el, i, vis: visible(el), eq: equals(el), len: norm(el.textContent).length,
+            }}));
+            ranked.sort((a, b) => (b.vis - a.vis) || (b.eq - a.eq) || (a.len - b.len) || (a.i - b.i));
+            ranked[0].el.setAttribute('data-chrome-use-located', 'true');
+            return {{ found: true, count: found.length, visibleCount: ranked.filter(r => r.vis).length }};
+        }})()"#,
+        want = serde_json::to_string(value).unwrap_or_default(),
+        exact = exact,
+    )
+}
+
 async fn handle_semantic_locator(
     cmd: &Value,
     state: &mut DaemonState,
@@ -11793,18 +12203,6 @@ async fn handle_semantic_locator(
         .and_then(|v| v.as_str())
         .ok_or(format!("Missing '{}' parameter", param_name))?;
     let exact = cmd.get("exact").and_then(|v| v.as_bool()).unwrap_or(false);
-
-    let match_fn = if exact {
-        format!(
-            "el.textContent.trim() === {}",
-            serde_json::to_string(value).unwrap_or_default()
-        )
-    } else {
-        format!(
-            "el.textContent.includes({})",
-            serde_json::to_string(value).unwrap_or_default()
-        )
-    };
 
     let query = match strategy {
         // Like Playwright's getByLabel: match <label> associations AND
@@ -11871,22 +12269,7 @@ async fn handle_semantic_locator(
             }})()"#,
             val = serde_json::to_string(value).unwrap_or_default(),
         ),
-        _ => {
-            // "text" strategy
-            format!(
-                r#"(() => {{
-                    const all = document.querySelectorAll('*');
-                    for (const el of all) {{
-                        if (el.children.length === 0 && {match_fn}) {{
-                            el.setAttribute('data-chrome-use-located', 'true');
-                            return true;
-                        }}
-                    }}
-                    return false;
-                }})()"#,
-                match_fn = match_fn,
-            )
-        }
+        _ => text_locate_js(value, exact),
     };
 
     let result: super::cdp::types::EvaluateResult = mgr
@@ -11894,7 +12277,7 @@ async fn handle_semantic_locator(
         .send_command_typed(
             "Runtime.evaluate",
             &super::cdp::types::EvaluateParams {
-                expression: query,
+                expression: with_located_marker_reset(&query),
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
@@ -11902,18 +12285,12 @@ async fn handle_semantic_locator(
         )
         .await?;
 
-    if !result
-        .result
-        .value
-        .as_ref()
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
+    let Some(extra) = located_outcome(result.result.value.as_ref()) else {
         return Err(format!("No element found by {} '{}'", strategy, value));
-    }
+    };
 
     let selector = "[data-chrome-use-located='true']";
-    let action_result = execute_subaction(cmd, state, selector).await;
+    let action_result = finish_located(cmd, state, selector, extra, true).await;
 
     if let Some(ref browser) = state.browser {
         let _ = browser
@@ -11969,7 +12346,7 @@ async fn handle_nth(cmd: &Value, state: &mut DaemonState) -> Result<Value, Strin
             const idx = {idx} < 0 ? els.length + {idx} : {idx};
             if (idx < 0 || idx >= els.length) return false;
             els[idx].setAttribute('data-chrome-use-located', 'true');
-            return true;
+            return {{ found: true, count: els.length }};
         }})()"#,
         sel = serde_json::to_string(selector).unwrap_or_default(),
         idx = index,
@@ -11980,7 +12357,7 @@ async fn handle_nth(cmd: &Value, state: &mut DaemonState) -> Result<Value, Strin
         .send_command_typed(
             "Runtime.evaluate",
             &super::cdp::types::EvaluateParams {
-                expression: js,
+                expression: with_located_marker_reset(&js),
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
@@ -11988,21 +12365,16 @@ async fn handle_nth(cmd: &Value, state: &mut DaemonState) -> Result<Value, Strin
         )
         .await?;
 
-    if !result
-        .result
-        .value
-        .as_ref()
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
+    let Some(extra) = located_outcome(result.result.value.as_ref()) else {
         return Err(format!(
             "No element at index {} for selector '{}'",
             index, selector
         ));
-    }
+    };
 
+    // The caller named this node with its own CSS selector: act on exactly it.
     let located = "[data-chrome-use-located='true']";
-    let action_result = execute_subaction(cmd, state, located).await;
+    let action_result = finish_located(cmd, state, located, extra, false).await;
 
     if let Some(ref browser) = state.browser {
         let _ = browser
@@ -15761,6 +16133,64 @@ mod tests {
         assert!(role_to_query("button").contains("button"));
         // unknown/custom roles fall back to the attribute + literal tag
         assert_eq!(role_to_query("tablist"), "[role=\"tablist\"], tablist");
+    }
+
+    #[test]
+    fn test_find_without_subaction_only_locates() {
+        // A daemon command with no subaction must never click (#354).
+        assert_eq!(find_subaction(&json!({ "action": "getbytext" })), "locate");
+        assert_eq!(
+            find_subaction(&json!({ "action": "getbytext", "subaction": "click" })),
+            "click"
+        );
+    }
+
+    #[test]
+    fn test_located_outcome_accepts_bool_and_counted_forms() {
+        assert_eq!(located_outcome(Some(&json!(true))), Some(json!({})));
+        assert_eq!(
+            located_outcome(Some(
+                &json!({ "found": true, "count": 3, "visibleCount": 1 })
+            )),
+            Some(json!({ "count": 3, "visibleCount": 1 }))
+        );
+        assert_eq!(located_outcome(Some(&json!(false))), None);
+        assert_eq!(located_outcome(Some(&json!({ "found": false }))), None);
+        assert_eq!(located_outcome(None), None);
+    }
+
+    #[test]
+    fn test_describe_located_names_role_text_and_box() {
+        let t = json!({
+            "tag": "div", "role": "button", "name": "请求编入索引", "visible": true,
+            "box": { "x": 812, "y": 344, "width": 120, "height": 36 },
+        });
+        assert_eq!(
+            describe_located(&t),
+            "<div role=button> \"请求编入索引\" at (812,344) 120x36"
+        );
+    }
+
+    #[test]
+    fn test_text_locate_js_skips_non_rendered_and_prefers_visible() {
+        let js = text_locate_js("请求编入索引", false);
+        assert!(js.contains("\"请求编入索引\""));
+        assert!(js.contains("'SCRIPT'") && js.contains("'TITLE'"));
+        assert!(js.contains("checkVisibility"));
+        assert!(js.contains("const exact = false;"));
+        assert!(text_locate_js("x", true).contains("const exact = true;"));
+        // The marker reset wraps the locate script, not the other way round.
+        let wrapped = with_located_marker_reset(&js);
+        assert!(
+            wrapped.starts_with("(() => { document.querySelectorAll('[data-chrome-use-located]')")
+        );
+    }
+
+    #[test]
+    fn test_located_target_js_retargets_only_when_asked() {
+        assert!(located_target_js(true).contains("if (true && el0.closest)"));
+        assert!(located_target_js(false).contains("if (false && el0.closest)"));
+        assert!(located_target_js(true).contains("[role=button]"));
     }
 
     fn unique_socket_dir(label: &str) -> PathBuf {

@@ -1873,6 +1873,69 @@ fn print_response_body(resp: &Response, action: Option<&str>, opts: &OutputOptio
             return;
         }
 
+        // `find` without an action: what matched, and that nothing was done
+        // to it (#354).
+        if let Some(located) = data.get("located") {
+            if located.is_object() {
+                let visible = located.get("visible").and_then(|v| v.as_bool()) != Some(false);
+                let indicator = if visible {
+                    color::success_indicator()
+                } else {
+                    color::warning_indicator()
+                };
+                println!("{} Found {}", indicator, describe_find_target(located));
+                if !visible {
+                    eprintln!(
+                        "{} it is not visible (zero size or hidden) — clicking it would do nothing",
+                        color::warning_indicator()
+                    );
+                }
+            } else {
+                println!(
+                    "{} Found a match (it could not be described)",
+                    color::success_indicator()
+                );
+            }
+            if let Some(count) = data.get("count").and_then(|v| v.as_u64()) {
+                if count > 1 {
+                    let shown = match data.get("visibleCount").and_then(|v| v.as_u64()) {
+                        Some(v) => format!(" ({v} visible)"),
+                        None => String::new(),
+                    };
+                    println!(
+                        "  {}",
+                        color::dim(&format!(
+                            "{count} matches{shown}; this is the one an action would use"
+                        ))
+                    );
+                }
+            }
+            println!(
+                "  {}",
+                color::dim(
+                    "nothing was clicked — add an action (click, fill, hover, ...) to act on it"
+                )
+            );
+            return;
+        }
+        // `find … click`: name what was actually clicked — after retargeting
+        // to a clickable ancestor it is not the node whose text matched.
+        if let (Some(_), Some(target)) = (data.get("clicked"), data.get("target")) {
+            if target.is_object() {
+                let warning = data.get("warning").and_then(|v| v.as_str());
+                let indicator = if warning.is_some() {
+                    color::warning_indicator()
+                } else {
+                    color::success_indicator()
+                };
+                println!("{} Clicked {}", indicator, describe_find_target(target));
+                if let Some(w) = warning {
+                    eprintln!("{} {}", color::warning_indicator(), w);
+                }
+                return;
+            }
+        }
+
         // Default success. A soft warning carried in the data (e.g. `type`
         // read back a value that does not contain what was typed, #203) must
         // not hide behind a bare ✓ — surface it on stderr.
@@ -1908,6 +1971,36 @@ fn print_response_body(resp: &Response, action: Option<&str>, opts: &OutputOptio
         // hides whether anything happened).
         println!("{} Done", color::success_indicator());
     }
+}
+
+/// `<div role=button> "请求编入索引" at (812,344) 120x36 (matched <span> "…")`
+fn describe_find_target(t: &serde_json::Value) -> String {
+    fn one(t: &serde_json::Value) -> String {
+        let tag = t.get("tag").and_then(|v| v.as_str()).unwrap_or("element");
+        let mut s = match t.get("role").and_then(|v| v.as_str()) {
+            Some(role) => format!("<{tag} role={role}>"),
+            None => format!("<{tag}>"),
+        };
+        if let Some(name) = t.get("name").and_then(|v| v.as_str()) {
+            s.push_str(&format!(" {name:?}"));
+        }
+        s
+    }
+    let mut s = one(t);
+    if let Some(b) = t.get("box") {
+        let n = |k: &str| b.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
+        s.push_str(&format!(
+            " at ({},{}) {}x{}",
+            n("x"),
+            n("y"),
+            n("width"),
+            n("height")
+        ));
+    }
+    if let Some(from) = t.get("retargetedFrom").filter(|v| v.is_object()) {
+        s.push_str(&format!(" (text matched {})", one(from)));
+    }
+    s
 }
 
 fn print_warning(resp: &Response) {
@@ -3148,9 +3241,15 @@ chrome-use find - Find and interact with elements by locator
 Usage: chrome-use find <natural-language description>
        chrome-use find <locator> <value> [action] [text]
 
-With an explicit locator, finds an element and optionally performs an action.
-With a bare description (or `query <description>`), returns ranked candidates
-without acting. Candidates include role/name/text, cursor and selector anchors.
+With an explicit locator and no action, reports what matched (tag, role,
+name, position, visibility, match count) and acts on NOTHING. Add an action
+to act on it. With a bare description (or `query <description>`), returns
+ranked candidates without acting. Candidates include role/name/text, cursor
+and selector anchors.
+
+Text/role matches prefer a visible element. `click` on a text match clicks
+its nearest clickable ancestor (button, link, [role=button], ...), refuses a
+match that is not visible, and warns when the page did not react.
 
 Locators:
   query <description>       Rank natural-language candidates (never acts)
@@ -3165,8 +3264,8 @@ Locators:
   last <selector>          Last matching element
   nth <index> <selector>   Nth matching element (0-based)
 
-Actions (default: click):
-  click, fill, type, hover, focus, check, uncheck
+Actions (default: none — locate only):
+  click, fill, type, hover, focus, check, uncheck, text
 
 Options:
   --name <name>        Filter role by accessible name
@@ -3179,6 +3278,7 @@ Global Options:
 Examples:
   chrome-use find "edit web service settings button"
   chrome-use find query "编辑 Web服务规则 设置按钮"
+  chrome-use find text "Sign In"              # where is it? (no click)
   chrome-use find role button click --name Submit
   chrome-use find text "Sign In" click
   chrome-use find label "Email" fill "user@example.com"

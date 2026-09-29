@@ -1,6 +1,6 @@
 # Known traps (date them)
 - 2026-06-05: @ref to the basket button goes stale after the mini-cart opens;
-  re-snapshot or use `find role button --name "Checkout"`.
+  re-snapshot or use `find role button click --name "Checkout"`.
 ```
 
 This is how repeat visits get fast and reliable instead of re-solving the same

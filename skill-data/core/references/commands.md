@@ -222,7 +222,14 @@ chrome-use mouse wheel 100         # Scroll wheel
 
 ## Semantic Locators (alternative to refs)
 
+Without an action, `find` only locates: it prints what matched (tag, role,
+name, position, visibility, match count) and clicks nothing. Text and role
+matches prefer a visible element; `click` on a text match clicks its nearest
+clickable ancestor, refuses an invisible match, and warns when the page did
+not react.
+
 ```bash
+chrome-use find text "Sign In"                    # locate only — acts on nothing
 chrome-use find role button click --name "Submit"
 chrome-use find text "Sign In" click
 chrome-use find text "Sign In" click --exact      # Exact match only

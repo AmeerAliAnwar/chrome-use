@@ -1660,21 +1660,144 @@ fn quote_short(s: &str) -> String {
     }
 }
 
-/// After `type`, read the field's current value and compare it with what was
-/// typed. Returns `(read_back, warning)`; `None` when the value can't be read
-/// (non-editable target, probe failure) so the caller stays silent. `type`
-/// appends, so the check is containment, not equality.
-pub async fn read_back_after_type(
+/// How long `type` waits before reading the field a second time. A form that
+/// is still hydrating right after load re-renders its inputs from state and
+/// wipes what was just typed; the first read, one paint later, still shows the
+/// text (zhihu.com/signin, #355).
+const TYPE_REREAD_DELAY_MS: u64 = 250;
+
+/// Verify a `type` against the field it targeted, filling `readBack` (and a
+/// soft `warning`) into `out`. Silent when the value can't be read
+/// (non-editable target, probe failure). `type` appends, so "holds what was
+/// typed" is containment, not equality.
+///
+/// `before` is the field's value before typing (`Some("")` when the field was
+/// cleared first). When the field ends up exactly where it started — nothing
+/// typed survived — this is an error, not a warning: the input went somewhere
+/// else, or the page threw it away, and `✓ Done` there sent agents off to
+/// submit empty login forms (#355). A partial rewrite (mask, formatter, input
+/// filter) stays a warning, as in #203.
+#[allow(clippy::too_many_arguments)]
+pub async fn verify_type_read_back(
     client: &CdpClient,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
     typed: &str,
+    before: Option<&str>,
     iframe_sessions: &HashMap<String, String>,
-) -> Option<(String, Option<String>)> {
+    out: &mut Value,
+) -> Result<(), String> {
     if typed.trim().is_empty() {
-        return None;
+        return Ok(());
     }
+    let Some(first) = read_editable_value(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await
+    else {
+        return Ok(());
+    };
+    let first_held = type_read_back_warning(typed, &first).is_none();
+    let actual = if first_held {
+        tokio::time::sleep(std::time::Duration::from_millis(TYPE_REREAD_DELAY_MS)).await;
+        read_editable_value(
+            client,
+            session_id,
+            ref_map,
+            selector_or_ref,
+            iframe_sessions,
+        )
+        .await
+        .unwrap_or_else(|| first.clone())
+    } else {
+        first.clone()
+    };
+    out["readBack"] = json!(actual);
+
+    let Some(warning) = type_read_back_warning(typed, &actual) else {
+        return Ok(());
+    };
+    if type_left_field_unchanged(typed, before, &actual) {
+        let focus = active_element_descriptor(client, session_id).await;
+        return Err(type_not_kept_error(
+            selector_or_ref,
+            typed,
+            &actual,
+            first_held,
+            focus.as_deref(),
+        ));
+    }
+    out["warning"] = json!(warning);
+    Ok(())
+}
+
+/// True when the field holds exactly what it held before `type` ran (or is
+/// empty), i.e. none of the typed text survived. Text carrying Enter/Tab is
+/// exempt: those keys can legitimately submit a form or move focus, and a
+/// field that clears on submit is not a failure.
+pub(crate) fn type_left_field_unchanged(typed: &str, before: Option<&str>, actual: &str) -> bool {
+    if typed.contains(['\n', '\r', '\t']) {
+        return false;
+    }
+    let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let a = norm(actual);
+    a.is_empty() || before.is_some_and(|b| norm(b) == a)
+}
+
+pub(crate) fn type_not_kept_error(
+    selector_or_ref: &str,
+    typed: &str,
+    actual: &str,
+    appeared_then_cleared: bool,
+    focus: Option<&str>,
+) -> String {
+    let what = if actual.is_empty() {
+        format!(
+            "the field is still empty after typing {}",
+            quote_short(typed)
+        )
+    } else {
+        format!(
+            "the field still holds {} after typing {}",
+            quote_short(actual),
+            quote_short(typed)
+        )
+    };
+    let why = if appeared_then_cleared {
+        "The text appeared and was then wiped: the page re-rendered the field (a form still \
+         hydrating right after load does this)."
+            .to_string()
+    } else {
+        match focus {
+            Some(f) if f != "none" => format!(
+                "Keyboard focus is on <{f}>, so the keystrokes may have gone there, or the widget \
+                 ignores synthetic keyboard input."
+            ),
+            _ => "Nothing has keyboard focus: the keystrokes went nowhere.".to_string(),
+        }
+    };
+    format!(
+        "type did not take: {what}. {why} Use `fill {selector_or_ref} <text>` (sets the value the \
+         way a framework expects and verifies it), or `click {selector_or_ref}` then \
+         `keyboard type <text>`."
+    )
+}
+
+/// The field's current value as `get value` would report it (input/textarea/
+/// select value, contenteditable text, Monaco/CodeMirror model). `None` when the
+/// target is not editable or cannot be resolved.
+pub async fn read_editable_value(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
+) -> Option<String> {
     let (object_id, effective_session_id) = resolve_element_object_id(
         client,
         session_id,
@@ -1706,8 +1829,7 @@ pub async fn read_back_after_type(
     if !data.get("ok").and_then(Value::as_bool).unwrap_or(false) {
         return None;
     }
-    let actual = data.get("value").and_then(Value::as_str)?.to_string();
-    Some((actual.clone(), type_read_back_warning(typed, &actual)))
+    Some(data.get("value").and_then(Value::as_str)?.to_string())
 }
 
 /// The warning `type` attaches when the field does not hold what was typed.
@@ -4004,6 +4126,33 @@ mod tests {
         assert!(w.contains("rewrote or rejected"), "{w}");
         assert!(w.contains("ASCII"), "{w}");
         assert!(type_read_back_warning("", "x").is_none());
+    }
+
+    #[test]
+    fn test_type_left_field_unchanged_only_when_nothing_landed() {
+        // Empty after typing: nothing landed (#355).
+        assert!(type_left_field_unchanged("13800000000", Some(""), ""));
+        assert!(type_left_field_unchanged("13800000000", None, ""));
+        // Same as before: the keystrokes went elsewhere.
+        assert!(type_left_field_unchanged("abc", Some("old"), "old"));
+        // A mask rewrote it: something landed, stays a warning (#203).
+        assert!(!type_left_field_unchanged("千代田1-2-3", Some(""), "1-2-3"));
+        assert!(!type_left_field_unchanged("abc", Some("old"), "oldab"));
+        // Enter/Tab may submit or move focus; a cleared field is not proof.
+        assert!(!type_left_field_unchanged("q\n", Some(""), ""));
+    }
+
+    #[test]
+    fn test_type_not_kept_error_names_the_way_out() {
+        let e = type_not_kept_error("@e41", "13800000000", "", true, None);
+        assert!(e.contains("still empty"), "{e}");
+        assert!(e.contains("re-rendered"), "{e}");
+        assert!(e.contains("fill @e41"), "{e}");
+        assert!(e.contains("keyboard type"), "{e}");
+        let e = type_not_kept_error("#q", "x", "", false, Some("input#other"));
+        assert!(e.contains("input#other"), "{e}");
+        let e = type_not_kept_error("#q", "x", "", false, Some("none"));
+        assert!(e.contains("Nothing has keyboard focus"), "{e}");
     }
 
     #[test]

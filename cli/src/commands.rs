@@ -4430,39 +4430,19 @@ fn parse_find(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                     _ => "find <locator> <value> [action] [text]",
                 },
             })?;
-            let raw_subaction = rest.get(2).copied();
-            if let Some(s) = raw_subaction {
-                if s.starts_with("--") {
-                    return Err(ParseError::InvalidValue {
-                        message: format!(
-                            "Missing action verb for `find {locator}` (got `{flag}` where action was expected).\n\
-                             Valid actions: click, fill, check, hover, text\n\
-                             Did you mean: chrome-use find {locator} <value> click {flag} ...?",
-                            locator = locator,
-                            flag = s,
-                        ),
-                        usage: match *locator {
-                            "role" => "find role <role> <action> [--name <name>] [--exact]",
-                            "text" => "find text <text> <action> [--exact]",
-                            "label" => "find label <label> <action> [text] [--exact]",
-                            "placeholder" => "find placeholder <text> <action> [text] [--exact]",
-                            "alt" => "find alt <text> <action> [--exact]",
-                            "title" => "find title <text> <action> [--exact]",
-                            "testid" => "find testid <id> <action> [text]",
-                            "first" => "find first <selector> <action> [text]",
-                            "last" => "find last <selector> <action> [text]",
-                            _ => "find <locator> <value> <action> [text]",
-                        },
-                    });
-                }
-            }
-            let subaction = raw_subaction.unwrap_or("click");
+            // No action verb means locate only: report what matched, act on
+            // nothing. It used to mean click, and "find it" silently became
+            // "click whatever matched first" (#354). A flag in the verb slot
+            // (`find role button --name Submit`) is the same bare locate.
+            let raw_subaction = rest.get(2).copied().filter(|s| !s.starts_with("--"));
+            let subaction = raw_subaction.unwrap_or("locate");
             let mut name: Option<&str> = None;
             let mut exact = false;
             let mut fill_parts: Vec<&str> = Vec::new();
 
-            if rest.len() > 3 {
-                let mut i = 3;
+            let first_opt = if raw_subaction.is_some() { 3 } else { 2 };
+            if rest.len() > first_opt {
+                let mut i = first_opt;
                 while i < rest.len() {
                     match rest[i] {
                         "--exact" => {
@@ -4564,7 +4544,7 @@ fn parse_find(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 context: "find nth".to_string(),
                 usage: "find nth <index> <selector> [action] [text]",
             })?;
-            let sub = rest.get(3).unwrap_or(&"click");
+            let sub = rest.get(3).unwrap_or(&"locate");
             let fv = if rest.len() > 4 {
                 Some(rest[4..].join(" "))
             } else {
@@ -8942,31 +8922,29 @@ mod tests {
         assert!(cmd.get("commands").is_none());
     }
 
-    // === parse_find: friendly error when action verb is missing ===
+    // === parse_find: no action verb = locate only (#354) ===
 
     #[test]
-    fn test_find_role_missing_action_verb_with_name_flag() {
-        let err =
-            parse_command(&args("find role button --name Submit"), &default_flags()).unwrap_err();
-        let msg = err.format();
-        assert!(
-            msg.contains("Missing action verb"),
-            "expected 'Missing action verb' in error, got: {msg}"
-        );
-        assert!(
-            msg.contains("Did you mean"),
-            "expected 'Did you mean' suggestion, got: {msg}"
-        );
-        assert!(
-            msg.contains("--name"),
-            "error should echo the offending flag back, got: {msg}"
-        );
+    fn test_find_role_flag_in_verb_slot_locates_with_the_flag() {
+        let cmd = parse_command(&args("find role button --name Submit"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "getbyrole");
+        assert_eq!(cmd["subaction"], "locate");
+        assert_eq!(cmd["name"], "Submit");
     }
 
     #[test]
-    fn test_find_testid_missing_action_verb_with_exact_flag() {
-        let err = parse_command(&args("find testid foo --exact"), &default_flags()).unwrap_err();
-        assert!(err.format().contains("Missing action verb"));
+    fn test_find_text_exact_without_verb_locates_exactly() {
+        let cmd = parse_command(&args("find text 请求编入索引 --exact"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "getbytext");
+        assert_eq!(cmd["subaction"], "locate");
+        assert_eq!(cmd["exact"], true);
+    }
+
+    #[test]
+    fn test_find_nth_default_subaction_is_locate() {
+        let cmd = parse_command(&args("find nth 2 .card"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "nth");
+        assert_eq!(cmd["subaction"], "locate");
     }
 
     #[test]
@@ -8982,11 +8960,12 @@ mod tests {
     }
 
     #[test]
-    fn test_find_role_default_subaction_click_when_no_action() {
-        // Backwards compat: `find role button` (no flags, no action) keeps
-        // defaulting to click — only `--xxx` in action position errors.
+    fn test_find_default_subaction_is_locate_not_click() {
+        // "Find it" must not silently become "click it" (#354).
         let cmd = parse_command(&args("find role button"), &default_flags()).unwrap();
-        assert_eq!(cmd["subaction"], "click");
+        assert_eq!(cmd["subaction"], "locate");
+        let cmd = parse_command(&args("find text 请求编入索引"), &default_flags()).unwrap();
+        assert_eq!(cmd["subaction"], "locate");
     }
 
     // === wait --gone / --hidden ===
