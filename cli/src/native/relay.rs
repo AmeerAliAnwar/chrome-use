@@ -462,7 +462,7 @@ impl RelayState {
                 "Page.frameNavigated" => {
                     let frame = inner_params.get("frame");
                     let top_level = frame
-                        .map(|f| f.get("parentId").map_or(true, Value::is_null))
+                        .map(|f| f.get("parentId").is_none_or(Value::is_null))
                         .unwrap_or(false);
                     if let (true, Some(sid), Some(url)) = (
                         top_level,
