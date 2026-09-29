@@ -1055,6 +1055,15 @@ async fn e2e_stream_command_requires_same_origin_before_daemon_relay() {
 #[tokio::test]
 #[ignore]
 async fn e2e_snapshot_and_click_ref() {
+    // A local page, not example.com: that page is outside this repo's control
+    // and asks not to be used for testing. On 2026-09-28 it dropped its
+    // "Example Domain" heading, and this test failed on every commit after.
+    let (port, server) = spawn_html_server(
+        "<h1>Snapshot Fixture</h1><p>Refs for a heading and a link.</p>\
+         <a href=\"/next\">More information</a>"
+            .to_string(),
+    )
+    .await;
     let mut state = DaemonState::new();
 
     let resp = execute_command(
@@ -1065,7 +1074,7 @@ async fn e2e_snapshot_and_click_ref() {
     assert_success(&resp);
 
     let resp = execute_command(
-        &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+        &json!({ "id": "2", "action": "navigate", "url": format!("http://127.0.0.1:{port}/") }),
         &mut state,
     )
     .await;
@@ -1076,8 +1085,8 @@ async fn e2e_snapshot_and_click_ref() {
     assert_success(&resp);
     let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
     assert!(
-        snapshot.contains("Example Domain"),
-        "Snapshot should contain heading"
+        snapshot.contains("Snapshot Fixture"),
+        "Snapshot should contain heading: {snapshot}"
     );
     assert!(snapshot.contains("ref=e1"), "Snapshot should have ref e1");
     assert!(snapshot.contains("ref=e2"), "Snapshot should have ref e2");
@@ -1086,7 +1095,7 @@ async fn e2e_snapshot_and_click_ref() {
         "Snapshot should have a link element"
     );
 
-    // Click the link by ref (e2 is the "More information..." link)
+    // Click the link by ref (e2 is the "More information" link)
     let resp = execute_command(
         &json!({ "id": "4", "action": "click", "selector": "e2" }),
         &mut state,
@@ -1095,20 +1104,21 @@ async fn e2e_snapshot_and_click_ref() {
     assert_success(&resp);
 
     // Wait for navigation
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    wait_for_evaluation(
+        &mut state,
+        "location.pathname === '/next'",
+        "clicking the link should navigate to /next",
+    )
+    .await;
 
-    // Verify URL changed
     let resp = execute_command(&json!({ "id": "5", "action": "url" }), &mut state).await;
     assert_success(&resp);
     let url = get_data(&resp)["url"].as_str().unwrap();
-    assert!(
-        url.contains("iana.org"),
-        "Should have navigated to iana.org, got: {}",
-        url
-    );
+    assert_eq!(url, format!("http://127.0.0.1:{port}/next"));
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
+    server.abort();
 }
 
 /// A DOM click that opens confirm must return before the dialog is handled.
