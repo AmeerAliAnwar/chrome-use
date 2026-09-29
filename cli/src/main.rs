@@ -3054,10 +3054,18 @@ fn main() {
                     if adapter_err.is_some() || explicit_fail {
                         resp.success = false;
                         if resp.error.is_none() {
-                            resp.error =
-                                Some(adapter_err.unwrap_or_else(|| {
-                                    "site adapter reported failure".to_string()
-                                }));
+                            let err = adapter_err
+                                .unwrap_or_else(|| "site adapter reported failure".to_string());
+                            // Carry the adapter's `hint` (#359: how to pass a
+                            // missing arg) into the message the caller reads.
+                            let hint = result
+                                .get("hint")
+                                .and_then(|v| v.as_str())
+                                .filter(|s| !s.is_empty());
+                            resp.error = Some(match hint {
+                                Some(h) => format!("{err} — {h}"),
+                                None => err,
+                            });
                         }
                     }
                 }

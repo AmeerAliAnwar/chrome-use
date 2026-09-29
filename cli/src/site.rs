@@ -14,7 +14,7 @@
 
 use std::path::PathBuf;
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 pub const COMMUNITY_SITES_SOURCE: &str = "epiral/bb-sites";
 pub const OFFICIAL_SITES_SOURCE: &str = "leeguooooo/chrome-use-sites";
@@ -152,6 +152,8 @@ pub struct Adapter {
     /// raw @meta text because `serde_json` sorts object keys alphabetically, which
     /// would otherwise scramble positional-arg mapping for multi-arg adapters.
     pub arg_order: Vec<String>,
+    /// `name/cmd` the adapter was loaded as, for usage hints.
+    pub spec: String,
 }
 
 impl Adapter {
@@ -237,6 +239,7 @@ pub fn parse_adapter(raw: &str, spec: &str) -> Result<Adapter, String> {
         meta,
         func_src,
         arg_order,
+        spec: spec.to_string(),
     })
 }
 
@@ -311,22 +314,179 @@ pub fn load_family_helper(family: &str) -> Option<String> {
     }
 }
 
-/// Build the JS to eval: `(<adapter function>)(<args JSON>)`. The adapter's
-/// `async function(args)` returns a promise; chrome-use's eval awaits it. When
-/// the family ships a `_helper` module, define it in an enclosing scope the
-/// adapter expression closes over, so helper calls resolve instead of throwing
-/// `ReferenceError: findGraphQLQueryId is not defined` (#99).
+/// Build the JS to eval. The adapter's `async function(args)` returns a promise;
+/// chrome-use's eval awaits it. When the family ships a `_helper` module, define
+/// it in an enclosing scope the adapter expression closes over, so helper calls
+/// resolve instead of throwing `ReferenceError: findGraphQLQueryId is not
+/// defined` (#99).
+///
+/// Around the call (#359): a required arg the caller left out is filled from the
+/// current page when its description documents a URL template for it
+/// (`linkedin.com/in/<username>`) and the tab is on a matching page, so
+/// `site linkedin/profile` run on someone's profile just works. An adapter's
+/// bare `Missing argument: x` error also gets a `hint` saying how to pass args.
 pub fn build_eval(adapter: &Adapter, args: &Value, helper_src: Option<&str>) -> String {
     let args_json = serde_json::to_string(args).unwrap_or_else(|_| "{}".to_string());
-    match helper_src {
+    let invoke = match helper_src {
         Some(h) if !h.trim().is_empty() => format!(
-            "(() => {{\n{h}\n;\nreturn ({func})({args});\n}})()",
+            "(() => {{\n{h}\n;\nreturn ({func})(__args);\n}})()",
             h = h,
             func = adapter.func_src,
-            args = args_json,
         ),
-        _ => format!("({})({})", adapter.func_src, args_json),
+        _ => format!("({})(__args)", adapter.func_src),
+    };
+    let infer: Vec<Value> = url_inferences(adapter, args)
+        .into_iter()
+        .map(|t| json!({ "arg": t.arg, "host": t.host, "re": t.path_regex }))
+        .collect();
+    let infer_json = serde_json::to_string(&infer).unwrap_or_else(|_| "[]".to_string());
+    let hint_json = serde_json::to_string(&missing_arg_hint(adapter)).unwrap_or_default();
+    format!(
+        "(async (__args) => {{\n\
+         for (const t of {infer_json}) {{\n\
+         if (__args[t.arg]) continue;\n\
+         const h = location.hostname;\n\
+         if (t.host && h !== t.host && !h.endsWith('.' + t.host)) continue;\n\
+         const m = location.pathname.match(new RegExp(t.re));\n\
+         if (m) {{ try {{ __args[t.arg] = decodeURIComponent(m[1]); }} catch (_) {{ __args[t.arg] = m[1]; }} }}\n\
+         }}\n\
+         const __r = await {invoke};\n\
+         if (__r && typeof __r === 'object' && typeof __r.error === 'string' \
+         && /^missing arg/i.test(__r.error) && !__r.hint) __r.hint = {hint_json};\n\
+         return __r;\n\
+         }})({args_json})"
+    )
+}
+
+/// A URL template an adapter documents in an arg's description, e.g.
+/// `"LinkedIn username (from URL linkedin.com/in/<username>)"`.
+#[derive(Debug, PartialEq)]
+pub struct UrlInference {
+    pub arg: String,
+    /// Host the template names (`linkedin.com`, `www.` stripped); `None` for a
+    /// bare path (`/design/p/<id>`), which matches on whatever host the tab is on.
+    pub host: Option<String>,
+    /// JS regex source matched against `location.pathname`; group 1 is the value.
+    pub path_regex: String,
+}
+
+/// Templates for the adapter's *required* args the caller did not supply.
+pub fn url_inferences(adapter: &Adapter, args: &Value) -> Vec<UrlInference> {
+    let Some(decl) = adapter.meta.get("args").and_then(|v| v.as_object()) else {
+        return Vec::new();
+    };
+    let supplied = |k: &str| {
+        args.get(k)
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty())
+    };
+    adapter
+        .arg_order
+        .iter()
+        .filter_map(|key| {
+            let spec = decl.get(key)?;
+            if spec.get("required").and_then(|v| v.as_bool()) != Some(true) || supplied(key) {
+                return None;
+            }
+            let desc = spec.get("description").and_then(|v| v.as_str())?;
+            parse_url_template(key, desc)
+        })
+        .collect()
+}
+
+/// Find the URL-ish token containing `<arg>` in `desc` and turn its path into a
+/// regex. Tokens end at whitespace, quotes, brackets and CJK punctuation.
+fn parse_url_template(arg: &str, desc: &str) -> Option<UrlInference> {
+    let placeholder = format!("<{arg}>");
+    desc.match_indices(&placeholder)
+        .find_map(|(at, _)| url_template_at(arg, &placeholder, desc, at))
+}
+
+fn url_template_at(arg: &str, placeholder: &str, desc: &str, at: usize) -> Option<UrlInference> {
+    let is_break = |c: char| c.is_whitespace() || "()[]{}'\"`,;，；（）、".contains(c);
+    let start = desc[..at]
+        .char_indices()
+        .rev()
+        .find(|&(_, c)| is_break(c))
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(0);
+    let end = desc[at..]
+        .char_indices()
+        .find(|&(_, c)| is_break(c))
+        .map(|(i, _)| at + i)
+        .unwrap_or(desc.len());
+    let mut token = &desc[start..end];
+    for scheme in ["https://", "http://"] {
+        token = token.strip_prefix(scheme).unwrap_or(token);
     }
+    let (host, path) = match token.find('/')? {
+        0 => (None, token),
+        i => {
+            let host = &token[..i];
+            // A host must look like one (`a.b`), or this is not a URL template.
+            if !host.contains('.') {
+                return None;
+            }
+            let host = host.strip_prefix("www.").unwrap_or(host);
+            (Some(host.to_string()), &token[i..])
+        }
+    };
+    // Only the path through the placeholder matters.
+    let upto = path.find(placeholder)? + placeholder.len();
+    let mut rest = &path[..upto];
+    let mut re = String::from("^");
+    while let Some(open) = rest.find('<') {
+        re.push_str(&regex_escape(&rest[..open]));
+        let close = open + rest[open..].find('>')?;
+        let name = &rest[open + 1..close];
+        re.push_str(if name == arg { "([^/?#]+)" } else { "[^/?#]+" });
+        rest = &rest[close + 1..];
+    }
+    re.push_str(&regex_escape(rest));
+    re.push_str("(?:[/?#]|$)");
+    Some(UrlInference {
+        arg: arg.to_string(),
+        host,
+        path_regex: re,
+    })
+}
+
+fn regex_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if "\\.^$|?*+()[]{}/".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// How to call the adapter, attached to a `Missing argument` error: required
+/// args as positionals in declaration order, and where the full list lives.
+pub fn missing_arg_hint(adapter: &Adapter) -> String {
+    let decl = adapter.meta.get("args").and_then(|v| v.as_object());
+    let required: Vec<&str> = adapter
+        .arg_order
+        .iter()
+        .filter(|k| {
+            decl.and_then(|d| d.get(k.as_str()))
+                .and_then(|s| s.get("required"))
+                .and_then(|v| v.as_bool())
+                == Some(true)
+        })
+        .map(|k| k.as_str())
+        .collect();
+    let spec = &adapter.spec;
+    let mut usage = format!("chrome-use site {spec}");
+    for k in &required {
+        usage.push_str(&format!(" <{k}>"));
+    }
+    let named = required
+        .first()
+        .map(|k| format!(" (or --{k} <value>)"))
+        .unwrap_or_default();
+    format!("Usage: {usage}{named}. All args: chrome-use site info {spec}")
 }
 
 /// List installed adapters as `name/cmd` strings (sorted).
@@ -771,6 +931,63 @@ async function(args) { return { repo: args.repo }; }"#;
             build_eval(&a, &args, Some("   ")),
             build_eval(&a, &args, None)
         );
+    }
+
+    // #359: a required arg whose description documents a URL template is
+    // inferred from the current page when omitted.
+    const LINKEDIN: &str = r#"/* @meta
+{
+  "name": "linkedin/profile",
+  "domain": "www.linkedin.com",
+  "args": {
+    "username": {"required": true, "description": "LinkedIn username (from URL linkedin.com/in/<username>)"}
+  }
+}
+*/
+async function(args) { if (!args.username) return {error: 'Missing argument: username'}; return args; }"#;
+
+    #[test]
+    fn url_template_inferred_for_missing_required_arg() {
+        let a = parse_adapter(LINKEDIN, "linkedin/profile").unwrap();
+        let inf = url_inferences(&a, &map_args(&a, &[], &[]));
+        assert_eq!(
+            inf,
+            vec![UrlInference {
+                arg: "username".into(),
+                host: Some("linkedin.com".into()),
+                path_regex: r"^\/in\/([^/?#]+)(?:[/?#]|$)".into(),
+            }]
+        );
+        // Supplied → nothing to infer.
+        assert!(url_inferences(&a, &map_args(&a, &["bill".into()], &[])).is_empty());
+        let js = build_eval(&a, &map_args(&a, &[], &[]), None);
+        assert!(js.contains("location.pathname.match"));
+        assert!(js.contains(
+            "Usage: chrome-use site linkedin/profile <username> (or --username <value>)"
+        ));
+    }
+
+    #[test]
+    fn url_template_parsing_variants() {
+        let t = parse_url_template("id", "Opus ID (from URL: bilibili.com/opus/<id>)").unwrap();
+        assert_eq!(t.host.as_deref(), Some("bilibili.com"));
+        assert_eq!(t.path_regex, r"^\/opus\/([^/?#]+)(?:[/?#]|$)");
+        let t = parse_url_template("mid", "用户 mid (从 space.bilibili.com/<mid> 获取)").unwrap();
+        assert_eq!(t.host.as_deref(), Some("space.bilibili.com"));
+        // The first `<id>` is bare text; the one inside the path is the template.
+        let t = parse_url_template("id", "design project id (the <id> in /design/p/<id>)").unwrap();
+        assert_eq!(t.host, None);
+        assert_eq!(t.path_regex, r"^\/design\/p\/([^/?#]+)(?:[/?#]|$)");
+        let t = parse_url_template(
+            "id",
+            "Conversation UUID, or a https://chatgpt.com/c/<id> URL",
+        )
+        .unwrap();
+        assert_eq!(t.host.as_deref(), Some("chatgpt.com"));
+        let t = parse_url_template("gizmo", "the /g/<gizmo>/c/<id> form").unwrap();
+        assert_eq!(t.host, None);
+        assert_eq!(t.path_regex, r"^\/g\/([^/?#]+)(?:[/?#]|$)");
+        assert!(parse_url_template("q", "search query").is_none());
     }
 
     #[test]

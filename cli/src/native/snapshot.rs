@@ -2277,6 +2277,33 @@ fn find_snapshot_ref(output: &str, ref_id: &str) -> Option<usize> {
     })
 }
 
+/// A clickable node wrapping a checkbox/switch/radio is itself a toggle: a
+/// click flips the nested control (#358: LinkedIn's `button "简体中文"` held a
+/// `checkbox [checked=true]`, and clicking it queued the deletion of that
+/// language profile). Surface that on the clickable's own line so an agent
+/// reading `button "X"` knows it is a switch, not a plain button. The search
+/// stays shallow and stops at other clickables, whose toggles are their own.
+fn nested_toggle(nodes: &[TreeNode], idx: usize) -> Option<String> {
+    const TOGGLES: [&str; 4] = ["checkbox", "switch", "radio", "menuitemcheckbox"];
+    const CLICKABLE: [&str; 4] = ["button", "link", "menuitem", "tab"];
+    if TOGGLES.contains(&nodes[idx].role.as_str()) {
+        return None;
+    }
+    let mut stack: Vec<(usize, usize)> = nodes[idx].children.iter().map(|&c| (c, 1)).collect();
+    while let Some((i, depth)) = stack.pop() {
+        let n = &nodes[i];
+        if TOGGLES.contains(&n.role.as_str()) {
+            let state = n.checked.as_deref().unwrap_or("unknown");
+            return Some(format!("toggles={}(checked={})", n.role, state));
+        }
+        if depth >= 4 || CLICKABLE.contains(&n.role.as_str()) {
+            continue;
+        }
+        stack.extend(n.children.iter().map(|&c| (c, depth + 1)));
+    }
+    None
+}
+
 fn render_tree(
     nodes: &[TreeNode],
     idx: usize,
@@ -2370,6 +2397,10 @@ fn render_tree(
     }
     if let Some(ref checked) = node.checked {
         attrs.push(format!("checked={}", checked));
+    } else if node.has_ref {
+        if let Some(t) = nested_toggle(nodes, idx) {
+            attrs.push(t);
+        }
     }
     if let Some(expanded) = node.expanded {
         attrs.push(format!("expanded={}", expanded));
@@ -3118,6 +3149,42 @@ mod tests {
         nodes[1].name = "字".repeat(600);
         let summary = status_summary(&nodes, 0);
         assert!(summary.len() <= 524 && summary.ends_with(" [truncated]"));
+    }
+
+    /// #358: LinkedIn's `button "简体中文"` wrapped a checked checkbox, and a
+    /// click queued deleting that profile. The button line must say it toggles.
+    #[test]
+    fn button_wrapping_checkbox_is_marked_as_toggle() {
+        let mut nodes = vec![
+            make_node("RootWebArea", "", None),
+            make_node("button", "简体中文", Some(3)),
+            make_node("generic", "", None),
+            make_node("checkbox", "", Some(5)),
+            make_node("button", "保存", Some(6)),
+        ];
+        nodes[0].children = vec![1, 4];
+        nodes[1].children = vec![2];
+        nodes[2].children = vec![3];
+        nodes[3].checked = Some("true".to_string());
+        for (i, r) in [(1, "e1"), (3, "e2"), (4, "e3")] {
+            nodes[i].has_ref = true;
+            nodes[i].ref_id = Some(r.to_string());
+        }
+        let options = SnapshotOptions {
+            interactive: true,
+            ..Default::default()
+        };
+        let mut output = String::new();
+        render_tree(&nodes, 0, 0, &mut output, &options);
+        assert!(
+            output.contains("button \"简体中文\" [toggles=checkbox(checked=true), ref=e1]"),
+            "{output}"
+        );
+        assert!(
+            output.contains("checkbox [checked=true, ref=e2]"),
+            "{output}"
+        );
+        assert!(output.contains("button \"保存\" [ref=e3]"), "{output}");
     }
 
     /// The real shape from #281: a card grid where every card header is just a
