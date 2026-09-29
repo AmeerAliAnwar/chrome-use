@@ -67,7 +67,7 @@ async fn create_storage_state_with_cookie(path: &str, cookie_name: &str, cookie_
     assert_success(&resp);
 
     let resp = execute_command(
-        &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+        &json!({ "id": "2", "action": "navigate", "url": example_com() }),
         &mut state,
     )
     .await;
@@ -79,7 +79,7 @@ async fn create_storage_state_with_cookie(path: &str, cookie_name: &str, cookie_
             "action": "cookies_set",
             "name": cookie_name,
             "value": cookie_value,
-            "domain": ".example.com",
+            "domain": "example.localhost",
             "path": "/",
             "expires": 2000000000
         }),
@@ -122,6 +122,88 @@ async fn send_raw_http_request(port: u64, request: &str) -> String {
 
 /// Serve `html` on a loopback port until the caller aborts the returned task.
 ///
+/// Local stand-in for example.com and example.org, and a host for the React
+/// fixture's scripts.
+///
+/// The tests used to load the real example.com, example.org and unpkg.com.
+/// example.com dropped its "Example Domain" heading on 2026-09-28 and a test
+/// that read it failed on every commit after; the page itself asks not to be
+/// used for testing. Chrome resolves every `*.localhost` name to loopback, so
+/// `example.localhost` and `example-org.localhost` are two real origins (their
+/// own cookies and localStorage) with no browser flags and no network.
+///
+/// One server for the whole test process, on its own threads: each tokio test
+/// has its own runtime, and a server spawned on one would die with that test.
+fn fixture_site_port() -> u16 {
+    static PORT: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
+    *PORT.get_or_init(|| {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("fixture site should bind");
+        let port = listener
+            .local_addr()
+            .expect("fixture site should have an address")
+            .port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                std::thread::spawn(move || serve_fixture_site(stream));
+            }
+        });
+        port
+    })
+}
+
+/// Stand-in for `https://example.com/`.
+fn example_com() -> String {
+    format!("http://example.localhost:{}/", fixture_site_port())
+}
+
+/// Stand-in for `https://example.org/`: a second, unrelated origin.
+fn example_org() -> String {
+    format!("http://example-org.localhost:{}/", fixture_site_port())
+}
+
+const EXAMPLE_HTML: &str = "<!doctype html><html><head><title>Example Domain</title></head>\
+<body><h1>Example Domain</h1><p>Local stand-in for example.com in the e2e tests.</p>\
+<a href=\"/more\">More information...</a></body></html>";
+
+fn serve_fixture_site(mut stream: std::net::TcpStream) {
+    use std::io::{Read, Write};
+    let mut request = [0_u8; 4096];
+    let n = stream.read(&mut request).unwrap_or(0);
+    let head = String::from_utf8_lossy(&request[..n]);
+    let path = head.split_whitespace().nth(1).unwrap_or("/");
+    let path = path.split(['?', '#']).next().unwrap_or("/");
+    let (status, content_type, body): (&str, &str, &[u8]) = match path {
+        "/vendor/react.production.min.js" => (
+            "200 OK",
+            "text/javascript",
+            include_bytes!("e2e_fixtures/react.production.min.js"),
+        ),
+        "/vendor/react-dom.production.min.js" => (
+            "200 OK",
+            "text/javascript",
+            include_bytes!("e2e_fixtures/react-dom.production.min.js"),
+        ),
+        "/react" => (
+            "200 OK",
+            "text/html; charset=utf-8",
+            REACT_FIXTURE_HTML.as_bytes(),
+        ),
+        "/favicon.ico" => ("404 Not Found", "text/plain", b""),
+        _ => (
+            "200 OK",
+            "text/html; charset=utf-8",
+            EXAMPLE_HTML.as_bytes(),
+        ),
+    };
+    let header = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = stream.write_all(header.as_bytes());
+    let _ = stream.write_all(body);
+}
+
 /// Deliberately unbounded. This used to serve a fixed number of requests and
 /// then drop the listener, which made the fixture race the browser: Chrome
 /// opens more connections than a navigation strictly needs — a favicon probe, a
@@ -384,20 +466,20 @@ async fn e2e_launch_navigate_evaluate_close() {
     assert_success(&resp);
     assert_eq!(get_data(&resp)["launched"], true);
 
-    // Navigate to example.com
+    // Navigate to the example.com stand-in
     let resp = execute_command(
-        &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+        &json!({ "id": "2", "action": "navigate", "url": example_com() }),
         &mut state,
     )
     .await;
     assert_success(&resp);
-    assert_eq!(get_data(&resp)["url"], "https://example.com/");
+    assert_eq!(get_data(&resp)["url"], example_com());
     assert_eq!(get_data(&resp)["title"], "Example Domain");
 
     // Get URL
     let resp = execute_command(&json!({ "id": "3", "action": "url" }), &mut state).await;
     assert_success(&resp);
-    assert_eq!(get_data(&resp)["url"], "https://example.com/");
+    assert_eq!(get_data(&resp)["url"], example_com());
 
     // Get title
     let resp = execute_command(&json!({ "id": "4", "action": "title" }), &mut state).await;
@@ -696,12 +778,12 @@ async fn e2e_lightpanda_launch_can_open_page() {
     assert_eq!(get_data(&resp)["launched"], true);
 
     let resp = execute_command(
-        &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+        &json!({ "id": "2", "action": "navigate", "url": example_com() }),
         &mut state,
     )
     .await;
     assert_success(&resp);
-    assert_eq!(get_data(&resp)["url"], "https://example.com/");
+    assert_eq!(get_data(&resp)["url"], example_com());
     assert_eq!(get_data(&resp)["title"], "Example Domain");
 
     let resp = execute_command(&json!({ "id": "3", "action": "close" }), &mut state).await;
@@ -727,7 +809,7 @@ async fn e2e_lightpanda_auto_launch_can_open_page() {
     let resp = tokio::time::timeout(
         tokio::time::Duration::from_secs(20),
         execute_command(
-            &json!({ "id": "1", "action": "navigate", "url": "https://example.com" }),
+            &json!({ "id": "1", "action": "navigate", "url": example_com() }),
             &mut state,
         ),
     )
@@ -744,7 +826,7 @@ async fn e2e_lightpanda_auto_launch_can_open_page() {
     }
 
     assert_success(&resp);
-    assert_eq!(get_data(&resp)["url"], "https://example.com/");
+    assert_eq!(get_data(&resp)["url"], example_com());
     assert_eq!(get_data(&resp)["title"], "Example Domain");
 
     let resp = execute_command(&json!({ "id": "2", "action": "close" }), &mut state).await;
@@ -1472,7 +1554,7 @@ async fn e2e_screenshot() {
     assert_success(&resp);
 
     let resp = execute_command(
-        &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+        &json!({ "id": "2", "action": "navigate", "url": example_com() }),
         &mut state,
     )
     .await;
@@ -2111,7 +2193,7 @@ async fn e2e_cookies() {
     assert_success(&resp);
 
     let resp = execute_command(
-        &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+        &json!({ "id": "2", "action": "navigate", "url": example_com() }),
         &mut state,
     )
     .await;
@@ -2171,7 +2253,7 @@ async fn e2e_storage() {
     assert_success(&resp);
 
     let resp = execute_command(
-        &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+        &json!({ "id": "2", "action": "navigate", "url": example_com() }),
         &mut state,
     )
     .await;
@@ -3088,7 +3170,8 @@ async fn e2e_viewport_scale_factor() {
     .await;
     assert_success(&resp);
 
-    // Default devicePixelRatio should be 1
+    // The default follows the display: 1 on CI's Linux runners, 2 on a Retina
+    // Mac. 3x differs from both, so the change below is always observable.
     let resp = execute_command(
         &json!({ "id": "3", "action": "evaluate", "script": "window.devicePixelRatio" }),
         &mut state,
@@ -3096,20 +3179,23 @@ async fn e2e_viewport_scale_factor() {
     .await;
     assert_success(&resp);
     let default_dpr = get_data(&resp)["result"].as_f64().unwrap();
-    assert_eq!(default_dpr, 1.0, "Default devicePixelRatio should be 1");
+    assert!(
+        default_dpr < 3.0,
+        "default devicePixelRatio was {default_dpr}"
+    );
 
-    // Set viewport with 2x scale factor
+    // Set viewport with 3x scale factor
     let resp = execute_command(
-        &json!({ "id": "4", "action": "viewport", "width": 1920, "height": 1080, "deviceScaleFactor": 2.0 }),
+        &json!({ "id": "4", "action": "viewport", "width": 1920, "height": 1080, "deviceScaleFactor": 3.0 }),
         &mut state,
     )
     .await;
     assert_success(&resp);
     assert_eq!(get_data(&resp)["width"], 1920);
     assert_eq!(get_data(&resp)["height"], 1080);
-    assert_eq!(get_data(&resp)["deviceScaleFactor"], 2.0);
+    assert_eq!(get_data(&resp)["deviceScaleFactor"], 3.0);
 
-    // devicePixelRatio should now be 2
+    // devicePixelRatio should now be 3
     let resp = execute_command(
         &json!({ "id": "5", "action": "evaluate", "script": "window.devicePixelRatio" }),
         &mut state,
@@ -3118,11 +3204,11 @@ async fn e2e_viewport_scale_factor() {
     assert_success(&resp);
     let new_dpr = get_data(&resp)["result"].as_f64().unwrap();
     assert_eq!(
-        new_dpr, 2.0,
-        "devicePixelRatio should be 2 after setting scale factor"
+        new_dpr, 3.0,
+        "devicePixelRatio should be 3 after setting scale factor"
     );
 
-    // CSS viewport width should still be 1920 (not 3840)
+    // CSS viewport width should still be 1920 (not 5760)
     let resp = execute_command(
         &json!({ "id": "6", "action": "evaluate", "script": "window.innerWidth" }),
         &mut state,
@@ -3130,7 +3216,7 @@ async fn e2e_viewport_scale_factor() {
     .await;
     assert_success(&resp);
     let css_width = get_data(&resp)["result"].as_i64().unwrap();
-    assert_eq!(css_width, 1920, "CSS width should remain 1920 at 2x scale");
+    assert_eq!(css_width, 1920, "CSS width should remain 1920 at 3x scale");
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
@@ -4008,7 +4094,7 @@ async fn e2e_state_management() {
     assert_success(&resp);
 
     let resp = execute_command(
-        &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+        &json!({ "id": "2", "action": "navigate", "url": example_com() }),
         &mut state,
     )
     .await;
@@ -4074,13 +4160,11 @@ async fn e2e_save_state_cross_domain() {
     .await;
     assert_success(&resp);
 
-    // Navigate to domain A and set cookie + localStorage. Use example.org (a
-    // stable IANA-reserved domain, like example.com below) rather than an
-    // external service such as httpbin.org — cookie/localStorage are set
-    // client-side via CDP, so the only requirement is that the page loads
-    // reliably. A flaky external domain made this test intermittently fail in CI.
+    // Navigate to domain A and set cookie + localStorage. Both domains are
+    // local stand-ins (see `fixture_site_port`): cookie and localStorage are
+    // set client-side via CDP, so all this needs is two origins that load.
     let resp = execute_command(
-        &json!({ "id": "2", "action": "navigate", "url": "https://example.org/" }),
+        &json!({ "id": "2", "action": "navigate", "url": example_org() }),
         &mut state,
     )
     .await;
@@ -4108,7 +4192,7 @@ async fn e2e_save_state_cross_domain() {
 
     // Navigate to domain B and set cookie + localStorage
     let resp = execute_command(
-        &json!({ "id": "5", "action": "navigate", "url": "https://example.com" }),
+        &json!({ "id": "5", "action": "navigate", "url": example_com() }),
         &mut state,
     )
     .await;
@@ -4134,7 +4218,7 @@ async fn e2e_save_state_cross_domain() {
     .await;
     assert_success(&resp);
 
-    // Save state (currently on example.com)
+    // Save state (currently on domain B)
     let tmp_state = std::env::temp_dir()
         .join("chrome-use-e2e-cross-domain-state.json")
         .to_string_lossy()
@@ -4156,12 +4240,12 @@ async fn e2e_save_state_cross_domain() {
     let has_domain_b = cookies.iter().any(|c| c["name"] == "domainB_cookie");
     assert!(
         has_domain_a,
-        "Should include cross-domain cookie from example.org: {:?}",
+        "Should include cross-domain cookie from domain A: {:?}",
         cookies
     );
     assert!(
         has_domain_b,
-        "Should include cookie from example.com: {:?}",
+        "Should include cookie from domain B: {:?}",
         cookies
     );
 
@@ -4171,7 +4255,7 @@ async fn e2e_save_state_cross_domain() {
     let has_origin_a = origins.iter().any(|o| {
         o["origin"]
             .as_str()
-            .is_some_and(|s| s.contains("example.org"))
+            .is_some_and(|s| s.contains("example-org.localhost"))
             && o["localStorage"]
                 .as_array()
                 .is_some_and(|ls| ls.iter().any(|e| e["name"] == "domainA_key"))
@@ -4179,19 +4263,19 @@ async fn e2e_save_state_cross_domain() {
     let has_origin_b = origins.iter().any(|o| {
         o["origin"]
             .as_str()
-            .is_some_and(|s| s.contains("example.com"))
+            .is_some_and(|s| s.contains("://example.localhost"))
             && o["localStorage"]
                 .as_array()
                 .is_some_and(|ls| ls.iter().any(|e| e["name"] == "domainB_key"))
     });
     assert!(
         has_origin_a,
-        "Should include localStorage from example.org origin: {:?}",
+        "Should include localStorage from domain A origin: {:?}",
         origins
     );
     assert!(
         has_origin_b,
-        "Should include localStorage from example.com origin: {:?}",
+        "Should include localStorage from domain B origin: {:?}",
         origins
     );
 
@@ -4215,7 +4299,7 @@ async fn e2e_domain_filter() {
     // launch and the background fetch handler intercepts from the start.
     {
         let mut df = state.domain_filter.write().await;
-        *df = Some(super::network::DomainFilter::new("example.com"));
+        *df = Some(super::network::DomainFilter::new("example.localhost"));
     }
 
     let resp = execute_command(
@@ -4227,7 +4311,7 @@ async fn e2e_domain_filter() {
 
     // Allowed domain
     let resp = execute_command(
-        &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+        &json!({ "id": "2", "action": "navigate", "url": example_com() }),
         &mut state,
     )
     .await;
@@ -4251,7 +4335,7 @@ async fn e2e_domain_filter() {
     // the Fetch interception layer (not just the navigate-level check).
     // First navigate to the allowed domain.
     let resp = execute_command(
-        &json!({ "id": "4", "action": "navigate", "url": "https://example.com" }),
+        &json!({ "id": "4", "action": "navigate", "url": example_com() }),
         &mut state,
     )
     .await;
@@ -4560,7 +4644,7 @@ async fn e2e_profile_cookie_persistence() {
         assert_success(&resp);
 
         let resp = execute_command(
-            &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+            &json!({ "id": "2", "action": "navigate", "url": example_com() }),
             &mut state,
         )
         .await;
@@ -4572,7 +4656,7 @@ async fn e2e_profile_cookie_persistence() {
                 "action": "cookies_set",
                 "name": "persist_test",
                 "value": "should_survive_restart",
-                "domain": ".example.com",
+                "domain": "example.localhost",
                 "path": "/",
                 "expires": 2000000000
             }),
@@ -4614,7 +4698,7 @@ async fn e2e_profile_cookie_persistence() {
         assert_success(&resp);
 
         let resp = execute_command(
-            &json!({ "id": "11", "action": "navigate", "url": "https://example.com" }),
+            &json!({ "id": "11", "action": "navigate", "url": example_com() }),
             &mut state,
         )
         .await;
@@ -4687,7 +4771,7 @@ async fn e2e_inspect() {
     assert_success(&resp);
 
     let resp = execute_command(
-        &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+        &json!({ "id": "2", "action": "navigate", "url": example_com() }),
         &mut state,
     )
     .await;
@@ -6999,7 +7083,7 @@ async fn e2e_state_flag_restores_cookies() {
         assert_success(&resp);
 
         let resp = execute_command(
-            &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+            &json!({ "id": "2", "action": "navigate", "url": example_com() }),
             &mut state,
         )
         .await;
@@ -7011,7 +7095,7 @@ async fn e2e_state_flag_restores_cookies() {
                 "action": "cookies_set",
                 "name": "state_flag_test",
                 "value": "from_state_file",
-                "domain": ".example.com",
+                "domain": "example.localhost",
                 "path": "/",
                 "expires": 2000000000
             }),
@@ -7049,7 +7133,7 @@ async fn e2e_state_flag_restores_cookies() {
         assert_success(&resp);
 
         let resp = execute_command(
-            &json!({ "id": "11", "action": "navigate", "url": "https://example.com" }),
+            &json!({ "id": "11", "action": "navigate", "url": example_com() }),
             &mut state,
         )
         .await;
@@ -7165,7 +7249,7 @@ async fn e2e_storage_state_launch_restarts_clean_browser() {
     );
 
     let resp = execute_command(
-        &json!({ "id": "11", "action": "navigate", "url": "https://example.com" }),
+        &json!({ "id": "11", "action": "navigate", "url": example_com() }),
         &mut state,
     )
     .await;
@@ -7200,7 +7284,7 @@ async fn e2e_storage_state_launch_restarts_clean_browser() {
     );
 
     let resp = execute_command(
-        &json!({ "id": "14", "action": "navigate", "url": "https://example.com" }),
+        &json!({ "id": "14", "action": "navigate", "url": example_com() }),
         &mut state,
     )
     .await;
@@ -7255,7 +7339,7 @@ async fn e2e_state_env_restores_cookies_on_auto_launch() {
         assert_success(&resp);
 
         let resp = execute_command(
-            &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+            &json!({ "id": "2", "action": "navigate", "url": example_com() }),
             &mut state,
         )
         .await;
@@ -7267,7 +7351,7 @@ async fn e2e_state_env_restores_cookies_on_auto_launch() {
                 "action": "cookies_set",
                 "name": "env_state_test",
                 "value": "from_env_state",
-                "domain": ".example.com",
+                "domain": "example.localhost",
                 "path": "/",
                 "expires": 2000000000
             }),
@@ -7298,7 +7382,7 @@ async fn e2e_state_env_restores_cookies_on_auto_launch() {
 
         // Navigate without explicit launch — triggers auto_launch
         let resp = execute_command(
-            &json!({ "id": "10", "action": "navigate", "url": "https://example.com" }),
+            &json!({ "id": "10", "action": "navigate", "url": example_com() }),
             &mut state,
         )
         .await;
@@ -7353,7 +7437,7 @@ async fn e2e_session_name_auto_restores_cookies() {
         assert_success(&resp);
 
         let resp = execute_command(
-            &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+            &json!({ "id": "2", "action": "navigate", "url": example_com() }),
             &mut state,
         )
         .await;
@@ -7365,7 +7449,7 @@ async fn e2e_session_name_auto_restores_cookies() {
                 "action": "cookies_set",
                 "name": "session_name_test",
                 "value": "auto_restored",
-                "domain": ".example.com",
+                "domain": "example.localhost",
                 "path": "/",
                 "expires": 2000000000
             }),
@@ -7390,7 +7474,7 @@ async fn e2e_session_name_auto_restores_cookies() {
 
         // Navigate without explicit launch — triggers auto_launch → try_auto_restore_state
         let resp = execute_command(
-            &json!({ "id": "10", "action": "navigate", "url": "https://example.com" }),
+            &json!({ "id": "10", "action": "navigate", "url": example_com() }),
             &mut state,
         )
         .await;
@@ -7456,7 +7540,7 @@ async fn e2e_explicit_state_load_restores_cookies() {
         assert_success(&resp);
 
         let resp = execute_command(
-            &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+            &json!({ "id": "2", "action": "navigate", "url": example_com() }),
             &mut state,
         )
         .await;
@@ -7468,7 +7552,7 @@ async fn e2e_explicit_state_load_restores_cookies() {
                 "action": "cookies_set",
                 "name": "explicit_load_test",
                 "value": "manually_loaded",
-                "domain": ".example.com",
+                "domain": "example.localhost",
                 "path": "/",
                 "expires": 2000000000
             }),
@@ -7507,7 +7591,7 @@ async fn e2e_explicit_state_load_restores_cookies() {
         assert_success(&resp);
 
         let resp = execute_command(
-            &json!({ "id": "12", "action": "navigate", "url": "https://example.com" }),
+            &json!({ "id": "12", "action": "navigate", "url": example_com() }),
             &mut state,
         )
         .await;
@@ -7543,8 +7627,8 @@ const REACT_FIXTURE_HTML: &str = r#"<!doctype html>
   <head><title>React fixture</title></head>
   <body>
     <div id="root"></div>
-    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="/vendor/react.production.min.js"></script>
+    <script src="/vendor/react-dom.production.min.js"></script>
     <script>
       const { useState, createElement: h } = React;
       function Counter({ label }) {
@@ -7565,10 +7649,7 @@ const REACT_FIXTURE_HTML: &str = r#"<!doctype html>
 "#;
 
 fn react_fixture_url() -> String {
-    format!(
-        "data:text/html;base64,{}",
-        STANDARD.encode(REACT_FIXTURE_HTML)
-    )
+    format!("http://127.0.0.1:{}/react", fixture_site_port())
 }
 
 #[tokio::test]
@@ -7584,7 +7665,7 @@ async fn e2e_react_tree_errors_without_hook() {
     assert_success(&resp);
 
     let resp = execute_command(
-        &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+        &json!({ "id": "2", "action": "navigate", "url": example_com() }),
         &mut state,
     )
     .await;
@@ -7700,7 +7781,7 @@ async fn e2e_pushstate_changes_url() {
     assert_success(&resp);
 
     let resp = execute_command(
-        &json!({ "id": "2", "action": "navigate", "url": "https://example.com/" }),
+        &json!({ "id": "2", "action": "navigate", "url": example_com() }),
         &mut state,
     )
     .await;
@@ -7738,7 +7819,7 @@ async fn e2e_removeinitscript_roundtrip() {
     assert_success(&resp);
 
     let resp = execute_command(
-        &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+        &json!({ "id": "2", "action": "navigate", "url": example_com() }),
         &mut state,
     )
     .await;
