@@ -555,7 +555,7 @@ fn extended_tools() -> Vec<Value> {
                 ("locator", json!({ "type": "string", "enum": ["query", "role", "text", "label", "placeholder", "alt", "title", "testid", "first", "last", "nth"], "description": "Locator kind. query performs a safe natural-language candidate search and does not act." })),
                 ("value", json!({ "type": "string", "description": "Natural-language description for query, locator value for semantic locators, or CSS selector for first/last/nth." })),
                 ("index", json!({ "type": "integer", "description": "With locator=nth: 0-based match index." })),
-                ("action", json!({ "type": "string", "enum": ["click", "fill", "type", "hover", "focus", "check", "uncheck"], "description": "Action to perform on the match (default: click)." })),
+                ("action", json!({ "type": "string", "enum": ["locate", "click", "fill", "type", "hover", "focus", "check", "uncheck", "text"], "description": "Action to perform on the match. Default: locate — report what matched (tag, role, name, box, visibility, match count) without acting." })),
                 ("text", json!({ "type": "string", "description": "With action=fill/type: the text to enter." })),
                 ("name", json!({ "type": "string", "description": "With locator=role: filter by accessible name (--name)." })),
                 ("exact", json!({ "type": "boolean", "description": "Require an exact (not substring) match (--exact); supported for text/label/placeholder/alt/title." })),
@@ -1414,7 +1414,7 @@ fn call_find(arguments: &Value) -> Result<Value, ProtocolError> {
         return run_tool(arguments, args);
     }
 
-    let action = optional_string(arguments, "action")?.unwrap_or_else(|| "click".to_string());
+    let action = optional_string(arguments, "action")?.unwrap_or_else(|| "locate".to_string());
     if locator == "nth" {
         let index = required_u64(arguments, "index")?;
         let selector = required_string(arguments, "value")?;

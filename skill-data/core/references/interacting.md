@@ -144,6 +144,7 @@ Use semantic locators:
 ```bash
 chrome-use find "edit web service settings button"  # ranked candidates, never acts
 chrome-use find query "编辑 Web服务规则 设置按钮"
+chrome-use find text "Sign In"                     # locate only: what matched, no click
 chrome-use find role button click --name "Submit"
 chrome-use find text "Sign In" click
 chrome-use find text "Sign In" click --exact     # exact match only
