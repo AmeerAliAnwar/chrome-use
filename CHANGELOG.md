@@ -1,8 +1,32 @@
 # Changelog
 
-## 1.5.144
+## 1.5.145
 
 <!-- release:start -->
+### Behavior Changes
+
+- **`find` without an action only locates.** It prints the match (tag, role, name, box, visibility, match and visible counts) and does nothing else; the CLI, daemon and MCP `chrome_use_find` all default to `locate`. Callers that relied on the implicit click must now say `click`. A flag in the action slot (`find role button --name X`) is treated as a bare locate instead of "Missing action verb". (#354)
+
+### Bug Fixes
+
+- **`find text` picks the element that holds the text, and `click` lands on something clickable.** Matching takes the deepest element containing the whole text (text split across children still matches), skips non-rendered nodes, and prefers visible, exact, then shortest matches; `find role` also prefers visible matches. Before clicking, a text or role match climbs to the nearest clickable ancestor (`button`, `a`, `[role=button]` …) and says so. An invisible match is an error, and a click with no DOM change, navigation, focus move or form event within 800 ms returns a warning instead of ✓. `find … type|focus|uncheck` no longer fail with "Unknown subaction". (#354)
+- **`type` fails when nothing landed.** It reads the value before and after typing, and again 250 ms later, so a page that clears the field during initialisation is caught. An empty or unchanged field is an error that says whether the text appeared and was cleared or focus was elsewhere, and suggests `fill <sel>` or `click <sel>` + `keyboard type`. A partially rewritten value (masks, formatting) stays a warning. (#355)
+- **Refs survive a React remount.** When the node behind a fresh ref is replaced, the ref re-binds to the unique visible node with the same role that carries the old node's stable attributes (`id`, `name`, `name+type`, `data-testid`, `aria-label`, `placeholder`). If re-binding fails, the refusal lists up to three usable selectors such as `[textbox "手机号"] → input[name="username"]` before the `AGENT_BROWSER_VERIFY_REF=0` last resort, and a re-read timeout is no longer reported as a missing element. (#356)
+- **`adopt <url>` only adopts a tab whose current URL matches.** It matched a relay URL cache recorded at adoption time, so a tab that had since navigated elsewhere could be taken over; the cache now follows navigations and the extension's answer is checked against the spec. The adopt spec applies to the first connection only, so a reconnect after the page navigated no longer fails with `adopt: no open tab matching …`. (#357)
+- **A tab blocked by a foreign extension iframe no longer bricks the session.** The error reads the tab's current URL instead of the one from before the block, and points to `chrome-use tab new <url>` in the same session. `screenshot` reports the real access denial instead of "attached to an unknown target". Chrome still refuses to debug the blocked tab while that iframe is present. (#357, #341)
+- **`site` infers a missing argument from the current page.** When a required argument is missing and the adapter describes its URL (for example `linkedin.com/in/<username>`), the value comes from the current tab when host and path match, so `site linkedin/profile` works on a profile page. A remaining `Missing argument` error carries a usage hint, and the top-level `error` includes the adapter's hint. (#359)
+
+### Improvements
+
+- **Snapshot marks buttons that toggle a control.** A clickable element that wraps a checkbox, switch, radio or menuitemcheckbox shows it inline, e.g. `button "简体中文" [toggles=checkbox(checked=true), ref=e1]`, so a destructive toggle does not look like a plain button. (#358)
+
+### Contributors
+
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.144
+
 ### New Features
 
 - **`chrome-use upgrade --check` and `--json`.** Report the running and latest versions and every installed copy of the agent skill (Claude Code plugin, git checkout, installer folder, copied folder) without changing anything. `--json` prints `name`, `current`, `latest`, `update_available` and `skills[{channel, path, update}]`. A failed check exits 2. (#352)
@@ -16,7 +40,6 @@
 ### Contributors
 
 - @leeguooooo
-<!-- release:end -->
 
 ## 1.5.143
 
