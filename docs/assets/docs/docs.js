@@ -23,7 +23,7 @@
   if (!document.querySelector('script[src*="visitor-beacon.js"]')) {
     var beacon = document.createElement('script');
     beacon.defer = true;
-    beacon.src = 'https://blog.leeguoo.com/scripts/visitor-beacon.js?v=20260703-2';
+    beacon.src = 'https://blog.leeguoo.com/scripts/visitor-beacon.js?v=20260930-clicks';
     head.appendChild(beacon);
   }
 
@@ -570,6 +570,30 @@
     link("https://x.com/leeguooooo", "X", lng === "en" ? "Author on X" : "作者 X");
     link("https://www.linkedin.com/in/li-guo-372ba1365/", "LinkedIn", lng === "en" ? "Author on LinkedIn" : "作者 LinkedIn");
     footer.appendChild(social);
+
+    // "More from the author" — plain links to the author's other apps.
+    // Clicks are counted by the visitor beacon (auto-tracks these hosts).
+    var utm = "utm_source=chrome-use.leeguoo.com&utm_medium=cta&utm_campaign=";
+    var more = el("div", "du-footer-more");
+    more.appendChild(el("p", "du-footer-more-title", lng === "en" ? "More from the author" : "作者的其他作品"));
+    var list = el("ul", "du-footer-more-list");
+    [
+      ["ChooseBrowser", "https://choosebrowser.leeguoo.com/choose-browser/?" + utm + "choosebrowser",
+        lng === "en" ? "A Mac app that opens every link in the right browser or profile, by URL rules."
+                     : "按网址规则，把每个链接自动用对的浏览器 / Profile 打开的 Mac 小工具。"],
+      ["Pastyx", "https://paste.leeguoo.com/?" + utm + "pastyx",
+        lng === "en" ? "An online clipboard that syncs across all your devices — no install (native Mac app too)."
+                     : "在线剪贴板，免安装，多设备实时同步（也有原生 Mac 版）。"]
+    ].forEach(function (it) {
+      var li = el("li");
+      var a = el("a", null, it[0]);
+      a.href = it[1]; a.target = "_blank"; a.rel = "noopener";
+      li.appendChild(a);
+      li.appendChild(document.createTextNode(" — " + it[2]));
+      list.appendChild(li);
+    });
+    more.appendChild(list);
+    footer.appendChild(more);
 
     var byline = el("p", "du-footer-byline");
     var a = el("a", null, "郭立 (leeguoo)");

@@ -445,6 +445,12 @@ img { max-width: 100%; }
 .du-footer-byline { margin: 0; font-size: 12.5px; color: var(--ink-faint); }
 .du-footer-byline a { color: var(--ink-soft); text-decoration: underline; text-decoration-color: var(--line); text-underline-offset: 2px; }
 .du-footer-byline a:hover { color: var(--red); }
+.du-footer-more { font-size: 12.5px; color: var(--ink-faint); line-height: 1.55; }
+.du-page-footer .du-footer-more-title { margin: 0 0 4px; font-family: var(--font-mono); font-size: 11.5px; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-faint); }
+.du-page-footer .du-footer-more-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 3px; }
+.du-footer-more-list li { margin: 0; padding: 0; font-size: 12.5px; line-height: 1.55; }
+.du-footer-more-list a { color: var(--ink-soft); font-weight: 500; text-decoration: underline; text-decoration-color: var(--line); text-underline-offset: 2px; }
+.du-footer-more-list a:hover { color: var(--red); text-decoration-color: var(--red-soft); }
 
 /* ------------------------------------------------------------- callouts */
 .du-callout {
