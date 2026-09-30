@@ -1,8 +1,27 @@
 # Changelog
 
-## 1.5.148
+## 1.5.149
 
 <!-- release:start -->
+### New Features
+
+- **A site adapter is no longer bound by the ~8s budget of one command.** An adapter ran as a single awaited eval, which over the extension relay is cut off at about 8 seconds, so an upload or a publish had to return `status: "incomplete"` and be rerun by the caller. It now runs in the background of the page and is polled. `--timeout <300|90s|10m>` sets the total time (default: the adapter's `@meta.timeout` in seconds, else 120s). Progress the adapter reports with `args.progress(...)` is printed to stderr and returned as `progress` with `attempts` and `elapsedMs`; `args.budgetMs` tells the adapter how long the run has. Existing adapters run unchanged. (#366)
+- **`site ... --until-done`** reruns the adapter while it returns `status: "incomplete"` or `"uploading"` (`@meta.retryStatuses` replaces the list), or when a page navigation ended the run, until it finishes or the timeout passes (default 600s). It honours a returned `retryAfterMs`. Without the flag, a run ended by a navigation returns `status: "interrupted"` and one that outlives the timeout returns `status: "timeout"`, each with a hint. (#366)
+- **Site adapters take local files.** An arg declared `"type": "file"` takes a local path; in the adapter, `await args.<name>.setOn(selector?)` puts that file on the page's file input the way `chrome-use upload` does, over the relay too, so publishing a video is one command with no separate `upload` and no selector to know. The page names the selector, never the path. (#364)
+- **Site adapter values from a file or stdin.** `--key @path` reads the value from a file, `--key @-` from stdin, and `--key-file path` is the same spelled out. `@name` that is not a file stays literal (`--user @jack`); a path-like `@post.md` that does not exist is an error, so a typo is never posted as text; `\@text` passes a literal leading `@`. (#365)
+- The MCP `chrome_use_site` tool takes `untilDone` and `timeout`, and waits for the run's own budget instead of a flat 30 seconds. (#366)
+
+### Documentation
+
+- The site-adapters page, `site --help` and the core skill reference describe file args, `@file` values, `--timeout` and `--until-done`, and how to write an adapter that uses them. The skill reference listed `--timeout` as a reserved global flag; it is not. (#368)
+
+### Contributors
+
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.148
+
 ### Bug Fixes
 
 - **`skills get core` works where the cache directory cannot be written.** A single-binary install unpacks its bundled guide to the cache directory on first use. In an agent sandbox that denies writes under the home directory that failed, and `skills get core` ended in "Skills directory not found". It now falls back to the temp directory; an extraction already there is replaced on every run, not reused. (#367)
@@ -12,7 +31,6 @@
 ### Contributors
 
 - @leeguooooo
-<!-- release:end -->
 
 ## 1.5.147
 
