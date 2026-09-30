@@ -300,6 +300,19 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         args.push(format!("--force-webrtc-ip-handling-policy={}", policy));
     }
 
+    // AGENT_BROWSER_LOCALE: Chrome's own language list, so the page, its
+    // workers and the Accept-Language header all agree, for temp and
+    // caller-provided profiles alike. A CDP/JS override reaches only the page,
+    // and that mismatch fails Cloudflare's managed challenge.
+    if !options.args.iter().any(|a| a.starts_with("--accept-lang")) {
+        if let Some(langs) = std::env::var("AGENT_BROWSER_LOCALE")
+            .ok()
+            .and_then(|l| crate::native::stealth::accept_lang_list(&l))
+        {
+            args.push(format!("--accept-lang={langs}"));
+        }
+    }
+
     let (user_data_dir, temp_user_data_dir) = if let Some(ref profile) = options.profile {
         let expanded = expand_tilde(profile);
         let dir = PathBuf::from(&expanded);
@@ -1794,6 +1807,36 @@ mod tests {
             .args
             .iter()
             .any(|a| a == "--user-data-dir=/tmp/my-profile"));
+    }
+
+    #[test]
+    fn test_build_args_locale_sets_accept_lang_for_any_profile() {
+        let g = EnvGuard::new(&["AGENT_BROWSER_LOCALE"]);
+        g.set("AGENT_BROWSER_LOCALE", "ja-JP");
+        let opts = LaunchOptions {
+            profile: Some("/tmp/my-profile".to_string()),
+            ..Default::default()
+        };
+        let args = build_chrome_args(&opts).unwrap().args;
+        assert!(args.iter().any(|a| a == "--accept-lang=ja-JP,ja"));
+
+        // A caller-supplied --accept-lang wins; no duplicate switch.
+        let opts = LaunchOptions {
+            profile: Some("/tmp/my-profile".to_string()),
+            args: vec!["--accept-lang=fr".to_string()],
+            ..Default::default()
+        };
+        let args = build_chrome_args(&opts).unwrap().args;
+        assert_eq!(
+            args.iter()
+                .filter(|a| a.starts_with("--accept-lang"))
+                .count(),
+            1
+        );
+
+        g.remove("AGENT_BROWSER_LOCALE");
+        let args = build_chrome_args(&LaunchOptions::default()).unwrap().args;
+        assert!(!args.iter().any(|a| a.starts_with("--accept-lang")));
     }
 
     #[test]
