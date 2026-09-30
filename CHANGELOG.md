@@ -1,8 +1,25 @@
 # Changelog
 
-## 1.5.146
+## 1.5.147
 
 <!-- release:start -->
+### Bug Fixes
+
+- **`--launch` passes Cloudflare's managed challenge again.** With the stealth patches on, the challenge spun forever; with them off it passed in about 16 seconds. Three causes: the patches faked Android-only APIs (`connection.downlinkMax` in the page and, through a wrapped `Worker` constructor, in workers; `ContactsManager`; `ContentIndex`) that desktop Chrome does not have, so the fingerprint read as a Mac UA with Android APIs; they were evaluated into Cloudflare's own challenge iframe while its scripts ran; and `navigator.languages` was forced to `en-US` in the page while workers and the `Accept-Language` header kept the system languages. The fake APIs are gone, the payload now skips anti-bot challenge frames (Cloudflare, hCaptcha, reCAPTCHA, DataDome, Arkose) and keeps only the native overrides there, and languages are no longer patched in JS. The challenge now passes in about 8 seconds. CreepJS "like headless" rises from 0% to 19%; a real Mac Chrome scores 31% on the same probes. (#361)
+- **`AGENT_BROWSER_LOCALE` sets the language everywhere.** It is passed to Chrome as `--accept-lang`, so the page, its workers and the `Accept-Language` header agree, for temporary and `--profile` launches alike. An `--accept-lang` in `--args` takes precedence. (#361)
+- **`cf-status` no longer reports an embedded Turnstile widget as a challenge.** Its `[id^="cf-chl"]` probe matched the widget's hidden `cf-chl-widget-*_response` input, so an ordinary login page came back as "challenged, clearance stale, re-solve". (#361)
+
+### Documentation
+
+- nowsecure.nl now embeds a Turnstile test sitekey and no longer tests anything; the stealth page and READMEs benchmark against scrapingcourse.com's managed challenge instead. (#361)
+
+### Contributors
+
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.146
+
 ### Bug Fixes
 
 - **`fill` enters text the way a user does.** For text inputs and textareas it wrote the value with the prototype setter and dispatched synthetic `input`/`change` events (`isTrusted: false`). A page that only honours real input kept its old state while the field showed the new text, the read-back matched, and `fill` printed ✓ (LinkedIn's edit-intro dialog: Save never saved). It now selects the current value and replaces it with a trusted `Input.insertText` (trusted `beforeinput`/`input`, a trusted `change` on blur); `fill ""` clears with a trusted Delete. When the trusted insert cannot produce the value (a `maxlength` or mask), the setter path still runs, `engine` reads `input-synthetic`, and a warning says the page may not have registered it. `type --clear` clears with select-all and a trusted Delete too. (#358)
@@ -18,7 +35,6 @@
 ### Contributors
 
 - @leeguooooo
-<!-- release:end -->
 
 ## 1.5.145
 
