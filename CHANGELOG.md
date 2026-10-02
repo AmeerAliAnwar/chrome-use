@@ -1,8 +1,35 @@
 # Changelog
 
-## 1.5.152
+## 1.5.153
 
 <!-- release:start -->
+### Features
+
+- **`auth login --bwu` logs in with your Bitwarden vault.** On a login page it asks bitwarden-use (0.7.0+) which vault logins match the site. It sees them masked, most recently used first, and uses the only one or the one named with `--item`; several are listed for you to choose from. The values go through `bwu run`: you confirm once with Touch ID, chrome-use runs itself again with them in that process's environment, and the result lists the steps filled, never the values. Default steps are username, password and Enter. It waits for a password field that only appears after the username was sent, and fills the TOTP on a code page, including one opened separately and sites that submit the code themselves. An item's `_autotype` field (rofi-rbw syntax, e.g. `username:enter:delay:password:enter`) sets the steps instead. `--no-submit` fills only. A secret command's `secrets` list is scrubbed from its response entry by entry. (#391)
+- **`addinitscript <js>` / `addinitscript --file <path>`** adds a script that runs before the page's own in every page the session loads from now on, and prints its handle for `removeinitscript`. It had only been reachable through `--init-script` at launch. (#390)
+- **`help` and `help <command>`** work as commands. (#390)
+
+### Changed
+
+- **Output is shaped by how agents actually call chrome-use.** Over 215 real agent sessions, 74% of calls piped output through `tail`/`head` and 24% discarded stderr, so an error printed only to stderr, or one whose last line was boilerplate, never reached the model. Now:
+  - an error also goes to stdout when stderr goes to `/dev/null`, and its last line is the next step;
+  - the `--launch` test-profile notice prints only on the call that launches, not on every command;
+  - **plain-mode `eval` prints a string result as text**, byte for byte, instead of a JSON-quoted literal, so a `JSON.stringify(...)` result is parsed once. A string that would read as another type (empty, or a bare number/true/false/null) keeps its quotes; `--json` is unchanged. (#390)
+- **"session unresponsive" names one successor session** (`foo` → `foo-2` → `foo-3`) and says to keep it. It used to say "use a different --session name", and one agent went through 98 names, each leaving a daemon behind. (#390)
+- **Commands agents guess point to the real one**: `js` → `eval`, `requests` → `network requests`, `har` → `network har start`, `logs` → `console`, `links` → `snapshot -i -f link`. Edit distance had suggested `is` for `js`. `<command> --help` without a help page of its own prints the lines of the full help that mention it, not all 568; `tabs --help` shows the `tab` page. (#390)
+- **core/SKILL.md** has a "before you write eval" table: in real sessions eval was 28% of all calls, mostly reading text, clicking by text and reading geometry, which `get text`, `click "text=…"` and `get box` already do. (#390)
+
+### Bug Fixes
+
+- **Tests no longer write to your friction log.** About three quarters of the 4000 lines in `~/.chrome-use/friction.jsonl` were test fixtures. Its categories now follow the error codes `--json` reports, plus `page_fetch_failed` and `policy`. Run `chrome-use friction --clear` once to drop the old test records. (#390)
+
+### Contributors
+
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.152
+
 ### Features
 
 - **`fill <sel> --from-env <VAR>` fills a value from a password manager.** `bwu run --env PW='github.com#password' -- chrome-use fill @e3 --from-env PW` puts a Bitwarden secret into a field without it ever being an argument, output or part of the transcript. The value is treated as a secret wherever it lands: results, errors and the `--observe` snapshot show `<filled N chars>`, even on a field that does not look like a password, and the CLI drops the variable before starting a daemon so the daemon never holds it. The authentication guide now leads with this recipe.
@@ -17,7 +44,6 @@
 ### Contributors
 
 - @leeguooooo
-<!-- release:end -->
 
 ## 1.5.151
 
