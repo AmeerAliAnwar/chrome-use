@@ -1186,6 +1186,20 @@ fn connection_alive_from_probe(probe: LivenessProbe, is_external_attach: bool) -
     }
 }
 
+/// The warning for an activation that hid another session's tab (#385).
+pub(crate) fn foreground_conflict_warning(owner: &str, title: &str) -> String {
+    let what = if title.is_empty() {
+        "its tab".to_string()
+    } else {
+        format!("its tab \"{title}\"")
+    };
+    format!(
+        "bringing this tab forward hid session '{owner}''s tab in the same window ({what}). \
+         A hidden page can ignore clicks, so that session may now see actions do nothing. \
+         Use a separate window per session where you need --activate."
+    )
+}
+
 impl BrowserManager {
     pub async fn launch(options: LaunchOptions, engine: Option<&str>) -> Result<Self, String> {
         let engine = engine.unwrap_or("chrome");
@@ -2862,7 +2876,7 @@ impl BrowserManager {
     /// the user's view ends where it was. A background tab is left alone (the
     /// agent never force-fronts a tab); the error points at
     /// `tab select --activate`. The page and what was typed stay as they were.
-    pub async fn cycle_pinned_tab_visibility(&mut self) -> Result<(), String> {
+    pub async fn cycle_pinned_tab_visibility(&mut self, blur_focused: bool) -> Result<(), String> {
         if !self.on_relay() {
             return Err("not on the extension relay".to_string());
         }
@@ -2875,6 +2889,7 @@ impl BrowserManager {
             .iter()
             .find(|p| p.target_id == pinned)
             .ok_or("pinned tab not tracked")?;
+        let session_id = page.session_id.clone();
         let live: Value = self
             .client
             .send_command_typed(
@@ -2907,6 +2922,24 @@ impl BrowserManager {
                 self.remember_created_target(temp);
             }
             tokio::time::sleep(Duration::from_millis(300)).await;
+            // While the tab is hidden the menu's frame is gone and debugger
+            // commands work again. Take focus out of the field it was attached
+            // to: Bitwarden reopens its menu on a focused login field as soon
+            // as the tab is shown, so the repeat hit the same block (#373).
+            // The value typed so far stays.
+            if blur_focused {
+                let _ = self
+                    .client
+                    .send_command(
+                        "Runtime.evaluate",
+                        Some(json!({
+                            "expression": "(() => { const a = document.activeElement; \
+                                if (a && a !== document.body && a.blur) a.blur(); })()",
+                        })),
+                        Some(&session_id),
+                    )
+                    .await;
+            }
             let back = self
                 .client
                 .send_command("ABExt.call", Some(activate(chrome_tab)), None)
@@ -2928,6 +2961,10 @@ impl BrowserManager {
                 }
             }
             back?;
+            // Bitwarden re-inserts its overlay frame for a moment when the tab is
+            // shown again, even with no field focused; a command sent at once hits
+            // it. Let that settle before the caller repeats anything (#373).
+            tokio::time::sleep(Duration::from_millis(700)).await;
         } else {
             // The agent never brings a tab to the front on its own, and the tab
             // the user is looking at is not this relay's to switch back to.
@@ -3574,7 +3611,15 @@ impl BrowserManager {
 
         let initialize = async {
             if activate {
-                self.activate_active_tab().await?;
+                // No result to carry a warning here; activate without the check.
+                let target_id = self.active_target_id()?.to_string();
+                self.client
+                    .send_command(
+                        "Target.activateTarget",
+                        Some(json!({ "targetId": target_id })),
+                        None,
+                    )
+                    .await?;
             }
             self.enable_domains(&attach.session_id).await
         };
@@ -4042,13 +4087,16 @@ impl BrowserManager {
     }
 
     /// Explicit recovery uses the browser connection before renderer probing.
-    pub async fn activate_active_tab(&self) -> Result<(), String> {
-        let target_id = self.active_target_id()?;
-        self.activate_target(target_id).await
+    /// Returns a warning when the activation hid another session's tab.
+    pub async fn activate_active_tab(&self) -> Result<Option<String>, String> {
+        let target_id = self.active_target_id()?.to_string();
+        self.activate_target(&target_id).await
     }
 
     /// Browser-level activation must not wait for a blocked renderer session.
-    async fn activate_target(&self, target_id: &str) -> Result<(), String> {
+    /// Returns a warning when the activation hid another session's tab.
+    async fn activate_target(&self, target_id: &str) -> Result<Option<String>, String> {
+        let conflict = self.foreground_conflict(target_id).await;
         self.client
             .send_command(
                 "Target.activateTarget",
@@ -4056,7 +4104,70 @@ impl BrowserManager {
                 None,
             )
             .await?;
-        Ok(())
+        Ok(conflict)
+    }
+
+    /// On the relay, when bringing `target_id` forward would hide a tab another
+    /// live session created in the same window, say which. A hidden page can
+    /// ignore input (#385), so two sessions sharing a window keep breaking each
+    /// other's clicks without either seeing why. Best effort: any failure to
+    /// find out returns `None`.
+    async fn foreground_conflict(&self, target_id: &str) -> Option<String> {
+        if !self.on_relay() {
+            return None;
+        }
+        let ours: Value = self
+            .client
+            .send_command(
+                "ABExt.inspectTab",
+                Some(json!({ "targetId": target_id })),
+                None,
+            )
+            .await
+            .ok()?;
+        if ours.get("active").and_then(Value::as_bool) == Some(true) {
+            return None;
+        }
+        let window_id = ours.get("windowId")?.as_i64()?;
+        let active: Value = self
+            .client
+            .send_command(
+                "ABExt.call",
+                Some(json!({
+                    "namespace": "tabs",
+                    "method": "query",
+                    "args": [{ "active": true, "windowId": window_id }],
+                })),
+                None,
+            )
+            .await
+            .ok()?;
+        let front = active.get("result")?.as_array()?.first()?.clone();
+        let front_tab = front.get("id")?.as_i64()?;
+        let attached: Value = self
+            .client
+            .send_command("ABExt.attachedTargets", None, None)
+            .await
+            .ok()?;
+        let front_target = attached
+            .get("targets")?
+            .as_array()?
+            .iter()
+            .find(|t| t.get("tabId").and_then(Value::as_i64) == Some(front_tab))?
+            .get("targetId")?
+            .as_str()?
+            .to_string();
+        let own = DAEMON_SESSION.get().cloned();
+        let owner = tokio::task::spawn_blocking(move || {
+            crate::connection::live_session_names()
+                .into_iter()
+                .filter(|name| Some(name) != own.as_ref())
+                .find(|name| crate::connection::created_target_ids(name).contains(&front_target))
+        })
+        .await
+        .ok()??;
+        let title = front.get("title").and_then(Value::as_str).unwrap_or("");
+        Some(foreground_conflict_warning(&owner, title))
     }
 
     pub async fn set_timezone(&self, timezone_id: &str) -> Result<(), String> {
@@ -4154,9 +4265,33 @@ impl BrowserManager {
         // `<el-button>` next to it. Resolve to the real `<input type=file>` so we
         // set files on the node the framework actually listens on, and so hidden
         // inputs are reachable (a11y/visibility-based locators miss them).
-        let input_object_id = self
+        let input_object_id = match self
             .resolve_file_input_object_id(&object_id, &effective_session_id, selector)
-            .await?;
+            .await
+        {
+            Ok(id) => id,
+            // No file input in the DOM: a button that creates one on click and
+            // opens the native chooser at once (#386). Catch the chooser, but
+            // only behind something that looks like an upload control: a
+            // wrong ref to a link or a submit button must not be clicked.
+            Err(no_input)
+                if self
+                    .is_chooser_trigger(&object_id, &effective_session_id)
+                    .await =>
+            {
+                self.file_input_from_chooser(
+                    session_id,
+                    &effective_session_id,
+                    selector,
+                    files.len(),
+                    ref_map,
+                    iframe_sessions,
+                )
+                .await
+                .map_err(|e| format!("{no_input}. Clicking it to catch a file chooser: {e}"))?
+            }
+            Err(no_input) => return Err(no_input),
+        };
 
         let describe: Value = self
             .client
@@ -4243,6 +4378,122 @@ impl BrowserManager {
                 )),
             }),
         }
+    }
+
+    /// Whether an element with no file input could be a control that opens a
+    /// file chooser: a button (not one that submits a form), a `role=button`,
+    /// a `<label>`, or a focusable widget. Links, submit buttons and plain
+    /// content are not, so `upload` never clicks them.
+    async fn is_chooser_trigger(&self, object_id: &str, session_id: &str) -> bool {
+        let func = r#"function() {
+            const el = this;
+            if (!el || !el.tagName) return false;
+            const tag = el.tagName;
+            if (tag === 'A' && el.hasAttribute('href')) return false;
+            if (tag === 'INPUT') return false;
+            if (tag === 'BUTTON') return !(el.type === 'submit' && el.form);
+            const role = (el.getAttribute('role') || '').toLowerCase();
+            return role === 'button' || tag === 'LABEL' || el.hasAttribute('tabindex');
+        }"#;
+        let result: Result<EvaluateResult, String> = self
+            .client
+            .send_command_typed(
+                "Runtime.callFunctionOn",
+                &CallFunctionOnParams {
+                    function_declaration: func.to_string(),
+                    object_id: Some(object_id.to_string()),
+                    arguments: None,
+                    return_by_value: Some(true),
+                    await_promise: Some(false),
+                },
+                Some(session_id),
+            )
+            .await;
+        matches!(result, Ok(r) if r.result.value == Some(Value::Bool(true)))
+    }
+
+    /// Click `selector` with file-chooser interception on, and return the
+    /// `<input type=file>` behind the chooser it opened (#386). Interception is
+    /// enabled before the click and checked, so a native dialog never opens on
+    /// the user's screen; it is switched off again whatever happens.
+    async fn file_input_from_chooser(
+        &self,
+        session_id: &str,
+        effective_session_id: &str,
+        selector: &str,
+        file_count: usize,
+        ref_map: &RefMap,
+        iframe_sessions: &HashMap<String, String>,
+    ) -> Result<String, String> {
+        let intercept = |enabled: bool| {
+            self.client.send_command(
+                "Page.setInterceptFileChooserDialog",
+                Some(json!({ "enabled": enabled })),
+                Some(effective_session_id),
+            )
+        };
+        intercept(true)
+            .await
+            .map_err(|e| format!("this connection cannot intercept the file chooser ({e})"))?;
+        let mut rx = self.client.subscribe();
+        let clicked = super::interaction::click(
+            &self.client,
+            session_id,
+            ref_map,
+            selector,
+            "left",
+            1,
+            iframe_sessions,
+        )
+        .await;
+        let opened = match clicked {
+            Err(e) => Err(format!("the click failed: {e}")),
+            Ok(()) => {
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+                loop {
+                    match tokio::time::timeout_at(deadline, rx.recv()).await {
+                        Ok(Ok(ev))
+                            if ev.method == "Page.fileChooserOpened"
+                                && ev.session_id.as_deref() == Some(effective_session_id) =>
+                        {
+                            break Ok(ev.params);
+                        }
+                        Ok(Ok(_)) => continue,
+                        Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+                        Ok(Err(_)) => break Err("the connection closed".to_string()),
+                        Err(_) => {
+                            break Err("no file chooser opened within 5s; pass the \
+                                       `<input type=file>` or the control that opens it"
+                                .to_string())
+                        }
+                    }
+                }
+            }
+        };
+        let _ = intercept(false).await;
+        let params = opened?;
+        if params.get("mode").and_then(Value::as_str) == Some("selectSingle") && file_count > 1 {
+            return Err(format!(
+                "the chooser accepts one file, but {file_count} were given"
+            ));
+        }
+        let backend_node_id = params
+            .get("backendNodeId")
+            .and_then(Value::as_i64)
+            .ok_or("the file chooser did not name its input element")?;
+        let resolved: Value = self
+            .client
+            .send_command(
+                "DOM.resolveNode",
+                Some(json!({ "backendNodeId": backend_node_id })),
+                Some(effective_session_id),
+            )
+            .await?;
+        resolved
+            .pointer("/object/objectId")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| "could not resolve the chooser's input element".to_string())
     }
 
     /// Given an arbitrary resolved element, return the object id of the
@@ -4580,10 +4831,16 @@ impl BrowserManager {
         ) {
             return Err(refuse_unowned_tab_message(target.tab_id, &target.target_id));
         }
+        let mut warning = None;
         if activate {
-            self.activate_target(&target.target_id).await?;
+            let target_id = target.target_id.clone();
+            warning = self.activate_target(&target_id).await?;
         }
-        self.tab_switch(index).await
+        let mut switched = self.tab_switch(index).await?;
+        if let (Some(w), Some(obj)) = (warning, switched.as_object_mut()) {
+            obj.insert("warning".to_string(), json!(w));
+        }
+        Ok(switched)
     }
 
     /// Return browser-level tab metadata without evaluating page JavaScript.
@@ -5001,6 +5258,16 @@ async fn resolve_cdp_url(input: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn foreground_conflict_warning_names_the_session_and_tab() {
+        let w = foreground_conflict_warning("plugins-77", "Log in - OpenAI");
+        assert!(w.contains("'plugins-77'"), "{w}");
+        assert!(w.contains("Log in - OpenAI"), "{w}");
+        assert!(w.contains("separate window"), "{w}");
+        assert!(foreground_conflict_warning("x", "").contains("its tab"));
+    }
+
     use super::url_matches_adopt_spec;
 
     #[test]

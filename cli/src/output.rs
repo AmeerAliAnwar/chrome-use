@@ -327,6 +327,10 @@ fn print_response_body(resp: &Response, action: Option<&str>, opts: &OutputOptio
                 );
             }
         }
+        // `open` that landed on a page refusing this browser's sign-in (#387).
+        if let Some(h) = data.get("humanCheck") {
+            print_human_check(h);
+        }
         // A click that opened a new tab: surface it so the agent doesn't read the
         // unchanged old page as a failed click (issue #24-A).
         if let Some(opened) = data.get("openedTab") {
@@ -2230,6 +2234,11 @@ chrome-use fill - Clear and fill an input field
 Usage: chrome-use fill <selector> <text>
        chrome-use fill <selector> --file <path>
        chrome-use fill <selector> --stdin
+       chrome-use fill <selector> --from-env <VAR>
+
+--from-env reads the value from an environment variable a password manager set,
+and treats it as a secret: it never appears in the result or an error.
+  bwu run --env PW='github.com#password' -- chrome-use fill @e3 --from-env PW
 
 Clears the field and fills it with the text, replacing existing content.
 Works on rich editors too (issue #41): CodeMirror 5, Monaco, ProseMirror and
@@ -5339,6 +5348,22 @@ Hit a bug or rough edge? A 30-second issue genuinely sharpens this tool:
     );
 }
 
+/// A page that blocked the agent: a human check, or a sign-in rejection (#387).
+fn print_human_check(h: &serde_json::Value) {
+    eprintln!(
+        "{} {}: {} ({})",
+        color::warning_indicator(),
+        h.get("verdict")
+            .and_then(|v| v.as_str())
+            .unwrap_or("blocked_by_human_check"),
+        h.get("vendor").and_then(|v| v.as_str()).unwrap_or("?"),
+        h.get("url").and_then(|v| v.as_str()).unwrap_or("")
+    );
+    if let Some(hint) = h.get("hint").and_then(|v| v.as_str()) {
+        eprintln!("  {}", color::dim(hint));
+    }
+}
+
 /// Render a `--observe` payload in text mode.
 ///
 /// The daemon returns `changed` plus, when something moved, a unified `delta`
@@ -5452,15 +5477,7 @@ fn print_observed(obs: &serde_json::Map<String, serde_json::Value>) {
         }
     }
     if let Some(h) = obs.get("humanCheck") {
-        eprintln!(
-            "{} blocked_by_human_check: {} ({})",
-            color::warning_indicator(),
-            h.get("vendor").and_then(|v| v.as_str()).unwrap_or("?"),
-            h.get("url").and_then(|v| v.as_str()).unwrap_or("")
-        );
-        if let Some(hint) = h.get("hint").and_then(|v| v.as_str()) {
-            eprintln!("  {}", color::dim(hint));
-        }
+        print_human_check(h);
     }
     if let Some(res) = obs.get("resources").and_then(|v| v.as_array()) {
         if !res.is_empty() {

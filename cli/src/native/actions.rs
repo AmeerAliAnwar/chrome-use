@@ -2323,6 +2323,13 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         if let Some(verdict) = super::observation::human_check_verdict(changed_now, &resources) {
             observed.insert("humanCheck".into(), verdict);
         }
+        if !observed.contains_key("humanCheck") {
+            if let Some(verdict) =
+                super::observation::signin_rejection(url1.as_deref().unwrap_or(""))
+            {
+                observed.insert("humanCheck".into(), verdict);
+            }
+        }
         let mut settled = settled;
         settled.mark_changed(observed.get("changed").and_then(|v| v.as_bool()) == Some(true));
         observed.insert("settle".into(), settled.to_json());
@@ -4195,7 +4202,14 @@ fn with_site_hint(mut result: Value, fallback_url: &str) -> Value {
     let url = result
         .get("url")
         .and_then(|v| v.as_str())
-        .unwrap_or(fallback_url);
+        .unwrap_or(fallback_url)
+        .to_string();
+    let url = url.as_str();
+    if let Some(verdict) = super::observation::signin_rejection(url) {
+        if let Some(obj) = result.as_object_mut() {
+            obj.insert("humanCheck".to_string(), verdict);
+        }
+    }
     let host = url::Url::parse(url)
         .ok()
         .and_then(|u| u.host_str().map(String::from));
@@ -9544,7 +9558,7 @@ async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value
             );
             if let Some(obj) = result.as_object_mut() {
                 obj.insert("verified".to_string(), json!("unconfirmed"));
-                obj.insert("warning".to_string(), json!(warning));
+                append_warning(obj, &warning);
             }
             state.last_unconfirmed_tab_switch = Some((
                 "tab select",
@@ -9693,6 +9707,15 @@ pub(crate) fn already_tried_note(
     ))
 }
 
+/// Add a warning to a result without dropping one already there.
+fn append_warning(obj: &mut serde_json::Map<String, Value>, text: &str) {
+    let merged = match obj.get("warning").and_then(Value::as_str) {
+        Some(existing) if !existing.is_empty() => format!("{existing}\n{text}"),
+        _ => text.to_string(),
+    };
+    obj.insert("warning".to_string(), json!(merged));
+}
+
 async fn handle_tab_adopt(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let spec = cmd
         .get("spec")
@@ -9702,24 +9725,26 @@ async fn handle_tab_adopt(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         Some(mgr) => mgr.tab_adopt(spec).await,
         None => Err("Browser not launched".to_string()),
     };
-    let result = finish_tab_adopt(result, state)?;
+    let mut result = finish_tab_adopt(result, state)?;
     if cmd
         .get("activate")
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
-        state
+        let warning = state
             .browser
             .as_ref()
             .ok_or("Browser not launched")?
             .activate_active_tab()
             .await?;
+        if let (Some(w), Some(obj)) = (warning, result.as_object_mut()) {
+            append_warning(obj, &w);
+        }
     }
     // Same identity check as `tab select` (issue #223): adopt reported the
     // requested tab's title and url while the session went on driving the page
     // it was stuck on, so the documented recovery for a lost tab silently did
     // nothing and the next command failed identically.
-    let mut result = result;
     let expected = result
         .get("url")
         .and_then(|v| v.as_str())
@@ -9758,7 +9783,7 @@ async fn handle_tab_adopt(cmd: &Value, state: &mut DaemonState) -> Result<Value,
                 );
                 if let Some(obj) = result.as_object_mut() {
                     obj.insert("verified".to_string(), json!("unconfirmed"));
-                    obj.insert("warning".to_string(), json!(warning));
+                    append_warning(obj, &warning);
                 }
                 state.last_unconfirmed_tab_switch =
                     Some(("tab adopt", spec.to_string(), std::time::Instant::now()));
@@ -11146,17 +11171,38 @@ async fn handle_innerhtml(cmd: &Value, state: &mut DaemonState) -> Result<Value,
 /// state machine was enough to overflow a 2 MiB test-thread stack in debug
 /// builds. Here the two runs are sequential, never nested.
 pub async fn execute_command_recovering(cmd: &Value, state: &mut DaemonState) -> Value {
+    // `fill --from-env`: the whole command, `--observe` included, runs with
+    // every field treated as sensitive, and the response is scrubbed of the
+    // value as a last line of defence.
+    let secret = cmd
+        .get("secret")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        .then(|| cmd.get("value").and_then(Value::as_str))
+        .flatten()
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+    let Some(secret) = secret else {
+        return Box::pin(execute_command_recovering_inner(cmd, state)).await;
+    };
+    let mut out = super::sensitive::SECRET_COMMAND
+        .scope(true, Box::pin(execute_command_recovering_inner(cmd, state)))
+        .await;
+    super::sensitive::scrub_value(&mut out, &secret);
+    out
+}
+
+async fn execute_command_recovering_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     let first = execute_command(cmd, state).await;
-    let denied = first.get("success").and_then(|v| v.as_bool()) == Some(false)
-        && first
-            .get("error")
-            .and_then(|v| v.as_str())
-            .is_some_and(super::browser::is_debugger_access_denied);
-    if !denied {
+    if !is_denied(&first) {
         return first;
     }
+    let action = cmd.get("action").and_then(|v| v.as_str()).unwrap_or("");
+    // Take focus out of the field only when the command will be repeated: a
+    // `press Enter` the agent re-runs must still reach the field.
+    let blur = safe_to_repeat(action);
     let recovery = match state.browser.as_mut() {
-        Some(mgr) if mgr.on_relay() => Box::pin(mgr.cycle_pinned_tab_visibility()).await,
+        Some(mgr) if mgr.on_relay() => Box::pin(mgr.cycle_pinned_tab_visibility(blur)).await,
         _ => Err("not on the extension relay".to_string()),
     };
     if let Err(reason) = recovery {
@@ -11166,7 +11212,6 @@ pub async fn execute_command_recovering(cmd: &Value, state: &mut DaemonState) ->
         }
         return out;
     }
-    let action = cmd.get("action").and_then(|v| v.as_str()).unwrap_or("");
     if !safe_to_repeat(action) {
         let mut out = first;
         if let Some(Value::String(e)) = out.get_mut("error") {
@@ -11178,6 +11223,16 @@ pub async fn execute_command_recovering(cmd: &Value, state: &mut DaemonState) ->
         return out;
     }
     let mut second = Box::pin(execute_command(cmd, state)).await;
+    // `fill` focuses the field, and a password manager reopens its menu on a
+    // focused login field, so the repeat can be blocked again, usually after
+    // the text went in, on the read-back. Close the menu once more (the
+    // recovery also takes focus out of the field) and check the value
+    // directly (#373).
+    if action == "fill" && is_denied(&second) {
+        if let Some(verified) = Box::pin(verify_fill_after_menu(cmd, state)).await {
+            return verified;
+        }
+    }
     if second.get("success").and_then(|v| v.as_bool()) == Some(true) {
         if let Some(obj) = second.as_object_mut() {
             obj.entry("warning").or_insert_with(|| {
@@ -11189,6 +11244,52 @@ pub async fn execute_command_recovering(cmd: &Value, state: &mut DaemonState) ->
         }
     }
     second
+}
+
+fn is_denied(resp: &Value) -> bool {
+    resp.get("success").and_then(|v| v.as_bool()) == Some(false)
+        && resp
+            .get("error")
+            .and_then(|v| v.as_str())
+            .is_some_and(super::browser::is_debugger_access_denied)
+}
+
+/// After a `fill` blocked twice by a password manager's menu: close the menu,
+/// then read the field. If it holds the requested value, the fill worked and
+/// only its follow-up was blocked. The value is compared here and never
+/// echoed.
+async fn verify_fill_after_menu(cmd: &Value, state: &mut DaemonState) -> Option<Value> {
+    let selector = cmd.get("selector").and_then(|v| v.as_str())?.to_string();
+    let wanted = cmd.get("value").and_then(|v| v.as_str())?.to_string();
+    let mgr = state.browser.as_mut()?;
+    Box::pin(mgr.cycle_pinned_tab_visibility(true)).await.ok()?;
+    let read = Box::pin(execute_command(
+        &json!({ "id": cmd.get("id").cloned().unwrap_or(Value::Null),
+                 "action": "inputvalue", "selector": selector, "revealValues": true }),
+        state,
+    ))
+    .await;
+    let actual = read.pointer("/data/value").and_then(|v| v.as_str())?;
+    if actual != wanted {
+        return None;
+    }
+    let mut warning = "a password manager's inline menu reopened on this field and blocked \
+                       the fill's follow-up; chrome-use closed it and confirmed the field holds \
+                       the value. Focus has left the field, so `press Enter` needs `--selector` \
+                       to reach it."
+        .to_string();
+    if cmd.get("observe").and_then(Value::as_bool) == Some(true) {
+        warning.push_str(
+            " No --observe change list: the block cut the observation short; run `snapshot -i` \
+             to see the page.",
+        );
+    }
+    Some(json!({
+        "id": cmd.get("id").cloned().unwrap_or(Value::Null),
+        "success": true,
+        "data": { "filled": selector, "verifiedAfterBlock": true },
+        "warning": warning,
+    }))
 }
 
 /// Commands that leave the page as they found it, or set it to the same end
