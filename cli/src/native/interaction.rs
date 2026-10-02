@@ -351,7 +351,14 @@ pub async fn click_reporting(
                 iframe_sessions,
             )
             .await
-            .map_err(|dom_err| format!("{e}\n(DOM-dispatch fallback also failed: {dom_err})"))?;
+            .map_err(|dom_err| {
+                // The same cause (an unknown ref) fails both paths; say it once.
+                if dom_err == e {
+                    e.clone()
+                } else {
+                    format!("{e}\n(DOM-dispatch fallback also failed: {dom_err})")
+                }
+            })?;
             // The daemon's stderr is not the caller's: the reason has to travel
             // in the response or nobody sees that the click was not a real one.
             let first_line = e.lines().next().unwrap_or("").trim().to_string();
@@ -984,10 +991,7 @@ pub async fn fill_reporting(
         &mut engine,
     )
     .await
-    .map(|()| FillOutcome {
-        engine,
-        warning: None,
-    })
+    .map(|warning| FillOutcome { engine, warning })
 }
 
 /// The trusted half of [`fill_reporting`] for a text `<input>`/`<textarea>`
@@ -1015,13 +1019,10 @@ async fn fill_input_trusted(
     };
     if inserted.is_ok() {
         let _ = call_on(client, session_id, object_id, FILL_TRUSTED_TAIL_JS).await;
-        if verify_fill_value(client, session_id, object_id, value, "input")
-            .await
-            .is_ok()
-        {
+        if let Ok(actual) = verify_fill_value(client, session_id, object_id, value, "input").await {
             return Ok(FillOutcome {
                 engine: "input".to_string(),
-                warning: None,
+                warning: reformatted_warning(value, &actual),
             });
         }
     }
@@ -1047,23 +1048,35 @@ async fn fill_input_trusted(
         return Err(format!("fill failed: {}", ex.text));
     }
     let mut engine = "input".to_string();
-    finish_fill(client, session_id, object_id, value, &mut engine).await?;
+    let formatted = finish_fill(client, session_id, object_id, value, &mut engine).await?;
+    // Never echo a card number or password in the explanation (#372).
+    let sensitive = Box::pin(super::sensitive::is_sensitive_object(
+        client, session_id, object_id,
+    ))
+    .await;
     let why = match (&inserted, trusted_read) {
         (Err(e), _) => format!("the trusted insert failed ({e})"),
         (Ok(()), Some(actual)) => format!(
             "typing it the way a user does left {} in the field (a maxlength, mask or \
              formatter rewrote it)",
-            quote_short(&actual)
+            if sensitive {
+                super::sensitive::masked(&actual)
+            } else {
+                quote_short(&actual)
+            }
         ),
         (Ok(()), None) => "typing it the way a user does did not produce it".to_string(),
     };
     Ok(FillOutcome {
         engine: format!("{engine}-synthetic"),
-        warning: Some(format!(
+        warning: Some(join_warnings(
+            format!(
             "the field holds the value, but {why}, so it was written with the value setter and \
              synthetic events (isTrusted=false). A page that only honours real input will not \
              have registered it; check the page's own state (e.g. a Save button enabling) \
              before relying on it"
+            ),
+            formatted,
         )),
     })
 }
@@ -1364,13 +1377,13 @@ async fn finish_fill(
     object_id: &str,
     value: &str,
     engine: &mut String,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let effective_session_id = session_id.to_string();
     let object_id = object_id.to_string();
     if engine.as_str() == "monaco-unsupported" {
         *engine =
             fill_monaco_via_clipboard(client, &effective_session_id, &object_id, value).await?;
-        return Ok(());
+        return Ok(None);
     }
 
     // Contenteditable rich editors (DraftJS / Lexical / ProseMirror): the JS above
@@ -1456,7 +1469,7 @@ async fn finish_fill(
     //
     // So: one re-apply, without touching focus, and then the SAME verification.
     // Nothing is reported as filled that the field does not actually hold.
-    if let Err(first) = verify_fill_value(
+    match verify_fill_value(
         client,
         &effective_session_id,
         &object_id,
@@ -1465,36 +1478,37 @@ async fn finish_fill(
     )
     .await
     {
-        if !value.is_empty() && first.contains("read back an empty value") {
-            let reapplied = reapply_value_without_focus_change(
-                client,
-                &effective_session_id,
-                &object_id,
-                value,
-            )
-            .await
-            .is_ok();
-            if !reapplied {
-                return Err(first);
+        Ok(actual) => Ok(reformatted_warning(value, &actual)),
+        Err(first) => {
+            if !value.is_empty() && first.contains("read back an empty value") {
+                let reapplied = reapply_value_without_focus_change(
+                    client,
+                    &effective_session_id,
+                    &object_id,
+                    value,
+                )
+                .await
+                .is_ok();
+                if !reapplied {
+                    return Err(first);
+                }
+                let actual = verify_fill_value(
+                    client,
+                    &effective_session_id,
+                    &object_id,
+                    value,
+                    engine.as_str(),
+                )
+                .await?;
+                // Say which path produced the value: a control that needed this is
+                // one whose focus handler fights writes, and the caller may need to
+                // know that before pressing Enter into it.
+                *engine = format!("{engine}+refocus-reset");
+                return Ok(reformatted_warning(value, &actual));
             }
-            verify_fill_value(
-                client,
-                &effective_session_id,
-                &object_id,
-                value,
-                engine.as_str(),
-            )
-            .await?;
-            // Say which path produced the value: a control that needed this is
-            // one whose focus handler fights writes, and the caller may need to
-            // know that before pressing Enter into it.
-            *engine = format!("{engine}+refocus-reset");
-            return Ok(());
+            Err(first)
         }
-        return Err(first);
     }
-
-    Ok(())
 }
 
 /// Write the value once more with the native setter, firing `input`/`change`
@@ -2025,7 +2039,7 @@ async fn verify_fill_value(
     object_id: &str,
     expected: &str,
     engine: &str,
-) -> Result<(), String> {
+) -> Result<String, String> {
     // Let framework-controlled inputs and editor models finish their synchronous
     // update plus the next paint before reading the authoritative value back.
     wait_for_paint_settled(client, session_id).await;
@@ -2068,13 +2082,81 @@ async fn verify_fill_value(
     // HTML text controls normalize CRLF to LF. Compare that standardized form
     // while preserving every other byte, including leading spaces in YAML.
     if !fill_values_match(expected, actual, engine) {
-        return Err(format!(
-            "fill verification failed for {engine}: {}",
+        // Card numbers, CVCs and passwords stay out of the error text (#372).
+        let detail = if actual.is_empty() && !expected.is_empty() {
+            // Keep this marker: `finish_fill` keys its refocus-reset recovery
+            // on it. It carries no value.
+            "read back an empty value after writing (value hidden)".to_string()
+        } else if Box::pin(super::sensitive::is_sensitive_object(
+            client, session_id, object_id,
+        ))
+        .await
+        {
+            format!(
+                "the field holds {} chars after writing {} (values hidden: card / password field)",
+                actual.chars().count(),
+                expected.chars().count()
+            )
+        } else {
             fill_mismatch_detail(expected, actual)
-        ));
+        };
+        return Err(format!("fill verification failed for {engine}: {detail}"));
     }
 
-    Ok(())
+    Ok(actual.to_string())
+}
+
+/// Whether `actual` is `expected` as a formatting input shows it: the same
+/// characters once spaces and the usual separators are dropped. Stripe turns
+/// an expiry `1234` into `12 / 34` and a card number into groups of four
+/// (#374); the value took, the field only displays it differently.
+///
+/// Single-line inputs only, and only when the page ADDED separators: a field
+/// that lost characters (YAML indentation, a newline in an editor) is still a
+/// failed fill.
+fn same_after_formatting(expected: &str, actual: &str, engine: &str) -> bool {
+    // Single-line only, on both sides: a newline the page inserted is a
+    // change to the content, not formatting.
+    if !engine.starts_with("input")
+        || expected.contains(['\n', '\r'])
+        || actual.contains(['\n', '\r'])
+        || expected.is_empty()
+    {
+        return false;
+    }
+    let is_sep = |c: char| c.is_whitespace() || matches!(c, '/' | '-' | '.' | '(' | ')');
+    // Every requested character must still be there, in order; the only
+    // extra characters allowed are separators the page inserted. A dropped
+    // sign or decimal point cannot be made up for by an added space.
+    let mut want = expected.chars().peekable();
+    for c in actual.chars() {
+        if want.peek() == Some(&c) {
+            want.next();
+        } else if !is_sep(c) {
+            return false;
+        }
+    }
+    want.peek().is_none()
+}
+
+/// The synthetic-write note plus a reformatting note, when there is one.
+fn join_warnings(main: String, extra: Option<String>) -> String {
+    match extra {
+        Some(e) => format!("{main}. Also: {e}"),
+        None => main,
+    }
+}
+
+/// A note for a fill the page reformatted, without echoing either value.
+fn reformatted_warning(expected: &str, actual: &str) -> Option<String> {
+    (expected.replace("\r\n", "\n") != actual.replace("\r\n", "\n")).then(|| {
+        format!(
+            "the page reformatted the value ({} chars written, the field shows {}); \
+             compared ignoring spaces and separators",
+            expected.chars().count(),
+            actual.chars().count()
+        )
+    })
 }
 
 /// Describe a fill/type read-back mismatch so truncation is VISIBLE: what was
@@ -2333,6 +2415,7 @@ fn fill_values_match(expected: &str, actual: &str, engine: &str) -> bool {
             .eq(normalized_expected.split_whitespace())
     } else {
         normalized_actual == normalized_expected
+            || same_after_formatting(&normalized_expected, &normalized_actual, engine)
     }
 }
 
@@ -4820,6 +4903,29 @@ mod tests {
             "monaco"
         ));
         assert!(!fill_values_match("  yaml", " yaml", "input"));
+    }
+
+    #[test]
+    fn test_fill_verification_accepts_a_page_that_only_added_separators() {
+        // Stripe Elements (#374): the value took, the field displays it grouped.
+        assert!(fill_values_match("1234", "12 / 34", "input"));
+        assert!(fill_values_match(
+            "4242424242424242",
+            "4242 4242 4242 4242",
+            "input"
+        ));
+        assert!(fill_values_match("5551234567", "(555) 123-4567", "input"));
+        // A different value, a dropped character, or an editor: still a failure.
+        assert!(!fill_values_match("1234", "12 / 35", "input"));
+        assert!(!fill_values_match("12345", "12 / 34", "input"));
+        assert!(!fill_values_match("1234", "12 / 34", "monaco"));
+        assert!(!fill_values_match("a b", "ab", "input"));
+        // A removed sign or decimal point, or a replaced space, is a change.
+        assert!(!fill_values_match("-12", "12 ", "input"));
+        assert!(!fill_values_match("1.5", "1 5", "input"));
+        assert!(!fill_values_match("12 34", "12-34", "input"));
+        assert!(fill_values_match("12/34", "12 / 34", "input"));
+        assert!(!fill_values_match("1234", "12\n34", "input"));
     }
 
     /// Verify that `char_to_key_info` returns the correct (key, code,
