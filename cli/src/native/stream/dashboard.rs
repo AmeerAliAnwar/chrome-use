@@ -174,6 +174,47 @@ fn header_matches_host(request: &str, header_name: &str) -> Option<bool> {
     Some(authority == host)
 }
 
+/// Hostnames that always reach the dashboard: loopback names a remote page
+/// cannot make its own.
+fn is_loopback_host(host: &str) -> bool {
+    let h = host.trim_start_matches('[').trim_end_matches(']');
+    h == "localhost"
+        || h.ends_with(".localhost")
+        || h == "::1"
+        || h.parse::<std::net::Ipv4Addr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// The request's Host, without port, is loopback or explicitly allowed via
+/// `AGENT_BROWSER_DASHBOARD_ALLOWED_HOSTS` (comma-separated exact hostnames,
+/// for a reverse proxy such as a Coder workspace). A missing Host is refused.
+fn is_allowed_dashboard_host(request: &str) -> bool {
+    let allowed = std::env::var("AGENT_BROWSER_DASHBOARD_ALLOWED_HOSTS").unwrap_or_default();
+    host_allowed(request, &allowed)
+}
+
+fn host_allowed(request: &str, allowed: &str) -> bool {
+    let Some(host) = request_header_value(request, "host").map(normalize_host_authority) else {
+        return false;
+    };
+    let name = host_without_port(&host);
+    is_loopback_host(&name)
+        || allowed
+            .split(',')
+            .map(|h| h.trim().to_ascii_lowercase())
+            .any(|h| !h.is_empty() && h == name)
+}
+
+fn host_without_port(host: &str) -> String {
+    if let Some(end) = host.rfind(']') {
+        return host[..=end].to_string();
+    }
+    match host.rsplit_once(':') {
+        Some((name, port)) if port.chars().all(|c| c.is_ascii_digit()) => name.to_string(),
+        _ => host.to_string(),
+    }
+}
+
 /// Validates that a proxied WebSocket request either has no Origin header or
 /// presents an Origin whose authority matches the request Host header.
 fn is_same_origin_ws_request(request: &str) -> bool {
@@ -442,14 +483,53 @@ pub async fn run_dashboard_server(port: u16) {
     }
 }
 
+/// Peek until the request's header block is complete (`\r\n\r\n`), the
+/// buffer is full, or a short deadline passes. One `peek` returns whatever
+/// bytes have arrived, which may be just the request line; the Host and
+/// Origin checks need the whole header block. Nothing is consumed, so routing
+/// and the WebSocket handshake still see every byte.
+async fn peek_request_headers(stream: &tokio::net::TcpStream, buf: &mut [u8]) -> usize {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let n = match stream.peek(buf).await {
+            Ok(n) => n,
+            Err(_) => return 0,
+        };
+        if n == 0
+            || n == buf.len()
+            || buf[..n].windows(4).any(|w| w == b"\r\n\r\n")
+            || tokio::time::Instant::now() >= deadline
+        {
+            return n;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
 async fn handle_dashboard_connection(mut stream: tokio::net::TcpStream) {
     let mut buf = vec![0u8; 8192];
-    let peeked_len = match stream.peek(&mut buf).await {
-        Ok(n) if n > 0 => n,
+    let peeked_len = match peek_request_headers(&stream, &mut buf).await {
+        n if n > 0 => n,
         _ => return,
     };
     let peeked_request = String::from_utf8_lossy(&buf[..peeked_len]);
     let (peeked_method, peeked_path) = parse_request_method_and_path(&peeked_request);
+
+    // DNS rebinding: a web page whose own hostname resolves to 127.0.0.1 sends
+    // `Host: evil.example` and a matching Origin, so "Origin equals Host"
+    // passes and the page could watch and drive the user's real Chrome. Only
+    // loopback names, or hosts the user explicitly allowed for a reverse
+    // proxy, may talk to the dashboard at all.
+    if !is_allowed_dashboard_host(&peeked_request) {
+        write_json_error_response_no_cors(
+            &mut stream,
+            "403 Forbidden",
+            "Host is not a loopback name. To reach the dashboard through a reverse proxy, \
+             list its hostname in AGENT_BROWSER_DASHBOARD_ALLOWED_HOSTS.",
+        )
+        .await;
+        return;
+    }
 
     if peeked_path.starts_with("/api/session/") {
         let (port, endpoint) = match parse_session_proxy_route(peeked_path) {
@@ -867,6 +947,68 @@ mod tests {
     fn test_cross_origin_ws_request_rejected() {
         let req = "GET /api/session/9222/stream HTTP/1.1\r\nHost: localhost:4848\r\nOrigin: https://evil.com\r\nUpgrade: websocket\r\n\r\n";
         assert!(!is_same_origin_ws_request(req));
+    }
+
+    /// The Host header arriving in a second packet is still read (review of
+    /// the DNS-rebinding fix): the request is not refused as Host-less.
+    #[tokio::test]
+    async fn a_host_header_in_a_later_packet_is_still_seen() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            handle_dashboard_connection(stream).await;
+        });
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(b"GET /api/sessions HTTP/1.1\r\n")
+            .await
+            .unwrap();
+        client.flush().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        client
+            .write_all(b"Host: localhost:4848\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.read_to_end(&mut response),
+        )
+        .await;
+        let head = String::from_utf8_lossy(&response);
+        assert!(!head.starts_with("HTTP/1.1 403"), "{head}");
+        server.abort();
+    }
+
+    #[test]
+    fn dns_rebinding_hosts_are_refused() {
+        let rebinding = "GET /api/session/9222/stream HTTP/1.1\r\nHost: evil.example:4848\r\nOrigin: http://evil.example:4848\r\nUpgrade: websocket\r\n\r\n";
+        // Same-origin on its face, which is why the old check let it through.
+        assert!(is_same_origin_ws_request(rebinding));
+        assert!(!host_allowed(rebinding, ""));
+        // Loopback names pass; an explicit reverse-proxy host passes only when listed.
+        for host in [
+            "localhost:4848",
+            "127.0.0.1:4848",
+            "[::1]:4848",
+            "dashboard.chrome-use.localhost",
+        ] {
+            let req = format!("GET / HTTP/1.1\r\nHost: {host}\r\n\r\n");
+            assert!(host_allowed(&req, ""), "{host}");
+        }
+        let coder = "GET / HTTP/1.1\r\nHost: workspace.coder.com\r\n\r\n";
+        assert!(!host_allowed(coder, ""));
+        assert!(host_allowed(coder, "workspace.coder.com, other.example"));
+        assert!(!host_allowed(
+            "GET / HTTP/1.1\r\n\r\n",
+            "workspace.coder.com"
+        ));
+        assert!(!host_allowed(
+            "GET / HTTP/1.1\r\nHost: 127.0.0.1.evil.example\r\n\r\n",
+            ""
+        ));
     }
 
     #[test]
