@@ -1,8 +1,41 @@
 # Changelog
 
-## 1.5.149
+## 1.5.150
 
 <!-- release:start -->
+### Security
+
+- **The dashboard refuses DNS-rebinding requests.** It only checked that `Origin` matched `Host`, which a page whose own hostname resolves to 127.0.0.1 satisfies, so while `chrome-use dashboard` ran such a page could watch and drive the browser through the stream proxy. Every request now needs a loopback `Host` (`localhost`, `*.localhost`, `127.x`, `::1`) or one listed in `AGENT_BROWSER_DASHBOARD_ALLOWED_HOSTS`. (#380)
+- **Card numbers, CVCs, passwords and one-time codes are masked.** `snapshot` and `get value` print `<filled N chars>` for a field marked sensitive by `autocomplete`, `type=password`, its `name`/`id` or its label; `--reveal-values` prints the value. A fill mismatch on such a field no longer echoes either value. (#372)
+
+### New Features
+
+- **New tabs inherit the session's setup.** User agent, locale, timezone, geolocation, offline mode, extra headers, HTTP credentials, emulated media, init scripts and request interception now apply to `tab new`, `click --new-tab`, `open --new-tab`, popups and `tab duplicate` too. `tab new <url>` opens a blank tab, applies the setup, then navigates, so the first request already carries it. `addinitscript` now returns a handle `init-script-N`. (#382, upstream #1777)
+- **`auth login --no-navigate`** fills the login form on the current page instead of opening the saved URL. It works only on the credential's own origin, and only in a tab this session opened or adopted. It stops if the page moves to another origin before it submits. (#382)
+- **`--observe` lists the resources an action fetched**, and an action that changed nothing but loaded a known human-check script (OpenAI Sentinel, hCaptcha, Turnstile, reCAPTCHA, Arkose, DataDome, HUMAN, GeeTest) reports `blocked_by_human_check` with the vendor and says to hand off. (#377, #378)
+- **A tab Chrome discarded is followed (ab-connect 0.5.29).** Memory Saver and `tabs.discard` give a tab a new id, and the relay reported the session's tab as gone. The extension now follows the replacement, reloads a discarded tab in the background (never activating it) and keeps the session on it. Needs the 0.5.29 extension. (#381)
+- `AGENT_BROWSER_DASHBOARD_ALLOWED_HOSTS` allows extra dashboard hostnames, for a reverse proxy. (#380)
+- `KERNEL_PROFILE_SAVE_CHANGES` for the Kernel provider. (#380, upstream #2004)
+
+### Bug Fixes
+
+- **`auth login` fills the field it means to and checks before submitting.** It picks the first visible, enabled, editable match and tags that exact element. Before pressing submit it checks the username still holds its value, the password is filled, and focus has not moved to another input; otherwise it stops with "auth login stopped before submitting". (#382)
+- **A password manager's inline menu over a field** is named in the error. For a session tab in front, the daemon closes the menu and repeats the command when that is harmless (reads, `fill`, `select`, `check`; never clicks or keys). A background tab is never brought forward; the error gives the command to do it. (#373)
+- `fill` accepts a single-line input where the page only added spaces or separators (`1234` → `12 / 34`), with a note. (#374)
+- A select left on a placeholder reads `(nothing selected; shows "Select")`, invalid fields are marked `invalid`, and validation messages inside cross-origin frames are found. (#375)
+- A failed snapshot keeps the previous refs; a "NO snapshot refs" error names the session and the live sessions. `diff snapshot` / `diff url` no longer leave refs half-updated on failure. (#376, #380)
+- `select` matches labels with zero-width characters or NBSPs, prefers an exact value over another option's label, and fails when any requested value matches nothing. Snapshot text shows an NBSP as a space instead of gluing words together. (#380, upstream #1736)
+- `wait --load` and `wait domcontentloaded` resolve at once when the page has already loaded. (#380, upstream #1554)
+- A CDP reply that does not parse fails its command at once instead of after the 30s timeout. (#381, upstream #1739)
+- A `--launch` Chrome no longer freezes when its stderr pipe fills; `/dev/shm` is measured before `--disable-dev-shm-usage` is added; root WebSocket URLs with a query connect; `a11y` reports an invalid selector cleanly; the Kernel profile is sent in the shape the API expects; Windows ARM64 falls back to the x64 binary. (#380, upstream #2003 #1890 #1735 #1604 #2004 #1725)
+
+### Contributors
+
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.149
+
 ### New Features
 
 - **A site adapter is no longer bound by the ~8s budget of one command.** An adapter ran as a single awaited eval, which over the extension relay is cut off at about 8 seconds, so an upload or a publish had to return `status: "incomplete"` and be rerun by the caller. It now runs in the background of the page and is polled. `--timeout <300|90s|10m>` sets the total time (default: the adapter's `@meta.timeout` in seconds, else 120s). Progress the adapter reports with `args.progress(...)` is printed to stderr and returned as `progress` with `attempts` and `elapsedMs`; `args.budgetMs` tells the adapter how long the run has. Existing adapters run unchanged. (#366)
@@ -18,7 +51,6 @@
 ### Contributors
 
 - @leeguooooo
-<!-- release:end -->
 
 ## 1.5.148
 
