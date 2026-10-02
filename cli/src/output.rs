@@ -2189,8 +2189,9 @@ selector — `click 449 320` clicks the pixel point (no element needed).
 
 Options:
   --coords <x>,<y>     Click a viewport coordinate (explicit form)
-  --new-tab            Open link in a new tab instead of navigating current tab
-                       (only works on elements with href attribute)
+  --new-tab            Open link in a new tab instead of navigating current tab.
+                       The new tab inherits session setup before its first load.
+                       Only works on elements with an href attribute.
 
 Global Options:
   --json               Output as JSON
@@ -3385,9 +3386,9 @@ Settings:
   viewport <w> <h> [scale]   Set viewport size (scale = deviceScaleFactor, e.g. 2 for retina)
   device <name>              Emulate device (e.g., "iPhone 12")
   geo <lat> <lng>            Set geolocation
-  offline [on|off]           Toggle offline mode
-  headers <json>             Set extra HTTP headers
-  credentials <user> <pass>  Set HTTP authentication
+  offline [on|off]           Toggle offline mode; off restores the new-tab default
+  headers <json>             Set extra HTTP headers; use {} to clear them for new tabs
+  credentials <user> <pass>  Set HTTP authentication for current and future tabs
   media [dark|light]         Set color scheme preference
         [reduced-motion]     Enable reduced motion
 
@@ -3571,6 +3572,11 @@ extension. It restores the previously visible foreground tab when complete.
 The duplicate becomes chrome-use's internal active tab. There is no URL-based
 fallback for launched Chrome, raw CDP, Lightpanda, or cloud providers.
 
+Tabs opened with `tab new`, `click --new-tab` or `open --new-tab` inherit the
+session's user agent, headers, HTTP credentials, init scripts, routes, and
+emulation overrides before their first document loads. A popup the page opens
+gets them once it is attached, so from its next document on.
+
 External and extension-connected Chrome tab rows are marked `created`,
 `adopted`, or `foreign`. Foreign tabs must be explicitly adopted before they
 can be selected. Adopted and foreign tabs cannot be closed by the session.
@@ -3690,9 +3696,16 @@ Save Options:
   --password-selector <s>  Custom CSS selector for password field
   --submit-selector <s>    Custom CSS selector for submit button
 
+Login Options:
+  --no-navigate            Fill the login page the tab is already on instead of
+                           opening the saved URL. Only on the credential's own
+                           origin, and only in a tab this session opened or adopted.
+
 Login behavior:
   auth login waits for form selectors to appear before filling/clicking.
   Selector wait timeout follows the default action timeout.
+  It fills the first visible, enabled field and checks the values are still in
+  place before it submits; otherwise it stops without submitting.
 
 Global Options:
   --json                   Output as JSON
@@ -3702,6 +3715,7 @@ Examples:
   echo "pass" | chrome-use auth save github --url https://github.com/login --username user --password-stdin
   chrome-use auth save github --url https://github.com/login --username user --password pass
   chrome-use auth login github
+  chrome-use auth login github --no-navigate
   chrome-use auth list
   chrome-use auth show github
   chrome-use auth delete github
@@ -4983,7 +4997,7 @@ SPA:
                              history.pushState + popstate/navigate events for other frameworks
 
 Init scripts:
-  removeinitscript <id>      Remove a script registered via --init-script or addinitscript
+  removeinitscript <id>      Remove a registered script from every tab in the session
 
 Batch:
   batch [--bail] ["cmd" ...]  Execute multiple commands sequentially (args or stdin)
@@ -5019,7 +5033,7 @@ Site adapters:  turn a website into a structured-data CLI (runs as you, in your 
 
 Auth Vault:
   auth save <name> [opts]    Save auth profile (--url, --username, --password/--password-stdin)
-  auth login <name>          Login using saved credentials (waits for form fields)
+  auth login <name> [opts]   Login using saved credentials (--no-navigate: fill the open page)
   auth list                  List saved auth profiles
   auth show <name>           Show auth profile metadata
   auth delete <name>         Delete auth profile
