@@ -1,8 +1,24 @@
 # Changelog
 
-## 1.5.150
+## 1.5.151
 
 <!-- release:start -->
+### Bug Fixes
+
+- **A native `<select>` left on its placeholder reads as nothing selected.** #375's check only looked one level below the combobox, but Chrome nests a native select's options two levels down, so a select on a disabled "Select…" option still read `: Select…`. It now reads `(nothing selected; shows "Select…")`. (#383)
+
+### Other
+
+- **The extension publishes itself.** Merging a new `extensions/ab-connect.zip` to main uploads it to the Chrome Web Store and submits it for review, with a service account on API v2 (the old OAuth token had silently expired since 0.5.27). A failed publish opens a `cws-publish` issue. ab-connect 0.5.29 is now in review. (#384)
+- **OpenAI plugin directory package** in `packaging/openai/` (`build.sh` writes the zip), and a `PRIVACY.md` listing exactly which requests chrome-use makes and what it keeps locally. It has no server and sends no telemetry. (#388)
+
+### Contributors
+
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.150
+
 ### Security
 
 - **The dashboard refuses DNS-rebinding requests.** It only checked that `Origin` matched `Host`, which a page whose own hostname resolves to 127.0.0.1 satisfies, so while `chrome-use dashboard` ran such a page could watch and drive the browser through the stream proxy. Every request now needs a loopback `Host` (`localhost`, `*.localhost`, `127.x`, `::1`) or one listed in `AGENT_BROWSER_DASHBOARD_ALLOWED_HOSTS`. (#380)
@@ -32,7 +48,6 @@
 ### Contributors
 
 - @leeguooooo
-<!-- release:end -->
 
 ## 1.5.149
 
