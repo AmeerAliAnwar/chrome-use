@@ -1,8 +1,26 @@
 # Changelog
 
-## 1.5.151
+## 1.5.152
 
 <!-- release:start -->
+### Features
+
+- **`fill <sel> --from-env <VAR>` fills a value from a password manager.** `bwu run --env PW='github.com#password' -- chrome-use fill @e3 --from-env PW` puts a Bitwarden secret into a field without it ever being an argument, output or part of the transcript. The value is treated as a secret wherever it lands: results, errors and the `--observe` snapshot show `<filled N chars>`, even on a field that does not look like a password, and the CLI drops the variable before starting a daemon so the daemon never holds it. The authentication guide now leads with this recipe.
+- **`upload` catches the file chooser a button opens.** On a drop zone with no `<input type=file>` in the DOM (the button creates one and opens the chooser at once), `upload` intercepts the chooser and fills it, without a native dialog. A single-file chooser refuses several files, and a wrong ref to a link or submit button is never clicked. (#386)
+
+### Bug Fixes
+
+- **A password manager's inline menu no longer locks a login tab.** With Bitwarden's menu open on a focused field, Chrome blocked debugger commands and recovery could not clear it: the field kept focus and the menu reopened at once. Recovery now takes focus out of the field (only when it repeats the command itself) and waits for the overlay to settle; a fill blocked on its follow-up is confirmed by reading the field. (#373)
+- **A click on a background tab says so.** When a click observes no change on a hidden page, the note says the tab is in the background and points to `tab select --activate`. Activating a tab warns when it hid a tab another live session created in the same window. (#385)
+- **Google's sign-in rejection is recognized.** `accounts.google.com/…/signin/rejected` is reported as `blocked_by_signin_rejection` on `open` and in observations, instead of looking like an ordinary page. (#387)
+
+### Contributors
+
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.151
+
 ### Bug Fixes
 
 - **A native `<select>` left on its placeholder reads as nothing selected.** #375's check only looked one level below the combobox, but Chrome nests a native select's options two levels down, so a select on a disabled "Select…" option still read `: Select…`. It now reads `(nothing selected; shows "Select…")`. (#383)
@@ -15,7 +33,6 @@
 ### Contributors
 
 - @leeguooooo
-<!-- release:end -->
 
 ## 1.5.150
 
