@@ -1,8 +1,19 @@
 # Changelog
 
-## 1.5.153
+## 1.5.154
 
 <!-- release:start -->
+### Documentation
+
+- **Touch ID is bitwarden-use's default, not a given.** bitwarden-use 0.8.0 added `require_touch_id false` for unattended runs. The authentication reference and the `auth login --bwu` notice said `bwu run` always asks; they now say it asks once by default, not for items in a reveal folder, and not at all when the user turned confirmation off. (#393)
+
+### Contributors
+
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.153
+
 ### Features
 
 - **`auth login --bwu` logs in with your Bitwarden vault.** On a login page it asks bitwarden-use (0.7.0+) which vault logins match the site. It sees them masked, most recently used first, and uses the only one or the one named with `--item`; several are listed for you to choose from. The values go through `bwu run`: you confirm once with Touch ID, chrome-use runs itself again with them in that process's environment, and the result lists the steps filled, never the values. Default steps are username, password and Enter. It waits for a password field that only appears after the username was sent, and fills the TOTP on a code page, including one opened separately and sites that submit the code themselves. An item's `_autotype` field (rofi-rbw syntax, e.g. `username:enter:delay:password:enter`) sets the steps instead. `--no-submit` fills only. A secret command's `secrets` list is scrubbed from its response entry by entry. (#391)
@@ -26,7 +37,6 @@
 ### Contributors
 
 - @leeguooooo
-<!-- release:end -->
 
 ## 1.5.152
 
