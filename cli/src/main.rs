@@ -1422,7 +1422,13 @@ fn main() {
     // temporary EMPTY profile (no cookies / no login). For logged-in sites the
     // user almost always wants --profile auto (their real Chrome profile).
     // Skipped under CI (force_launch is implicit there and login isn't expected).
-    if flags.force_launch && flags.profile.is_none() && env::var("CI").is_err() {
+    // Only when this call is the one that launches: repeated on every command
+    // of a running session it was the noise that taught agents `2>/dev/null`.
+    if flags.force_launch
+        && flags.profile.is_none()
+        && env::var("CI").is_err()
+        && !connection::daemon_ready(&flags.session)
+    {
         eprintln!(
             "⚠ --launch opens a fresh, isolated test profile (no cookies, no login, no \
              extensions). The window is labelled `chrome-use (<session>)` in Chrome's \
@@ -1434,12 +1440,28 @@ fn main() {
         );
     }
 
+    // `chrome-use help [command]` is what agents type for help.
+    if clean.first().map(String::as_str) == Some("help") {
+        clean.remove(0);
+        if let Some(cmd) = clean.first() {
+            if !print_command_help(cmd) {
+                output::print_help_excerpt(cmd);
+            }
+        } else {
+            print_help();
+        }
+        return;
+    }
     let has_help = args.iter().any(|a| a == "--help" || a == "-h");
     let has_version = args.iter().any(|a| a == "--version" || a == "-V");
 
     if has_help {
         if let Some(cmd) = clean.first() {
             if print_command_help(cmd) {
+                return;
+            }
+            if commands::is_known_command(cmd) {
+                output::print_help_excerpt(cmd);
                 return;
             }
         }
@@ -2264,7 +2286,7 @@ fn main() {
                 };
                 print_json_error_with_type(e.format(), error_type);
             } else {
-                eprintln!("{}", color::red(&e.format()));
+                output::print_error_line(&color::red(&e.format()));
             }
             exit(1);
         }
@@ -2357,7 +2379,7 @@ fn main() {
             if flags.json {
                 print_json_error(e);
             } else {
-                eprintln!("{} {}", color::error_indicator(), e);
+                output::print_error_line(&format!("{} {}", color::error_indicator(), e));
             }
             exit(1);
         }
@@ -3086,7 +3108,12 @@ fn main() {
             }
             if let Some(err) = resp.error.as_mut() {
                 if err.contains("has NO snapshot refs") {
-                    err.push_str(&flags::no_refs_session_hint(&flags));
+                    // Keep what to do last: agents read errors through `tail -1`.
+                    let hint = flags::no_refs_session_hint(&flags);
+                    match err.find(" Otherwise run") {
+                        Some(i) => err.insert_str(i, &hint.replacen('\n', " ", 1)),
+                        None => err.push_str(&hint),
+                    }
                 }
             }
             let success = resp.success;
@@ -3220,7 +3247,7 @@ fn main() {
             if flags.json {
                 print_json_error(e);
             } else {
-                eprintln!("{} {}", color::error_indicator(), e);
+                output::print_error_line(&format!("{} {}", color::error_indicator(), e));
             }
             exit(1);
         }
@@ -3350,7 +3377,7 @@ fn dispatch_script(flags: &Flags, cmd: serde_json::Value) {
             if flags.json {
                 print_json_error(e);
             } else {
-                eprintln!("{} {}", color::error_indicator(), e);
+                output::print_error_line(&format!("{} {}", color::error_indicator(), e));
             }
             exit(1);
         }

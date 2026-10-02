@@ -248,6 +248,58 @@ fn truncate_middle(s: &str, max: usize) -> String {
     format!("{head}…{tail} [{n} chars]")
 }
 
+/// An eval result as text. A string prints as itself, byte for byte, not as
+/// a JSON-quoted literal with `\n` escapes: agents read `innerText` that way,
+/// and a `JSON.stringify(...)` result came back encoded twice. It is never
+/// re-parsed, so key order and large numbers survive. A string that would
+/// read as something else (empty, or a bare number/true/false/null) keeps its
+/// quotes. Everything else is pretty JSON; `--json` keeps the exact value.
+fn eval_result_text(result: &serde_json::Value) -> String {
+    if let Some(text) = result.as_str() {
+        let ambiguous = text.is_empty()
+            || matches!(
+                serde_json::from_str::<serde_json::Value>(text),
+                Ok(serde_json::Value::Number(_)
+                    | serde_json::Value::Bool(_)
+                    | serde_json::Value::Null)
+            );
+        if !ambiguous {
+            return text.to_string();
+        }
+    }
+    serde_json::to_string_pretty(result).unwrap_or_default()
+}
+
+/// Print an error line for the caller. It goes to stderr; when stderr goes
+/// to /dev/null (`cmd 2>/dev/null | tail -1`, a quarter of agent calls) it
+/// goes to stdout as well, or the caller sees only the exit code.
+pub fn print_error_line(line: &str) {
+    eprintln!("{line}");
+    if stderr_is_discarded() {
+        println!("{line}");
+    }
+}
+
+/// Whether stderr goes to /dev/null, so an error printed only there would
+/// never reach the caller.
+fn stderr_is_discarded() -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match (
+            std::fs::metadata("/dev/fd/2"),
+            std::fs::metadata("/dev/null"),
+        ) {
+            (Ok(err), Ok(null)) => err.dev() == null.dev() && err.ino() == null.ino(),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
 pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &OutputOptions) {
     print_response_body(resp, action, opts);
     // Every successful text response gets its observation, including branches
@@ -293,15 +345,12 @@ fn print_response_body(resp: &Response, action: Option<&str>, opts: &OutputOptio
     }
 
     if !resp.success {
-        eprintln!(
-            "{} {}",
-            color::error_indicator(),
-            resp.error.as_deref().unwrap_or("Unknown error")
-        );
+        let error = resp.error.as_deref().unwrap_or("Unknown error");
+        print_error_line(&format!("{} {}", color::error_indicator(), error));
         // Still print dialog warning after errors, since a pending dialog
         // is the most common cause of commands timing out
         if let Some(ref warning) = resp.warning {
-            eprintln!("{} {}", color::warning_indicator(), warning);
+            print_error_line(&format!("{} {}", color::warning_indicator(), warning));
         }
         return;
     }
@@ -953,6 +1002,16 @@ fn print_response_body(resp: &Response, action: Option<&str>, opts: &OutputOptio
             println!("{}", checked);
             return;
         }
+        if action == Some("addinitscript") {
+            if let Some(handle) = data.get("identifier").and_then(|v| v.as_str()) {
+                println!(
+                    "{} {handle} (runs in pages loaded from now on; `reload` to apply it here, \
+                     `removeinitscript {handle}` to stop it)",
+                    color::success_indicator()
+                );
+                return;
+            }
+        }
         // Eval result
         if let Some(result) = data.get("result") {
             // Surface which page the eval actually ran on — to stderr, so it
@@ -991,7 +1050,7 @@ fn print_response_body(resp: &Response, action: Option<&str>, opts: &OutputOptio
                     color::dim(&format!("  done after {n} attempts, {secs}s"))
                 );
             }
-            let formatted = serde_json::to_string_pretty(result).unwrap_or_default();
+            let formatted = eval_result_text(result);
             print_with_boundaries(&formatted, origin, opts);
             return;
         }
@@ -3550,7 +3609,27 @@ Examples:
         }
 
         // === Tabs ===
-        "tab" => {
+        "addinitscript" | "removeinitscript" => {
+            r##"
+chrome-use addinitscript - Run a script in every page before its own scripts
+
+Usage: chrome-use addinitscript <js>
+       chrome-use addinitscript --file <path>
+       chrome-use removeinitscript <identifier>
+
+The script runs at document start in every page and frame the session opens
+from now on, including new tabs. It does not run in the page already loaded:
+`reload` to apply it there. addinitscript prints a handle (init-script-N);
+pass it to removeinitscript to stop it. `--init-script <path>` at launch does
+the same for the first page.
+
+Examples:
+  chrome-use addinitscript "window.__seen = []"
+  chrome-use addinitscript --file ./capture-fetch.js && chrome-use reload
+  chrome-use removeinitscript init-script-1
+"##
+        }
+        "tab" | "tabs" => {
             r##"
 chrome-use tab - Manage browser tabs
 
@@ -4776,7 +4855,48 @@ table and a full "Site adapters" section.
 }
 
 pub fn print_help() {
-    println!(
+    println!("{}", help_text());
+}
+
+/// Lines of the full help that mention `command`, for `<command> --help` when
+/// the command has no help page of its own. Agents asked `extension --help`,
+/// `tabs --help` and the like and got all 568 lines back.
+pub fn print_help_excerpt(command: &str) {
+    let text = help_text();
+    let mentions = |line: &str| {
+        line.match_indices(command).any(|(i, _)| {
+            let before = line[..i].chars().next_back();
+            let after = line[i + command.len()..].chars().next();
+            let edge =
+                |c: Option<char>| c.is_none_or(|c| !(c.is_alphanumeric() || c == '-' || c == '_'));
+            edge(before) && edge(after)
+        })
+    };
+    let all: Vec<&str> = text.lines().filter(|l| mentions(l)).collect();
+    let shown = all.len().min(30);
+    let lines = &all[..shown];
+    if lines.is_empty() {
+        println!(
+            "No help page for `{command}`, and the full help does not mention it. \
+             `chrome-use --help` lists every command."
+        );
+        return;
+    }
+    println!("chrome-use {command}: the lines of `chrome-use --help` that mention it\n");
+    for l in lines {
+        println!("{l}");
+    }
+    if all.len() > shown {
+        println!("… {} more lines mention it.", all.len() - shown);
+    }
+    println!("\nFull list: `chrome-use --help`.");
+}
+
+// `format!` with no arguments still unescapes the `{{`/`}}` in the text, as
+// the `println!` this replaced did.
+#[allow(clippy::useless_format)]
+pub fn help_text() -> String {
+    format!(
         r#"
 chrome-use - fast browser automation CLI for AI agents
 
@@ -5345,7 +5465,7 @@ iOS Simulator (requires Xcode and Appium):
 Hit a bug or rough edge? A 30-second issue genuinely sharpens this tool:
   https://github.com/leeguooooo/chrome-use/issues
 "#
-    );
+    )
 }
 
 /// A page that blocked the agent: a human check, or a sign-in rejection (#387).
@@ -5613,7 +5733,7 @@ pub fn print_version() {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_a11y_text, format_storage_text, print_command_help};
+    use super::{eval_result_text, format_a11y_text, format_storage_text, print_command_help};
     use serde_json::json;
 
     #[test]
@@ -5829,5 +5949,23 @@ mod tests {
         let rendered = format_a11y_text(&data);
         assert!(rendered.contains("  - #shadow-host >>> img"));
         assert!(rendered.contains("  - iframe -> #nested-image"));
+    }
+
+    #[test]
+    fn eval_strings_print_as_text_and_json_strings_parse_once() {
+        assert_eq!(eval_result_text(&json!("a\nb")), "a\nb");
+        // Never re-parsed: key order and big numbers stay as the page wrote them.
+        let s = "{\"z\":1,\"a\":2,\"id\":123456789012345678901234}";
+        assert_eq!(eval_result_text(&json!(s)), s);
+        assert_eq!(eval_result_text(&json!("{not json")), "{not json");
+        assert_eq!(eval_result_text(&json!(3)), "3");
+        // Strings that would read as another type keep their quotes.
+        assert_eq!(eval_result_text(&json!("")), "\"\"");
+        assert_eq!(eval_result_text(&json!("42")), "\"42\"");
+        assert_eq!(eval_result_text(&json!("null")), "\"null\"");
+        assert_eq!(
+            eval_result_text(&json!({"a": [1]})),
+            "{\n  \"a\": [\n    1\n  ]\n}"
+        );
     }
 }
