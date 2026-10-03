@@ -1,8 +1,20 @@
 # Changelog
 
-## 1.5.154
+## 1.5.155
 
 <!-- release:start -->
+### Bug Fixes
+
+- **`cookies clear` no longer wipes the whole browser when asked for one site.** It ignored every argument and cleared all cookies: `cookies clear --domain platform.openai.com` on a real Chrome profile signed the user out of GitHub, claude.ai, x.com and every other site, while printing `✓ Cookies cleared`. Now `--domain <d>` (or `--url <u>`, using its host) deletes that domain's and its subdomains' cookies and never a parent domain's, `--name` narrows it to one cookie, and the result says how many were cleared and where. Clearing every cookie needs `--all --yes`; without `--yes` nothing is deleted and it says how many cookies on how many sites would go. Unknown arguments to `cookies clear`, `get` and `set` are errors instead of being skipped. Partitioned cookies are deleted too. (#395)
+- **`auth login --bwu` no longer submits an empty 2FA form.** On a page that only asks for the code, the default steps pressed Enter before typing the code, which counted as a failed attempt (GitHub: "Two-factor authentication failed"). Codes are now typed once, without fill's rewrite, and a code the site rejects is reported as such, with its message. (#394)
+
+### Contributors
+
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.154
+
 ### Documentation
 
 - **Touch ID is bitwarden-use's default, not a given.** bitwarden-use 0.8.0 added `require_touch_id false` for unattended runs. The authentication reference and the `auth login --bwu` notice said `bwu run` always asks; they now say it asks once by default, not for items in a reveal folder, and not at all when the user turned confirmation off. (#393)
@@ -10,7 +22,6 @@
 ### Contributors
 
 - @leeguooooo
-<!-- release:end -->
 
 ## 1.5.153
 
