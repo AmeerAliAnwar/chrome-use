@@ -166,35 +166,21 @@
       <hr class="du-divider" />
 
       <!-- ============ Bitwarden ======= -->
-      <h2>从 Bitwarden 取密码与 passkey</h2>
-      <p>
-        当你需要真正的用户名 / 密码（或 passkey），而不是复用 cookie 时，姊妹工具
-        <a href="https://github.com/leeguooooo/bitwarden-use">bitwarden-use</a>（<code>bwu</code>）
-        能从 Bitwarden / Vaultwarden 保险库读出它们，让 agent 用凭证登录，而不只是走 OAuth。
-        <code>bwu get &lt;item&gt;</code> 返回密码（以及 2FA 验证码），<code>bwu fido2 get</code>
-        取出 passkey 私钥，用于接受 FIDO2 / WebAuthn passkey 的站点。
-      </p>
-
+      <h2>用 Bitwarden 密码与 passkey 登录</h2>
+      <p>在登录页运行 <code>auth login --bwu</code>，从 <a href="https://github.com/leeguooooo/bitwarden-use">bitwarden-use</a>（0.7.0+）选择当前网站的账号。多个账号匹配时加 <code>--item</code>。密码、TOTP 和私钥通过 <code>bwu run</code> 传给子进程，不放进参数或输出。</p>
+      <p>加 <code>--passkey</code> 只用密码库里的 passkey 登录（需 bwu 0.9.0+），不读取密码、TOTP 或自定义字段。普通密码登录也可用 passkey 完成两步验证。凭证装进标签页上的临时 WebAuthn 验证器，由 Chrome 签名，尝试结束后移除。仅支持签名计数器为 0 的同步型 passkey；非零计数器需要写回密码库，当前会拒绝。环境不支持 WebAuthn 时，普通登录回退到密码流程；passkey-only 登录报错。</p>
       <div class="du-code">
         <div class="du-code-head">
           <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
-          <span class="du-code-name">bwu · 密码 / passkey 直灌字段</span>
+          <span class="du-code-name">auth login --bwu</span>
         </div>
-<pre><code><span class="du-cmt"># 安装一次</span>
-<span class="du-prompt">$</span> curl -fsSL https://raw.githubusercontent.com/leeguooooo/bitwarden-use/main/install.sh | sh
-
-<span class="du-cmt"># 取某个条目的密码（及 2FA），直接 pipe 进输入框</span>
-<span class="du-prompt">$</span> bwu get github.com | chrome-use fill <span class="du-str">'#password'</span> <span class="du-flag">--stdin</span>
-
-<span class="du-cmt"># 站点需要 FIDO2 / WebAuthn passkey 时，取出 passkey 私钥</span>
-<span class="du-prompt">$</span> bwu fido2 get</code></pre>
+<pre><code><span class="du-prompt">$</span> curl -fsSL https://raw.githubusercontent.com/leeguooooo/bitwarden-use/main/install.sh | sh
+<span class="du-prompt">$</span> chrome-use open https://github.com/login
+<span class="du-prompt">$</span> chrome-use auth login <span class="du-flag">--bwu --item</span> github.com
+<span class="du-prompt">$</span> chrome-use auth login <span class="du-flag">--bwu --item</span> github.com <span class="du-flag">--passkey</span>
+<span class="du-prompt">$</span> chrome-use snapshot <span class="du-flag">-i</span></code></pre>
       </div>
-
-      <div class="du-callout tip">
-        <div class="du-callout-title">✅ 用 --stdin 把密码喂进字段</div>
-        <code>chrome-use fill '#password' --stdin</code> 从标准输入读取要填的值，
-        所以用 pipe 从 <code>bwu</code> 灌进去时，密码不会出现在命令行参数里，也不会进 history。
-      </div>
+      <p><code>--no-submit</code> 只填不提交，也不安装 passkey 验证器；不能与 <code>--passkey</code> 同用。签名成功不代表网站接受了登录，需用 <code>snapshot</code> 或网站的已认证状态确认目标页面。</p>
 
       <hr class="du-divider" />
 

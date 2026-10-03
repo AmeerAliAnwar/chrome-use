@@ -3797,6 +3797,7 @@ Usage: chrome-use auth <subcommand> [args]
 Subcommands:
   save <name>              Save credentials for a login profile
   login <name>             Login using saved credentials (waits for form fields)
+  login --bwu [opts]        Login on the current page from your Bitwarden vault
   list                     List saved profiles (names and URLs only)
   show <name>              Show profile metadata (no passwords)
   delete <name>            Delete a saved profile
@@ -3815,6 +3816,15 @@ Login Options:
                            opening the saved URL. Only on the credential's own
                            origin, and only in a tab this session opened or adopted.
 
+Bitwarden Login Options:
+  --bwu                    Use bitwarden-use (0.7.0+); reuse the current login page
+  --item <id|name>          Choose an account when the site has several
+  --passkey                Sign in with a vault passkey (bitwarden-use 0.9.0+)
+  --no-submit              Fill only; do not submit or install a passkey authenticator
+                           Cannot be combined with --passkey
+  Password login can answer TOTP or a supported passkey second factor.
+  A signed assertion is not proof of login; verify the authenticated destination.
+
 Login behavior:
   auth login waits for form selectors to appear before filling/clicking.
   Selector wait timeout follows the default action timeout.
@@ -3830,6 +3840,8 @@ Examples:
   chrome-use auth save github --url https://github.com/login --username user --password pass
   chrome-use auth login github
   chrome-use auth login github --no-navigate
+  chrome-use auth login --bwu
+  chrome-use auth login --bwu --item github.com --passkey
   chrome-use auth list
   chrome-use auth show github
   chrome-use auth delete github
@@ -5189,6 +5201,7 @@ Site adapters:  turn a website into a structured-data CLI (runs as you, in your 
 Auth Vault:
   auth save <name> [opts]    Save auth profile (--url, --username, --password/--password-stdin)
   auth login <name> [opts]   Login using saved credentials (--no-navigate: fill the open page)
+  auth login --bwu [opts]    Bitwarden login (--item, --passkey, --no-submit)
   auth list                  List saved auth profiles
   auth show <name>           Show auth profile metadata
   auth delete <name>         Delete auth profile
