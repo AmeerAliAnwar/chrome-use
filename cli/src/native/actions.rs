@@ -16816,13 +16816,22 @@ async fn handle_auth_login_bwu(cmd: &Value, state: &mut DaemonState) -> Result<V
         )
         .await;
 
-    if let Some(a) = &authenticator {
-        // The ceremony is over (check_passkey_accepted waited for its result):
-        // the private key does not outlive the login.
-        remove_passkeys(&mgr.client, &session_id, a).await;
+    // The ceremony is over (check_passkey_accepted waited for its result):
+    // the private key does not outlive the login. A cleanup that cannot be
+    // confirmed is an error even when the login itself went through.
+    let cleanup = match &authenticator {
+        Some(a) => remove_passkeys(&mgr.client, &session_id, a).await,
+        None => Ok(()),
+    };
+    match (outcome, cleanup) {
+        (Err(e), cleanup) => return Err(with_cleanup(e, cleanup)),
+        (Ok(()), Err(c)) => {
+            return Err(format!(
+                "auth login --bwu: the login may have gone through, but {c}"
+            ))
+        }
+        (Ok(()), Ok(())) => {}
     }
-
-    outcome?;
     if filled.is_empty() && passkey_state != "used" {
         return Err("auth login --bwu: found no login field on this page to fill".to_string());
     }
@@ -16989,12 +16998,13 @@ async fn install_passkeys(
         .and_then(|v| v["identifier"].as_str().map(str::to_string));
     let guard_now = auth_eval(client, session_id, NO_CREATE_JS.to_string()).await;
     if a.no_create_script.is_none() || guard_now != Ok(Some(Value::Bool(true))) {
-        remove_passkeys(client, session_id, &a).await;
-        return Err(
-            "auth login --bwu: could not guard the page against registering a passkey; \
-                    no authenticator was kept"
+        let cleanup = remove_passkeys(client, session_id, &a).await;
+        return Err(with_cleanup(
+            "auth login --bwu: could not guard the page against registering a passkey, so the \
+             passkey was not used"
                 .to_string(),
-        );
+            cleanup,
+        ));
     }
     for p in fits {
         let mut credential = json!({
@@ -17015,9 +17025,10 @@ async fn install_passkeys(
             )
             .await
         {
-            remove_passkeys(client, session_id, &a).await;
-            return Err(format!(
-                "auth login --bwu: Chrome refused the passkey ({e})"
+            let cleanup = remove_passkeys(client, session_id, &a).await;
+            return Err(with_cleanup(
+                format!("auth login --bwu: Chrome refused the passkey ({e})"),
+                cleanup,
             ));
         }
     }
@@ -17030,27 +17041,61 @@ async fn remove_passkeys(
     client: &super::cdp::client::CdpClient,
     session_id: &str,
     a: &PasskeyAuthenticator,
-) {
-    let _ = client
+) -> Result<(), String> {
+    // Every step runs; any failure is reported, so nothing claims the key is
+    // gone when that is not confirmed.
+    let mut failed: Vec<String> = Vec::new();
+    if let Err(e) = client
         .send_command(
             "WebAuthn.removeVirtualAuthenticator",
             Some(json!({ "authenticatorId": a.id })),
             Some(session_id),
         )
-        .await;
+        .await
+    {
+        failed.push(format!("removing the virtual authenticator: {e}"));
+    }
     if let Some(script) = &a.no_create_script {
-        let _ = client
+        if let Err(e) = client
             .send_command(
                 "Page.removeScriptToEvaluateOnNewDocument",
                 Some(json!({ "identifier": script })),
                 Some(session_id),
             )
-            .await;
+            .await
+        {
+            failed.push(format!("removing the create() guard script: {e}"));
+        }
     }
-    let _ = auth_eval(client, session_id, RESTORE_CREATE_JS.to_string()).await;
-    let _ = client
+    // A page that navigated away took the guard with it.
+    if let Err(e) = auth_eval(client, session_id, RESTORE_CREATE_JS.to_string()).await {
+        if !page_went_away(&e) {
+            failed.push(format!("restoring navigator.credentials.create: {e}"));
+        }
+    }
+    if let Err(e) = client
         .send_command("WebAuthn.disable", None, Some(session_id))
-        .await;
+        .await
+    {
+        failed.push(format!("disabling WebAuthn: {e}"));
+    }
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "could not confirm the temporary passkey authenticator was removed ({}); close this \
+             tab or browser to be sure the key is gone",
+            failed.join("; ")
+        ))
+    }
+}
+
+/// `err`, plus a note when the authenticator cleanup also failed.
+fn with_cleanup(err: String, cleanup: Result<(), String>) -> String {
+    match cleanup {
+        Ok(()) => err,
+        Err(c) => format!("{err}. Also: {c}"),
+    }
 }
 
 /// What this tab's authenticator did within `ms`. Only events for this
