@@ -916,6 +916,26 @@ fn print_response_body(resp: &Response, action: Option<&str>, opts: &OutputOptio
             return;
         }
         // Count
+        // Before the generic `count` printer, which would print a bare number.
+        if action == Some("cookies_clear") {
+            let n = data.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+            let detail = match data.get("domains").and_then(|v| v.as_array()) {
+                Some(d) if !d.is_empty() => format!(
+                    " on {}",
+                    d.iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                Some(_) => " (no cookie matched)".to_string(),
+                None => match data.get("sites").and_then(|v| v.as_u64()) {
+                    Some(s) => format!(" across {s} sites (the whole browser)"),
+                    None => String::new(),
+                },
+            };
+            println!("{} Cleared {n} cookies{detail}", color::success_indicator());
+            return;
+        }
         if let Some(count) = data.get("count").and_then(|v| v.as_i64()) {
             println!("{}", count);
             return;
@@ -1437,7 +1457,6 @@ fn print_response_body(resp: &Response, action: Option<&str>, opts: &OutputOptio
         if let Some(cleared) = data.get("cleared").and_then(|v| v.as_bool()) {
             if cleared {
                 let label = match action {
-                    Some("cookies_clear") => "Cookies cleared",
                     Some("console") => "Console log cleared",
                     _ => "Request log cleared",
                 };
@@ -3566,7 +3585,11 @@ Manage browser cookies for the current context.
 Operations:
   get                                Get all cookies (default)
   set <name> <value> [options]       Set a cookie with optional properties
-  clear                              Clear all cookies
+  clear --domain <domain>            Clear one site's cookies (and its subdomains')
+  clear --url <url>                  Same, for the host of <url> (never parent domains)
+        [--name <cookie>]            ...only the cookie with this name
+  clear --all --yes                  Clear EVERY cookie in the browser (on a real
+                                     profile this signs you out of every site)
 
 Cookie Set Options:
   --url <url>                        URL for the cookie (allows setting before page load)
@@ -3603,8 +3626,11 @@ Examples:
   # Get all cookies
   chrome-use cookies
 
-  # Clear all cookies
-  chrome-use cookies clear
+  # Clear one site's cookies (the site and its subdomains, not parent domains)
+  chrome-use cookies clear --domain example.com
+
+  # Clear EVERY cookie in the browser (on a real profile: signed out everywhere)
+  chrome-use cookies clear --all --yes
 "##
         }
 

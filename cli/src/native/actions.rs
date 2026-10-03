@@ -2038,7 +2038,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
             "cookies_get" => handle_cookies_get(cmd, state).await,
             "cf_status" => handle_cf_status(cmd, state).await,
             "cookies_set" => handle_cookies_set(cmd, state).await,
-            "cookies_clear" => handle_cookies_clear(state).await,
+            "cookies_clear" => handle_cookies_clear(cmd, state).await,
             "storage_get" => handle_storage_get(cmd, state).await,
             "storage_set" => handle_storage_set(cmd, state).await,
             "storage_clear" => handle_storage_clear(cmd, state).await,
@@ -7975,11 +7975,83 @@ async fn handle_cookies_set(cmd: &Value, state: &DaemonState) -> Result<Value, S
     Ok(json!({ "set": true }))
 }
 
-async fn handle_cookies_clear(state: &DaemonState) -> Result<Value, String> {
+/// `cookies clear`: one site's cookies (`domain`, or the host of `url`; that
+/// host and its subdomains, never a parent domain), optionally only `name`.
+/// Every cookie in the browser only with `all` and `yes`; without `yes`, or
+/// with anything else alongside `all`, it removes nothing and says why.
+async fn handle_cookies_clear(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
-    cookies::clear_cookies(&mgr.client, &session_id).await?;
-    Ok(json!({ "cleared": true }))
+    let str_arg = |k: &str| cmd.get(k).and_then(Value::as_str).map(str::to_string);
+    let flag = |k: &str| cmd.get(k).and_then(Value::as_bool) == Some(true);
+    let name = str_arg("name");
+    let scope = str_arg("domain").or_else(|| str_arg("url"));
+
+    let Some(scope) = scope else {
+        // A full clear. An older CLI sends a bare `cookies_clear`; that, a
+        // missing `yes`, and a `name` (which a full clear would ignore) all
+        // stop here without deleting anything.
+        let all = cookies::get_all_cookies(&mgr.client, &session_id).await?;
+        let sites = cookies::cookie_sites(&all);
+        if name.is_some() {
+            return Err(
+                "cookies clear --name needs --domain or --url: a full clear would \
+                        ignore it and delete every cookie"
+                    .to_string(),
+            );
+        }
+        if !(flag("all") && flag("yes")) {
+            return Err(format!(
+                "cookies clear --all would delete all {} cookies in this browser, across {} \
+                 sites{}. On a real Chrome profile that signs the user out of every one of \
+                 them. To clear one site use `cookies clear --domain <domain>`; to really clear \
+                 everything add `--all --yes`.",
+                all.len(),
+                sites.len(),
+                cookies::site_sample(&sites)
+            ));
+        }
+        cookies::clear_cookies(&mgr.client, &session_id).await?;
+        return Ok(json!({ "cleared": true, "count": all.len(), "sites": sites.len() }));
+    };
+    let domain = cookies::normalize_domain(&scope)
+        .ok_or_else(|| format!("cookies clear: `{scope}` is not a domain or URL"))?;
+
+    let all = cookies::get_all_cookies(&mgr.client, &session_id).await?;
+    let targets: Vec<cookies::Cookie> = all
+        .into_iter()
+        .filter(|c| cookies::domain_matches(&c.domain, &domain))
+        .filter(|c| name.as_deref().is_none_or(|n| c.name == n))
+        .collect();
+    let results = futures_util::future::join_all(
+        targets
+            .iter()
+            .map(|c| cookies::delete_cookie(&mgr.client, &session_id, c)),
+    )
+    .await;
+    let mut cleared = Vec::new();
+    let mut failed = Vec::new();
+    for (c, r) in targets.into_iter().zip(results) {
+        match r {
+            Ok(()) => cleared.push(c),
+            Err(e) => failed.push(format!("{} on {}: {e}", c.name, c.domain)),
+        }
+    }
+    let domains = cookies::cookie_sites(&cleared);
+    if !failed.is_empty() {
+        return Err(format!(
+            "cookies clear deleted {} cookies on {} but {} failed: {}",
+            cleared.len(),
+            if domains.is_empty() {
+                "nothing".to_string()
+            } else {
+                domains.join(", ")
+            },
+            failed.len(),
+            failed.join("; ")
+        ));
+    }
+    Ok(json!({ "cleared": true, "count": cleared.len(), "domains": domains, "domain": domain }))
 }
 
 // Detect whether the active page is *currently* a Cloudflare challenge
