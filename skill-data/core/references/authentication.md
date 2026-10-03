@@ -86,6 +86,7 @@ chrome-use open https://github.com/login
 chrome-use auth login --bwu                 # the only vault login for this site
 chrome-use auth login --bwu --item <id>     # one of several; the error lists them
 chrome-use auth login --bwu --no-submit     # fill only, press nothing
+chrome-use auth login --bwu --passkey       # sign in with the vault passkey
 ```
 
 - **Picking the account.** It asks `bwu login --domain <page> --list`, which
@@ -111,7 +112,17 @@ chrome-use auth login --bwu --no-submit     # fill only, press nothing
   `delay` (1 s), or another custom field's name, which is typed into the
   focused field. Example: `username:enter:delay:password:enter`. It is the same
   syntax as rofi-rbw's.
-- Result: `{"item", "filled": [...], "submitted", "otp": "filled" | "not asked" | "none", "url"}`.
+- **Passkeys (bwu 0.9.0+).** If the vault item has a passkey for the site, it
+  is loaded into a temporary virtual authenticator on the tab (Chrome's own
+  WebAuthn, so the site's ceremony is real), and removed when the command
+  ends. A passkey or security-key second factor after the password is then
+  answered by itself, pressing the page's "Use passkey" button if needed.
+  `auth login --bwu --passkey` signs in with the passkey alone (no password
+  is read). The signature counter the site sees is the vault's (0 for a
+  synced passkey), the same as the Bitwarden extension, so using it here
+  never breaks the extension on that site. A site that refuses the passkey is
+  reported with its message, not as success.
+- Result: `{"item", "filled": [...], "submitted", "otp": "filled" | "not asked" | "none", "passkey": "used" | "not asked" | "none", "url"}`.
   Run `snapshot` afterwards to see whether the site accepted the login.
 
 ### Single fields

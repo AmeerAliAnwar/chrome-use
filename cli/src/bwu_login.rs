@@ -18,13 +18,15 @@ use crate::color;
 use crate::commands::ParseError;
 use crate::flags::Flags;
 
-const USAGE: &str = "chrome-use auth login --bwu [--item <id|name>] [--no-submit]";
+const USAGE: &str = "chrome-use auth login --bwu [--item <id|name>] [--passkey] [--no-submit]";
 
 /// Set on the child so it fills instead of running `bwu` again.
 const CHILD: &str = "CU_BWU_CHILD";
 const USER: &str = "CU_BWU_USER";
 const PASS: &str = "CU_BWU_PW";
 const OTP: &str = "CU_BWU_OTP";
+/// The item's passkeys as JSON (bwu `#passkeys`), private keys included.
+const PASSKEYS: &str = "CU_BWU_PK";
 /// JSON list of custom field names; their values are in `CU_BWU_F<i>`.
 const FIELDS: &str = "CU_BWU_FIELDS";
 const STEPS: &str = "CU_BWU_STEPS";
@@ -34,18 +36,21 @@ const ITEM: &str = "CU_BWU_ITEM";
 struct Opts {
     item: Option<String>,
     no_submit: bool,
+    passkey: bool,
 }
 
 fn opts(args: &[&str]) -> Result<Opts, ParseError> {
     let mut o = Opts {
         item: None,
         no_submit: false,
+        passkey: false,
     };
     let mut i = 0;
     while i < args.len() {
         match args[i] {
             "--bwu" => {}
             "--no-submit" => o.no_submit = true,
+            "--passkey" => o.passkey = true,
             "--item" => {
                 o.item = Some(
                     args.get(i + 1)
@@ -78,7 +83,7 @@ pub fn parse(args: &[&str], id: &str) -> Result<Value, ParseError> {
     if std::env::var_os(CHILD).is_none() {
         return Ok(json!({
             "id": id, "action": "auth_login_bwu_probe",
-            "item": o.item, "noSubmit": o.no_submit,
+            "item": o.item, "noSubmit": o.no_submit, "passkey": o.passkey,
         }));
     }
     // Under `bwu run`: take the values and drop them from the environment
@@ -100,6 +105,9 @@ pub fn parse(args: &[&str], id: &str) -> Result<Value, ParseError> {
     let username = take(USER);
     let password = take(PASS);
     let otp = take(OTP);
+    let passkeys: Vec<Value> = take(PASSKEYS)
+        .and_then(|j| serde_json::from_str(&j).ok())
+        .unwrap_or_default();
     let steps: Option<Value> = take(STEPS).and_then(|j| serde_json::from_str(&j).ok());
     let origin = take(ORIGIN);
     let item = take(ITEM);
@@ -118,11 +126,18 @@ pub fn parse(args: &[&str], id: &str) -> Result<Value, ParseError> {
                 .filter_map(Value::as_str)
                 .map(str::to_string),
         )
+        .chain(
+            passkeys
+                .iter()
+                .filter_map(|p| p["privateKey"].as_str())
+                .map(str::to_string),
+        )
         .collect();
     Ok(json!({
         "id": id, "action": "auth_login_bwu", "secret": true, "secrets": secrets,
         "username": username, "password": password, "otp": otp, "fields": fields,
         "steps": steps, "origin": origin, "item": item, "noSubmit": o.no_submit,
+        "passkeys": passkeys, "passkeyFirst": o.passkey,
     }))
 }
 
@@ -284,7 +299,17 @@ fn run_inner(flags: &Flags, cmd: &Value) -> Result<i32, String> {
     let has = |k: &str| item[k].is_string();
     let wants = |step: &str| steps.as_ref().is_none_or(|s| s.iter().any(|x| x == step));
 
+    let passkey_count = item["passkeys"].as_u64().unwrap_or(0);
+    let passkey_first = cmd["passkey"].as_bool().unwrap_or(false);
+    if passkey_first && passkey_count == 0 {
+        return Err(format!("the vault item '{name}' has no passkey"));
+    }
     let mut envs: Vec<String> = Vec::new();
+    if passkey_count > 0 {
+        envs.push(format!("{PASSKEYS}=bw:{id}#passkeys"));
+    }
+    // Signing in with the passkey needs nothing else from the vault.
+    let wants = |step: &str| !passkey_first && wants(step);
     if has("username") && wants("username") {
         envs.push(format!("{USER}=bw:{id}#username"));
     }
@@ -378,6 +403,10 @@ mod tests {
             ),
             (ORIGIN, "https://example.com"),
             (ITEM, "example"),
+            (
+                PASSKEYS,
+                r#"[{"credentialId":"AQID","rpId":"example.com","privateKey":"c2VjcmV0a2V5","userHandle":"dQ==","signCount":0,"isResidentCredential":true}]"#,
+            ),
         ] {
             std::env::set_var(k, v);
         }
@@ -394,9 +423,20 @@ mod tests {
             .iter()
             .filter_map(Value::as_str)
             .collect();
-        assert_eq!(secrets, ["alice", "hunter2", "1234"]);
+        assert_eq!(secrets, ["alice", "hunter2", "1234", "c2VjcmV0a2V5"]);
+        assert_eq!(cmd["passkeys"][0]["rpId"], "example.com");
         // Nothing is left for a daemon to inherit.
-        for k in [CHILD, USER, PASS, FIELDS, "CU_BWU_F0", STEPS, ORIGIN, ITEM] {
+        for k in [
+            CHILD,
+            USER,
+            PASS,
+            FIELDS,
+            "CU_BWU_F0",
+            STEPS,
+            ORIGIN,
+            ITEM,
+            PASSKEYS,
+        ] {
             assert!(std::env::var_os(k).is_none(), "{k} still set");
         }
     }

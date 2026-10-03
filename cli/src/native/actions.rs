@@ -16401,6 +16401,13 @@ const AUTH_OTP_SELECTORS: &[&str] = &[
 /// before the default flow decides it is on a two-page login.
 const AUTH_BWU_PROBE_MS: u64 = 1_500;
 
+/// How long a passkey ceremony may take once the page was asked to start it.
+const AUTH_BWU_PASSKEY_WAIT_MS: u64 = 12_000;
+
+/// Text of a control that starts a passkey / security-key sign-in.
+const AUTH_PASSKEY_BUTTON_RE: &str =
+    r"passkey|security key|use your (key|device)|通行密钥|安全密钥|パスキー|セキュリティ ?キー";
+
 /// How long after submitting the default flow waits for a one-time-code field.
 const AUTH_BWU_OTP_WAIT_MS: u64 = 10_000;
 
@@ -16448,6 +16455,17 @@ async fn handle_auth_login_bwu(cmd: &Value, state: &mut DaemonState) -> Result<V
         .get("noSubmit")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    // The item's passkeys (bwu `#passkeys`), and whether to sign in with one
+    // instead of the password (`--passkey`).
+    let passkeys: Vec<Value> = cmd
+        .get("passkeys")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let passkey_first = cmd
+        .get("passkeyFirst")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let auto = explicit.is_none();
     let steps = explicit.unwrap_or_else(|| {
         let mut v = Vec::new();
@@ -16486,6 +16504,27 @@ async fn handle_auth_login_bwu(cmd: &Value, state: &mut DaemonState) -> Result<V
     let timeout_ms = mgr.default_timeout_ms();
     let marker = uuid::Uuid::new_v4().simple().to_string();
     let pin = Some(origin.as_str());
+    let host = url::Url::parse(&current)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_default();
+    // Subscribe before anything can trigger a WebAuthn ceremony.
+    let mut webauthn_events = mgr.client.subscribe();
+    let authenticator = if passkeys.is_empty() {
+        None
+    } else {
+        install_passkeys(&mgr.client, &session_id, &passkeys, &host).await?
+    };
+    if passkey_first && authenticator.is_none() {
+        return Err(format!(
+            "auth login --bwu --passkey: the vault item has no passkey for {host}"
+        ));
+    }
+    let mut passkey_state = if authenticator.is_some() {
+        "not asked"
+    } else {
+        "none"
+    };
     let user_selectors: Vec<&str> = AUTH_USER_SELECTORS
         .iter()
         .chain(AUTH_USER_FALLBACK_SELECTORS)
@@ -16503,6 +16542,29 @@ async fn handle_auth_login_bwu(cmd: &Value, state: &mut DaemonState) -> Result<V
     let mut code_pending = false;
 
     let outcome: Result<(), String> = async {
+        if passkey_first {
+            // Sign in with the passkey: press the page's passkey button (a
+            // page that asks by itself needs none), and let the virtual
+            // authenticator answer.
+            if !wait_passkey_asserted(&mut webauthn_events, 1_000).await {
+                click_passkey_button(&mgr.client, &session_id, &state.ref_map, &state.iframe_sessions, &marker)
+                    .await
+                    .map_err(|_| {
+                        "auth login --bwu --passkey: this page has no passkey sign-in button and \
+                         did not ask for a passkey by itself. Open the site's passkey sign-in first."
+                            .to_string()
+                    })?;
+                if !wait_passkey_asserted(&mut webauthn_events, AUTH_BWU_PASSKEY_WAIT_MS).await {
+                    return Err("auth login --bwu --passkey: the page never asked for the passkey. \
+                                Open its passkey sign-in (a \"Sign in with a passkey\" button) and run it again."
+                        .to_string());
+                }
+            }
+            passkey_state = "used";
+            submitted = true;
+            check_passkey_accepted(&mgr.client, &session_id, &current).await?;
+            return Ok(());
+        }
         if auto {
             // Wait (full timeout) until the page shows any field this login
             // could fill; after that, each step only checks briefly whether
@@ -16646,10 +16708,26 @@ async fn handle_auth_login_bwu(cmd: &Value, state: &mut DaemonState) -> Result<V
             filled.push(step.clone());
         }
 
+        // After submitting: a second factor by passkey / security key is
+        // answered by the virtual authenticator, once the page asks (or once
+        // its "use a passkey / security key" button is pressed).
+        if authenticator.is_some()
+            && submitted
+            && !no_submit
+            && (wait_passkey_asserted(&mut webauthn_events, 2_500).await
+                || (click_passkey_button(&mgr.client, &session_id, &state.ref_map, &state.iframe_sessions, &marker)
+                    .await
+                    .is_ok()
+                    && wait_passkey_asserted(&mut webauthn_events, AUTH_BWU_PASSKEY_WAIT_MS).await))
+        {
+            passkey_state = "used";
+            let at = mgr.get_url().await.unwrap_or_default();
+            check_passkey_accepted(&mgr.client, &session_id, &at).await?;
+        }
         // Default flow: a code field gets the code, either after submitting
         // the password or on a page that asks only for the code.
         let code_only = filled.is_empty() && !submitted;
-        if auto && otp_state == "not asked" && (submitted || code_only) {
+        if auto && otp_state == "not asked" && passkey_state != "used" && (submitted || code_only) {
             if let Some(code) = otp.as_ref() {
                 let tag = format!("bwuotp-{marker}");
                 let wait = if code_only { AUTH_BWU_PROBE_MS } else { AUTH_BWU_OTP_WAIT_MS };
@@ -16689,8 +16767,28 @@ async fn handle_auth_login_bwu(cmd: &Value, state: &mut DaemonState) -> Result<V
         )
         .await;
 
+    if let Some(id) = &authenticator {
+        // Give the page a moment to finish the ceremony it started, then
+        // drop the authenticator: the private key does not outlive the login.
+        if passkey_state == "used" {
+            tokio::time::sleep(Duration::from_millis(1_500)).await;
+        }
+        let _ = mgr
+            .client
+            .send_command(
+                "WebAuthn.removeVirtualAuthenticator",
+                Some(json!({ "authenticatorId": id })),
+                Some(&session_id),
+            )
+            .await;
+        let _ = mgr
+            .client
+            .send_command("WebAuthn.disable", None, Some(&session_id))
+            .await;
+    }
+
     outcome?;
-    if filled.is_empty() {
+    if filled.is_empty() && passkey_state != "used" {
         return Err("auth login --bwu: found no login field on this page to fill".to_string());
     }
     if submitted {
@@ -16704,8 +16802,210 @@ async fn handle_auth_login_bwu(cmd: &Value, state: &mut DaemonState) -> Result<V
         "filled": filled,
         "submitted": submitted,
         "otp": otp_state,
+        "passkey": passkey_state,
         "url": url,
     }))
+}
+
+/// Load the item's passkeys for this site into a virtual authenticator on the
+/// tab (Chrome's WebAuthn domain). The site's own `navigator.credentials.get`
+/// is then answered by Chrome, signed with the vault key; nothing in the page
+/// is faked. Only passkeys whose rpId is the page's host or a parent of it.
+/// Returns the authenticator id, or None when no passkey fits this site.
+async fn install_passkeys(
+    client: &super::cdp::client::CdpClient,
+    session_id: &str,
+    passkeys: &[Value],
+    host: &str,
+) -> Result<Option<String>, String> {
+    let fits: Vec<&Value> = passkeys
+        .iter()
+        .filter(|p| {
+            p["rpId"]
+                .as_str()
+                .is_some_and(|rp| host == rp || host.ends_with(&format!(".{rp}")))
+        })
+        .collect();
+    if fits.is_empty() {
+        return Ok(None);
+    }
+    client
+        .send_command(
+            "WebAuthn.enable",
+            Some(json!({ "enableUI": false })),
+            Some(session_id),
+        )
+        .await?;
+    let added = client
+        .send_command(
+            "WebAuthn.addVirtualAuthenticator",
+            Some(json!({ "options": {
+                "protocol": "ctap2",
+                "ctap2Version": "ctap2_1",
+                "transport": "internal",
+                "hasResidentKey": true,
+                "hasUserVerification": true,
+                "isUserVerified": true,
+                "automaticPresenceSimulation": true,
+            }})),
+            Some(session_id),
+        )
+        .await?;
+    let id = added["authenticatorId"]
+        .as_str()
+        .ok_or("auth login --bwu: Chrome did not create a virtual authenticator")?
+        .to_string();
+    for p in fits {
+        let mut credential = json!({
+            "credentialId": p["credentialId"],
+            "isResidentCredential": p["isResidentCredential"].as_bool().unwrap_or(false),
+            "rpId": p["rpId"],
+            "privateKey": p["privateKey"],
+            // Chrome's virtual authenticator adds 1 to this before every
+            // assertion. Start one below the vault's counter so the site sees
+            // the vault's own value: for a synced passkey that is 0 ("no
+            // counter"), as Bitwarden and Apple report. Anything higher would
+            // raise the site's stored counter, and a strict site then rejects
+            // the real Bitwarden client (which keeps reporting 0) as a clone.
+            // -1 wraps Chrome's uint32 counter to 0 on the increment.
+            "signCount": p["signCount"].as_i64().unwrap_or(0) - 1,
+        });
+        if let Some(handle) = p["userHandle"].as_str() {
+            credential["userHandle"] = json!(handle);
+        }
+        if let Err(e) = client
+            .send_command(
+                "WebAuthn.addCredential",
+                Some(json!({ "authenticatorId": id, "credential": credential })),
+                Some(session_id),
+            )
+            .await
+        {
+            let _ = client
+                .send_command(
+                    "WebAuthn.removeVirtualAuthenticator",
+                    Some(json!({ "authenticatorId": id })),
+                    Some(session_id),
+                )
+                .await;
+            return Err(format!(
+                "auth login --bwu: Chrome refused the passkey ({e})"
+            ));
+        }
+    }
+    Ok(Some(id))
+}
+
+/// After the virtual authenticator signed: a site that refused the passkey
+/// stays on the page it was asked from (or moves to another way of signing
+/// in) and says so. Report that with the page's own message instead of
+/// "used". `page` is the URL the ceremony started on.
+async fn check_passkey_accepted(
+    client: &super::cdp::client::CdpClient,
+    session_id: &str,
+    page: &str,
+) -> Result<(), String> {
+    tokio::time::sleep(Duration::from_millis(3_000)).await;
+    let expression = format!(
+        r#"(() => {{
+            const alert = [...document.querySelectorAll('[role=alert], .flash-error, .flash-warn, .error, .alert, [aria-live=assertive]')]
+                .map((el) => (el.innerText || '').trim().replace(/\s+/g, ' '))
+                .find((t) => /passkey|security key|webauthn|authenticat|unable|failed|通行密钥|安全密钥|パスキー/i.test(t));
+            if (!alert) return null;
+            const stayed = location.href.split('#')[0] === {page};
+            const elsewhere = /two-factor\/app|otp|totp|password/i.test(location.pathname);
+            return (stayed || elsewhere) ? alert.slice(0, 160) : null;
+        }})()"#,
+        page = serde_json::to_string(page.split('#').next().unwrap_or(page)).unwrap_or_default(),
+    );
+    let r: Result<super::cdp::types::EvaluateResult, String> = client
+        .send_command_typed(
+            "Runtime.evaluate",
+            &super::cdp::types::EvaluateParams {
+                expression,
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            Some(session_id),
+        )
+        .await;
+    match r {
+        Ok(r) => match r.result.value {
+            Some(Value::String(alert)) => Err(format!(
+                "auth login --bwu: the site did not accept the passkey (\"{alert}\"). If it \
+                 worked before, the site may track a signature counter that another client \
+                 raised; re-registering the passkey there resets it."
+            )),
+            _ => Ok(()),
+        },
+        Err(e) if page_went_away(&e) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// True once the virtual authenticator signed an assertion within `ms`.
+async fn wait_passkey_asserted(
+    events: &mut tokio::sync::broadcast::Receiver<super::cdp::types::CdpEvent>,
+    ms: u64,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(ms);
+    loop {
+        match tokio::time::timeout_at(deadline, events.recv()).await {
+            Ok(Ok(ev)) if ev.method == "WebAuthn.credentialAsserted" => return true,
+            Ok(Ok(_)) | Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
+            Ok(Err(_)) | Err(_) => return false,
+        }
+    }
+}
+
+/// Press the page's "sign in with a passkey / use security key" control, if
+/// it has one (a trusted click: some sites start the ceremony only on a user
+/// gesture).
+async fn click_passkey_button(
+    client: &super::cdp::client::CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    iframe_sessions: &HashMap<String, String>,
+    marker: &str,
+) -> Result<(), String> {
+    let tag = format!("bwupk-{marker}");
+    let expression = format!(
+        r#"(() => {{
+            const re = new RegExp({re}, 'i');
+            const visible = (el) => {{ const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; }};
+            const el = [...document.querySelectorAll('button, a, [role=button], input[type=button], input[type=submit]')]
+                .find((el) => visible(el) && !el.disabled && re.test((el.innerText || el.value || el.getAttribute('aria-label') || '').trim()));
+            if (!el) return false;
+            el.setAttribute('data-cu-auth', {tag});
+            return true;
+        }})()"#,
+        re = serde_json::to_string(AUTH_PASSKEY_BUTTON_RE).unwrap_or_default(),
+        tag = serde_json::to_string(&tag).unwrap_or_default(),
+    );
+    let found: super::cdp::types::EvaluateResult = client
+        .send_command_typed(
+            "Runtime.evaluate",
+            &super::cdp::types::EvaluateParams {
+                expression,
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            Some(session_id),
+        )
+        .await?;
+    if found.result.value != Some(Value::Bool(true)) {
+        return Err("no passkey button on this page".to_string());
+    }
+    interaction::click(
+        client,
+        session_id,
+        ref_map,
+        &format!("[data-cu-auth=\"{tag}\"]"),
+        "left",
+        1,
+        iframe_sessions,
+    )
+    .await
 }
 
 /// Type a one-time code into the marked field exactly once: focus, select
