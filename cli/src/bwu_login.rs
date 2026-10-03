@@ -74,6 +74,12 @@ fn opts(args: &[&str]) -> Result<Opts, ParseError> {
         }
         i += 1;
     }
+    if o.passkey && o.no_submit {
+        return Err(ParseError::InvalidValue {
+            message: "--passkey has nothing to fill, so --no-submit would do nothing".to_string(),
+            usage: USAGE,
+        });
+    }
     Ok(o)
 }
 
@@ -301,11 +307,14 @@ fn run_inner(flags: &Flags, cmd: &Value) -> Result<i32, String> {
 
     let passkey_count = item["passkeys"].as_u64().unwrap_or(0);
     let passkey_first = cmd["passkey"].as_bool().unwrap_or(false);
+    // --no-submit fills and presses nothing: no passkey (a ceremony signs and
+    // submits) and no one-time code (sites submit on the last digit).
+    let no_submit = cmd["noSubmit"].as_bool().unwrap_or(false);
     if passkey_first && passkey_count == 0 {
         return Err(format!("the vault item '{name}' has no passkey"));
     }
     let mut envs: Vec<String> = Vec::new();
-    if passkey_count > 0 {
+    if passkey_count > 0 && !no_submit {
         envs.push(format!("{PASSKEYS}=bw:{id}#passkeys"));
     }
     // Signing in with the passkey needs nothing else from the vault.
@@ -316,13 +325,14 @@ fn run_inner(flags: &Flags, cmd: &Value) -> Result<i32, String> {
     if has("password") && wants("password") {
         envs.push(format!("{PASS}=bw:{id}#password"));
     }
-    if has("code") && wants("totp") {
+    if has("code") && wants("totp") && !no_submit {
         envs.push(format!("{OTP}=bw:{id}#totp"));
     }
     let custom: Vec<String> = steps
         .iter()
         .flatten()
         .filter_map(|s| s.strip_prefix("custom:").map(str::to_string))
+        .filter(|_| !passkey_first)
         .collect();
     for (i, field) in custom.iter().enumerate() {
         envs.push(format!("CU_BWU_F{i}=bw:{id}#custom:{field}"));
@@ -390,6 +400,7 @@ mod tests {
         assert_eq!(cmd["item"], "abc");
         assert_eq!(cmd["noSubmit"], true);
         assert!(parse(&["--bwu", "github"], "1").is_err());
+        assert!(parse(&["--bwu", "--passkey", "--no-submit"], "1").is_err());
 
         for (k, v) in [
             (CHILD, "1"),

@@ -112,16 +112,22 @@ chrome-use auth login --bwu --passkey       # sign in with the vault passkey
   `delay` (1 s), or another custom field's name, which is typed into the
   focused field. Example: `username:enter:delay:password:enter`. It is the same
   syntax as rofi-rbw's.
-- **Passkeys (bwu 0.9.0+).** If the vault item has a passkey for the site, it
-  is loaded into a temporary virtual authenticator on the tab (Chrome's own
-  WebAuthn, so the site's ceremony is real), and removed when the command
-  ends. A passkey or security-key second factor after the password is then
-  answered by itself, pressing the page's "Use passkey" button if needed.
-  `auth login --bwu --passkey` signs in with the passkey alone (no password
-  is read). The signature counter the site sees is the vault's (0 for a
-  synced passkey), the same as the Bitwarden extension, so using it here
-  never breaks the extension on that site. A site that refuses the passkey is
-  reported with its message, not as success.
+- **Passkeys (bwu 0.9.0+).** When the vault item has a passkey for the site,
+  a temporary virtual authenticator holds it while the page asks for one
+  (Chrome's own WebAuthn, so the site's ceremony is real), and is removed when
+  the command ends. In the default flow it is installed only after the
+  password was submitted and the next page asks for a passkey or security
+  key; the page's "Use passkey" / "Sign in with a passkey" button is pressed
+  if needed (never one that adds or registers a passkey, and the page cannot
+  register one with it). Where WebAuthn is unavailable it falls back to the
+  one-time code. `auth login --bwu --passkey` signs in with the passkey alone
+  (no password is read).
+  The site sees the vault's signature counter, 0 for a synced passkey, the
+  same as the Bitwarden extension. A passkey that keeps a non-zero counter is
+  refused (its new count would have to be written back to the vault). A site
+  that refuses the passkey is reported with its message.
+- `--no-submit` fills only: no passkey and no one-time code (sites submit a
+  code on its last digit).
 - Result: `{"item", "filled": [...], "submitted", "otp": "filled" | "not asked" | "none", "passkey": "used" | "not asked" | "none", "url"}`.
   Run `snapshot` afterwards to see whether the site accepted the login.
 

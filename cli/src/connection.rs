@@ -1601,6 +1601,13 @@ fn client_read_budget(cmd: &Value) -> Duration {
     if let Some(ms) = cmd.get("timeout_ms").and_then(|v| v.as_u64()) {
         return Duration::from_millis(ms.saturating_add(15_000));
     }
+    // `auth login --bwu` is one command that may wait for a second page, a
+    // one-time code and a passkey ceremony in turn (each CDP call stays
+    // within the daemon's 30s). Cutting it off would report the session as
+    // unresponsive and invite a retry that submits the login again.
+    if cmd.get("action").and_then(|v| v.as_str()) == Some("auth_login_bwu") {
+        return Duration::from_secs(180);
+    }
     daemon_cdp_budget(cmd) + Duration::from_secs(15)
 }
 
