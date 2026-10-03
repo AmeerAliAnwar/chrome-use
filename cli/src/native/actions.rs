@@ -16767,6 +16767,9 @@ async fn handle_auth_login_bwu(cmd: &Value, state: &mut DaemonState) -> Result<V
                 Ok(None) => {}
                 // No WebAuthn here (e.g. over the extension relay): fall back
                 // to the one-time code, as before passkey support.
+                // A passkey we must not use (it keeps a counter) is reported,
+                // not hidden behind the fallback.
+                Err(e) if e.contains(PASSKEY_COUNTER_REFUSAL) => return Err(e),
                 Err(_) => passkey_state = "unavailable",
             }
         }
@@ -16838,6 +16841,10 @@ async fn handle_auth_login_bwu(cmd: &Value, state: &mut DaemonState) -> Result<V
         "url": url,
     }))
 }
+
+/// Part of the error for a vault passkey that keeps a signature counter; the
+/// default flow reports it instead of falling back.
+const PASSKEY_COUNTER_REFUSAL: &str = "this vault passkey keeps a signature counter";
 
 /// A virtual authenticator installed for one `auth login --bwu`.
 struct PasskeyAuthenticator {
@@ -16918,7 +16925,7 @@ async fn install_passkeys(
         .find_map(|p| p["signCount"].as_u64().filter(|n| *n != 0))
     {
         return Err(format!(
-            "auth login --bwu: this vault passkey keeps a signature counter ({n}); using it here \
+            "auth login --bwu: {PASSKEY_COUNTER_REFUSAL} ({n}); using it here \
              would need the new count written back to the vault, which bitwarden-use does not do yet"
         ));
     }
