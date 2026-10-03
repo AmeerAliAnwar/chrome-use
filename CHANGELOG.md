@@ -1,8 +1,27 @@
 # Changelog
 
-## 1.5.156
+## 1.5.157
 
 <!-- release:start -->
+### New Features
+
+- **`auth login --bwu` signs in with vault passkeys.** In a `--launch` browser with bitwarden-use 0.9.0+, a temporary WebAuthn authenticator can answer a passkey or security-key second factor; `--passkey` signs in with the passkey alone, without reading passwords, TOTP or custom fields. Synced passkeys report counter 0, as with the Bitwarden extension; nonzero counters are refused until vault write-back is supported. Only sign-in controls are clicked, normal passkey registration calls are blocked during the attempt, and the authenticator and registration guard are removed afterwards. Retained native function references can bypass the page guard; unexpected credential creation aborts the command, as does unconfirmed cleanup. Site refusals include the visible error message. Passkeys are explicitly unsupported on the extension relay: `--passkey` fails immediately and ordinary login retains the password/TOTP flow. (#398)
+
+### Bug Fixes
+
+- **`auth login --bwu --no-submit` skips TOTP.** Sites can submit a code on its last digit, so fill-only mode reads neither TOTP nor passkeys. `--passkey --no-submit` is refused. (#398)
+
+### Improvements
+
+- **Vault login is discoverable in help and the agent guide.** Help, both READMEs, and the bilingual login docs describe account selection, passkey compatibility and authenticated-destination verification. (#398)
+
+### Contributors
+
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.156
+
 ### Bug Fixes
 
 - **The cookie argument checks that 1.5.155's notes described actually ship now.** In 1.5.155 the parser half of #395's review fixes never applied: `cookies get --url` returned the current page's cookies instead of that URL's, and `cookies get`/`clear` still let unknown or repeated arguments through. The daemon already refused `--name` on a full clear, so the browser could not be wiped. Now `cookies clear --name` needs `--domain` or `--url`, `--domain` with `--url` or a flag given twice is an error, and `cookies get` takes `--url` (repeatable) and rejects anything else. (#396)
@@ -10,7 +29,6 @@
 ### Contributors
 
 - @leeguooooo
-<!-- release:end -->
 
 ## 1.5.155
 

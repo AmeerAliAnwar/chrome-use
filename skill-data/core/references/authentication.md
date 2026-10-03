@@ -86,6 +86,7 @@ chrome-use open https://github.com/login
 chrome-use auth login --bwu                 # the only vault login for this site
 chrome-use auth login --bwu --item <id>     # one of several; the error lists them
 chrome-use auth login --bwu --no-submit     # fill only, press nothing
+chrome-use auth login --bwu --passkey       # sign in with the vault passkey
 ```
 
 - **Picking the account.** It asks `bwu login --domain <page> --list`, which
@@ -111,7 +112,30 @@ chrome-use auth login --bwu --no-submit     # fill only, press nothing
   `delay` (1 s), or another custom field's name, which is typed into the
   focused field. Example: `username:enter:delay:password:enter`. It is the same
   syntax as rofi-rbw's.
-- Result: `{"item", "filled": [...], "submitted", "otp": "filled" | "not asked" | "none", "url"}`.
+- **Passkeys (bwu 0.9.0+).** When the vault item has a passkey for the site,
+  a temporary virtual authenticator holds it while the page asks for one
+  (Chrome's own WebAuthn, so the site's ceremony is real), and is removed when
+  the command ends. In the default flow it is installed only after the
+  password was submitted and the next page asks for a passkey or security
+  key; the page's "Use passkey" / "Sign in with a passkey" button is pressed
+  if needed (never one that adds or registers a passkey). While the
+  authenticator exists, an ordinary `navigator.credentials.create` call on
+  the page is refused, so a page cannot register a passkey with it by
+  accident; this is a guard against mistakes, not isolation (a script that
+  kept the original function can bypass it). An unexpected registration, or
+  a cleanup that cannot be confirmed, is reported as an error. Where WebAuthn is unavailable it falls back to the
+  one-time code. `auth login --bwu --passkey` signs in with the passkey alone
+  (no password is read). Passkeys work in a `--launch` browser only: on your
+  own Chrome (the extension relay) the page's request does not reach
+  chrome-use's authenticator, so `--passkey` refuses there and the default flow
+  reports `"passkey": "unsupported"` and uses the password and code as before.
+  The site sees the vault's signature counter, 0 for a synced passkey, the
+  same as the Bitwarden extension. A passkey that keeps a non-zero counter is
+  refused (its new count would have to be written back to the vault). A site
+  that refuses the passkey is reported with its message.
+- `--no-submit` fills only: no passkey and no one-time code (sites submit a
+  code on its last digit).
+- Result: `{"item", "filled": [...], "submitted", "otp": "filled" | "not asked" | "none", "passkey": "used" | "not asked" | "unsupported" | "unavailable" | "none", "url"}`.
   Run `snapshot` afterwards to see whether the site accepted the login.
 
 ### Single fields

@@ -16401,6 +16401,9 @@ const AUTH_OTP_SELECTORS: &[&str] = &[
 /// before the default flow decides it is on a two-page login.
 const AUTH_BWU_PROBE_MS: u64 = 1_500;
 
+/// How long a passkey ceremony may take once the page was asked to start it.
+const AUTH_BWU_PASSKEY_WAIT_MS: u64 = 12_000;
+
 /// How long after submitting the default flow waits for a one-time-code field.
 const AUTH_BWU_OTP_WAIT_MS: u64 = 10_000;
 
@@ -16448,6 +16451,17 @@ async fn handle_auth_login_bwu(cmd: &Value, state: &mut DaemonState) -> Result<V
         .get("noSubmit")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    // The item's passkeys (bwu `#passkeys`), and whether to sign in with one
+    // instead of the password (`--passkey`).
+    let passkeys: Vec<Value> = cmd
+        .get("passkeys")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let passkey_first = cmd
+        .get("passkeyFirst")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let auto = explicit.is_none();
     let steps = explicit.unwrap_or_else(|| {
         let mut v = Vec::new();
@@ -16486,6 +16500,51 @@ async fn handle_auth_login_bwu(cmd: &Value, state: &mut DaemonState) -> Result<V
     let timeout_ms = mgr.default_timeout_ms();
     let marker = uuid::Uuid::new_v4().simple().to_string();
     let pin = Some(origin.as_str());
+    let host = url::Url::parse(&current)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_default();
+    if passkey_first && no_submit {
+        return Err(
+            "auth login --bwu: --passkey has nothing to fill, so --no-submit would do nothing"
+                .to_string(),
+        );
+    }
+    // The virtual authenticator exists only while the page is asking for a
+    // passkey: installed for --passkey, or after the password was submitted
+    // and the next page asks for one. Its events are subscribed at install
+    // time, so nothing that happened before can count as an answer.
+    let mut authenticator: Option<PasskeyAuthenticator> = None;
+    let mut webauthn_events = mgr.client.subscribe();
+    // On the user's own Chrome (extension relay) the page's WebAuthn request
+    // does not reach the virtual authenticator (tested: get() stays pending,
+    // no assertion; the cause is not established). Passkeys are not used
+    // there; the password / one-time code flow is unchanged.
+    let relay = mgr.on_relay();
+    let mut passkey_state = if passkeys.is_empty() {
+        "none"
+    } else if relay {
+        "unsupported"
+    } else {
+        "not asked"
+    };
+    if passkey_first && relay {
+        return Err(
+            "auth login --bwu --passkey: passkeys are not supported on your own Chrome \
+                    (extension relay): there the page's WebAuthn request does not reach \
+                    chrome-use's authenticator. Use a --launch session, or sign in without --passkey."
+                .to_string(),
+        );
+    }
+    if passkey_first {
+        webauthn_events = mgr.client.subscribe();
+        authenticator = install_passkeys(&mgr.client, &session_id, &passkeys, &host)
+            .await?
+            .ok_or_else(|| {
+                format!("auth login --bwu --passkey: the vault item has no passkey for {host}")
+            })?
+            .into();
+    }
     let user_selectors: Vec<&str> = AUTH_USER_SELECTORS
         .iter()
         .chain(AUTH_USER_FALLBACK_SELECTORS)
@@ -16503,6 +16562,34 @@ async fn handle_auth_login_bwu(cmd: &Value, state: &mut DaemonState) -> Result<V
     let mut code_pending = false;
 
     let outcome: Result<(), String> = async {
+        if passkey_first {
+            // Sign in with the passkey: a page that asks by itself needs
+            // nothing; otherwise press its passkey sign-in button.
+            let mut answer = wait_passkey(&mut webauthn_events, &session_id, authenticator.as_ref(), 1_000).await;
+            if answer == PasskeyEvent::Timeout {
+                click_passkey_button(&mgr.client, &session_id, &state.ref_map, &state.iframe_sessions, &marker)
+                    .await
+                    .map_err(|_| {
+                        "auth login --bwu --passkey: this page has no passkey sign-in button and \
+                         did not ask for a passkey by itself. Open the site's passkey sign-in first."
+                            .to_string()
+                    })?;
+                answer = wait_passkey(&mut webauthn_events, &session_id, authenticator.as_ref(), AUTH_BWU_PASSKEY_WAIT_MS).await;
+            }
+            match answer {
+                PasskeyEvent::Asserted => {}
+                PasskeyEvent::Added => return Err(PASSKEY_ADDED_ERROR.to_string()),
+                PasskeyEvent::Timeout => {
+                    return Err("auth login --bwu --passkey: no passkey assertion was observed within 12s. \
+                                If the page has a passkey sign-in, open it and run this again."
+                        .to_string())
+                }
+            }
+            passkey_state = "used";
+            submitted = true;
+            check_passkey_accepted(&mgr.client, &session_id, &current).await?;
+            return Ok(());
+        }
         if auto {
             // Wait (full timeout) until the page shows any field this login
             // could fill; after that, each step only checks briefly whether
@@ -16646,10 +16733,50 @@ async fn handle_auth_login_bwu(cmd: &Value, state: &mut DaemonState) -> Result<V
             filled.push(step.clone());
         }
 
+        // After submitting: when the next page asks for a passkey or security
+        // key (and the item has one), answer it with the virtual authenticator.
+        // Pages that do not use WebAuthn cost one quick check, no waiting.
+        if !passkeys.is_empty()
+            && !relay
+            && submitted
+            && !no_submit
+            && page_asks_for_passkey(&mgr.client, &session_id, &origin, &current).await
+        {
+            webauthn_events = mgr.client.subscribe();
+            match install_passkeys(&mgr.client, &session_id, &passkeys, &host).await {
+                Ok(Some(a)) => {
+                    authenticator = Some(a);
+                    let at = mgr.get_url().await.unwrap_or_default();
+                    let mut answer = wait_passkey(&mut webauthn_events, &session_id, authenticator.as_ref(), 1_500).await;
+                    if answer == PasskeyEvent::Timeout
+                        && click_passkey_button(&mgr.client, &session_id, &state.ref_map, &state.iframe_sessions, &marker)
+                            .await
+                            .is_ok()
+                    {
+                        answer = wait_passkey(&mut webauthn_events, &session_id, authenticator.as_ref(), AUTH_BWU_PASSKEY_WAIT_MS).await;
+                    }
+                    match answer {
+                        PasskeyEvent::Asserted => {
+                            passkey_state = "used";
+                            check_passkey_accepted(&mgr.client, &session_id, &at).await?;
+                        }
+                        PasskeyEvent::Added => return Err(PASSKEY_ADDED_ERROR.to_string()),
+                        PasskeyEvent::Timeout => {}
+                    }
+                }
+                Ok(None) => {}
+                // No WebAuthn here (e.g. over the extension relay): fall back
+                // to the one-time code, as before passkey support.
+                // A passkey we must not use (it keeps a counter) is reported,
+                // not hidden behind the fallback.
+                Err(e) if e.contains(PASSKEY_COUNTER_REFUSAL) => return Err(e),
+                Err(_) => passkey_state = "unavailable",
+            }
+        }
         // Default flow: a code field gets the code, either after submitting
         // the password or on a page that asks only for the code.
         let code_only = filled.is_empty() && !submitted;
-        if auto && otp_state == "not asked" && (submitted || code_only) {
+        if auto && otp_state == "not asked" && passkey_state != "used" && (submitted || code_only) {
             if let Some(code) = otp.as_ref() {
                 let tag = format!("bwuotp-{marker}");
                 let wait = if code_only { AUTH_BWU_PROBE_MS } else { AUTH_BWU_OTP_WAIT_MS };
@@ -16689,8 +16816,23 @@ async fn handle_auth_login_bwu(cmd: &Value, state: &mut DaemonState) -> Result<V
         )
         .await;
 
-    outcome?;
-    if filled.is_empty() {
+    // The ceremony is over (check_passkey_accepted waited for its result):
+    // the private key does not outlive the login. A cleanup that cannot be
+    // confirmed is an error even when the login itself went through.
+    let cleanup = match &authenticator {
+        Some(a) => remove_passkeys(&mgr.client, &session_id, a).await,
+        None => Ok(()),
+    };
+    match (outcome, cleanup) {
+        (Err(e), cleanup) => return Err(with_cleanup(e, cleanup)),
+        (Ok(()), Err(c)) => {
+            return Err(format!(
+                "auth login --bwu: the login may have gone through, but {c}"
+            ))
+        }
+        (Ok(()), Ok(())) => {}
+    }
+    if filled.is_empty() && passkey_state != "used" {
         return Err("auth login --bwu: found no login field on this page to fill".to_string());
     }
     if submitted {
@@ -16704,8 +16846,477 @@ async fn handle_auth_login_bwu(cmd: &Value, state: &mut DaemonState) -> Result<V
         "filled": filled,
         "submitted": submitted,
         "otp": otp_state,
+        "passkey": passkey_state,
         "url": url,
     }))
+}
+
+/// Part of the error for a vault passkey that keeps a signature counter; the
+/// default flow reports it instead of falling back.
+const PASSKEY_COUNTER_REFUSAL: &str = "this vault passkey keeps a signature counter";
+
+/// A virtual authenticator installed for one `auth login --bwu`.
+struct PasskeyAuthenticator {
+    id: String,
+    /// The new-document script that refuses `navigator.credentials.create`.
+    no_create_script: Option<String>,
+    /// Credential ids we imported (base64): their own `credentialAdded`
+    /// events are not the page registering one.
+    imported: Vec<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PasskeyEvent {
+    Asserted,
+    /// The page registered a credential with the temporary authenticator.
+    Added,
+    Timeout,
+}
+
+const PASSKEY_ADDED_ERROR: &str =
+    "auth login --bwu: the page tried to register a new passkey with \
+    the temporary authenticator. Stopped; if the site says a passkey was added, remove it from the \
+    account's security settings (its private key no longer exists).";
+
+/// While the temporary authenticator is installed, the page cannot register
+/// a passkey with it: `create()` is refused before it reaches Chrome. The
+/// original is kept under a symbol so [`RESTORE_CREATE_JS`] puts it back.
+const NO_CREATE_JS: &str = r#"(() => {
+    'use strict';
+    const c = navigator.credentials, k = Symbol.for('cu-bwu-create');
+    if (!c) return false;
+    if (c[k]) return c.create !== c[k];
+    const create = c.create;
+    try {
+        Object.defineProperty(c, k, { value: create, configurable: true });
+        c.create = function (o) {
+            return (o && o.publicKey)
+                ? Promise.reject(new DOMException('chrome-use auth login --bwu does not register passkeys', 'NotAllowedError'))
+                : create.call(this, o);
+        };
+    } catch (e) {
+        return false;
+    }
+    // True only when the wrapper really replaced create().
+    return c.create !== create && c[k] === create;
+})()"#;
+
+/// Undo [`NO_CREATE_JS`] on the current document.
+const RESTORE_CREATE_JS: &str = r#"(() => {
+    const c = navigator.credentials, k = Symbol.for('cu-bwu-create');
+    if (!c || !Object.prototype.hasOwnProperty.call(c, k)) return true;
+    const original = c[k];
+    try { delete c.create; } catch (e) {}
+    if (c.create !== original) { try { c.create = original; } catch (e) {} }
+    try { delete c[k]; } catch (e) {}
+    // True only when create() is the original again and our marker is gone.
+    return c.create === original && !Object.prototype.hasOwnProperty.call(c, k);
+})()"#;
+
+/// Load the item's passkeys for this site into a virtual authenticator on the
+/// tab (Chrome's WebAuthn domain). The site's own `navigator.credentials.get`
+/// is then answered by Chrome, signed with the vault key. Only passkeys whose
+/// rpId is the page's host or a parent of it. Ok(None) when none fits; Err
+/// when WebAuthn is unavailable or a passkey keeps a signature counter.
+async fn install_passkeys(
+    client: &super::cdp::client::CdpClient,
+    session_id: &str,
+    passkeys: &[Value],
+    host: &str,
+) -> Result<Option<PasskeyAuthenticator>, String> {
+    let fits: Vec<&Value> = passkeys
+        .iter()
+        .filter(|p| {
+            p["rpId"]
+                .as_str()
+                .is_some_and(|rp| host == rp || host.ends_with(&format!(".{rp}")))
+        })
+        .collect();
+    if fits.is_empty() {
+        return Ok(None);
+    }
+    // Chrome adds 1 to the counter before every assertion. For a synced
+    // passkey (counter 0, like Bitwarden and Apple report) starting at -1
+    // wraps Chrome's uint32 to 0, so the site sees 0 as with the extension.
+    // A passkey that does keep a counter would need the new value written
+    // back to the vault, which bwu does not do: refuse instead of letting
+    // the site see a value it already stored (a strict site then rejects it).
+    if let Some(n) = fits
+        .iter()
+        .find_map(|p| p["signCount"].as_u64().filter(|n| *n != 0))
+    {
+        return Err(format!(
+            "auth login --bwu: {PASSKEY_COUNTER_REFUSAL} ({n}); using it here \
+             would need the new count written back to the vault, which bitwarden-use does not do yet"
+        ));
+    }
+    client
+        .send_command(
+            "WebAuthn.enable",
+            Some(json!({ "enableUI": false })),
+            Some(session_id),
+        )
+        .await?;
+    let added = match client
+        .send_command(
+            "WebAuthn.addVirtualAuthenticator",
+            Some(json!({ "options": {
+                "protocol": "ctap2",
+                "ctap2Version": "ctap2_1",
+                "transport": "internal",
+                "hasResidentKey": true,
+                "hasUserVerification": true,
+                "isUserVerified": true,
+                "automaticPresenceSimulation": true,
+            }})),
+            Some(session_id),
+        )
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = client
+                .send_command("WebAuthn.disable", None, Some(session_id))
+                .await;
+            return Err(format!(
+                "auth login --bwu: no virtual authenticator here ({e})"
+            ));
+        }
+    };
+    let Some(id) = added["authenticatorId"].as_str().map(str::to_string) else {
+        let _ = client
+            .send_command("WebAuthn.disable", None, Some(session_id))
+            .await;
+        return Err("auth login --bwu: Chrome did not create a virtual authenticator".to_string());
+    };
+    let mut a = PasskeyAuthenticator {
+        id,
+        no_create_script: None,
+        imported: fits
+            .iter()
+            .filter_map(|p| p["credentialId"].as_str().map(str::to_string))
+            .collect(),
+    };
+    // Fail closed: without the create() guard on this page and the next ones,
+    // no authenticator stays installed.
+    a.no_create_script = client
+        .send_command(
+            "Page.addScriptToEvaluateOnNewDocument",
+            Some(json!({ "source": NO_CREATE_JS })),
+            Some(session_id),
+        )
+        .await
+        .ok()
+        .and_then(|v| v["identifier"].as_str().map(str::to_string));
+    let guard_now = auth_eval(client, session_id, NO_CREATE_JS.to_string()).await;
+    if a.no_create_script.is_none() || guard_now != Ok(Some(Value::Bool(true))) {
+        let cleanup = remove_passkeys(client, session_id, &a).await;
+        return Err(with_cleanup(
+            "auth login --bwu: could not guard the page against registering a passkey, so the \
+             passkey was not used"
+                .to_string(),
+            cleanup,
+        ));
+    }
+    for p in fits {
+        let mut credential = json!({
+            "credentialId": p["credentialId"],
+            "isResidentCredential": p["isResidentCredential"].as_bool().unwrap_or(false),
+            "rpId": p["rpId"],
+            "privateKey": p["privateKey"],
+            "signCount": -1,
+        });
+        if let Some(handle) = p["userHandle"].as_str() {
+            credential["userHandle"] = json!(handle);
+        }
+        if let Err(e) = client
+            .send_command(
+                "WebAuthn.addCredential",
+                Some(json!({ "authenticatorId": a.id, "credential": credential })),
+                Some(session_id),
+            )
+            .await
+        {
+            let cleanup = remove_passkeys(client, session_id, &a).await;
+            return Err(with_cleanup(
+                format!("auth login --bwu: Chrome refused the passkey ({e})"),
+                cleanup,
+            ));
+        }
+    }
+    Ok(Some(a))
+}
+
+/// Remove the authenticator, its no-create script, and the WebAuthn
+/// environment, so later passkey logins on this tab use the real ones.
+async fn remove_passkeys(
+    client: &super::cdp::client::CdpClient,
+    session_id: &str,
+    a: &PasskeyAuthenticator,
+) -> Result<(), String> {
+    // Every step runs; any failure is reported, so nothing claims the key is
+    // gone when that is not confirmed.
+    let mut failed: Vec<String> = Vec::new();
+    if let Err(e) = client
+        .send_command(
+            "WebAuthn.removeVirtualAuthenticator",
+            Some(json!({ "authenticatorId": a.id })),
+            Some(session_id),
+        )
+        .await
+    {
+        failed.push(format!("removing the virtual authenticator: {e}"));
+    }
+    if let Some(script) = &a.no_create_script {
+        if let Err(e) = client
+            .send_command(
+                "Page.removeScriptToEvaluateOnNewDocument",
+                Some(json!({ "identifier": script })),
+                Some(session_id),
+            )
+            .await
+        {
+            failed.push(format!("removing the create() guard script: {e}"));
+        }
+    }
+    // A page that navigated away took the guard with it.
+    match auth_eval(client, session_id, RESTORE_CREATE_JS.to_string()).await {
+        Ok(Some(Value::Bool(true))) => {}
+        Err(e) if page_went_away(&e) => {}
+        Ok(other) => failed.push(format!(
+            "restoring navigator.credentials.create: the page kept the guard ({})",
+            other.map_or_else(|| "no result".to_string(), |v| v.to_string())
+        )),
+        Err(e) => failed.push(format!("restoring navigator.credentials.create: {e}")),
+    }
+    if let Err(e) = client
+        .send_command("WebAuthn.disable", None, Some(session_id))
+        .await
+    {
+        failed.push(format!("disabling WebAuthn: {e}"));
+    }
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "could not confirm the temporary passkey authenticator was removed ({}); close this \
+             tab or browser to be sure the key is gone",
+            failed.join("; ")
+        ))
+    }
+}
+
+/// `err`, plus a note when the authenticator cleanup also failed.
+fn with_cleanup(err: String, cleanup: Result<(), String>) -> String {
+    match cleanup {
+        Ok(()) => err,
+        Err(c) => format!("{err}. Also: {c}"),
+    }
+}
+
+/// What this tab's authenticator did within `ms`. Only events for this
+/// session and authenticator count.
+async fn wait_passkey(
+    events: &mut tokio::sync::broadcast::Receiver<super::cdp::types::CdpEvent>,
+    session_id: &str,
+    authenticator: Option<&PasskeyAuthenticator>,
+    ms: u64,
+) -> PasskeyEvent {
+    let Some(a) = authenticator else {
+        return PasskeyEvent::Timeout;
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(ms);
+    loop {
+        match tokio::time::timeout_at(deadline, events.recv()).await {
+            Ok(Ok(ev))
+                if ev.session_id.as_deref() == Some(session_id)
+                    && ev.params["authenticatorId"].as_str() == Some(a.id.as_str()) =>
+            {
+                match ev.method.as_str() {
+                    "WebAuthn.credentialAsserted" => return PasskeyEvent::Asserted,
+                    "WebAuthn.credentialAdded"
+                        if !ev.params["credential"]["credentialId"]
+                            .as_str()
+                            .is_some_and(|id| a.imported.iter().any(|i| i == id)) =>
+                    {
+                        return PasskeyEvent::Added
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Ok(_)) | Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
+            Ok(Err(_)) | Err(_) => return PasskeyEvent::Timeout,
+        }
+    }
+}
+
+/// Run `expression` (returning JSON-able) on the page.
+async fn auth_eval(
+    client: &super::cdp::client::CdpClient,
+    session_id: &str,
+    expression: String,
+) -> Result<Option<Value>, String> {
+    let r: super::cdp::types::EvaluateResult = client
+        .send_command_typed(
+            "Runtime.evaluate",
+            &super::cdp::types::EvaluateParams {
+                expression,
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            Some(session_id),
+        )
+        .await?;
+    if let Some(ex) = r.exception_details {
+        return Err(format!("page script threw: {}", ex.text));
+    }
+    Ok(r.result.value)
+}
+
+/// JS: the page's visible passkey / security-key sign-in control, if any.
+/// Only sign-in wording; "Add a passkey", "Register a security key",
+/// "Learn more about passkeys" and the like never match.
+const PASSKEY_SIGNIN_CONTROL_JS: &str = r#"(() => {
+    const yes = /^(sign in|log in|login|continue|verify|authenticate)?\s*(with|using)?\s*(a |your )?(passkey|security key)s?$|^use (a |your )?(passkey|security key)s?$|通行密钥登录|使用通行密钥|使用安全密钥|パスキーでサインイン|パスキーを使用|セキュリティ ?キーを使用/i;
+    const no = /add|register|create|set ?up|new|learn|manage|about|remove|delete|添加|注册|创建|了解|追加|登録|作成/i;
+    const visible = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== 'hidden'; };
+    return [...document.querySelectorAll('button, a, [role=button], input[type=button], input[type=submit]')]
+        .find((el) => {
+            const t = (el.innerText || el.value || el.getAttribute('aria-label') || '').trim().replace(/\s+/g, ' ');
+            return t.length <= 40 && visible(el) && !el.disabled && yes.test(t) && !no.test(t);
+        }) || null;
+})()"#;
+
+/// After the password was submitted: does the next page ask for a passkey or
+/// security key (rather than a code)? Waits for that page up to 4 s.
+async fn page_asks_for_passkey(
+    client: &super::cdp::client::CdpClient,
+    session_id: &str,
+    origin: &str,
+    login_page: &str,
+) -> bool {
+    let expression = format!(
+        r#"(() => {{
+            if (location.origin !== {origin}) return 'gone';
+            const visible = (el) => {{ const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; }};
+            const otp = {otp}.some((s) => {{ try {{ return [...document.querySelectorAll(s)].some(visible); }} catch (e) {{ return false; }} }});
+            if (otp) return 'otp';
+            if ({control}) return 'passkey';
+            const heads = [...document.querySelectorAll('h1, h2, h3, p, legend')].filter(visible)
+                .map((el) => el.innerText || '').join(' ');
+            if (/passkey|security key|通行密钥|安全密钥|パスキー|セキュリティ ?キー/i.test(heads)) return 'passkey';
+            // A new page that finished loading without asking: no waiting.
+            const left = location.href.split('#')[0] !== {login_page};
+            return (left && document.readyState === 'complete') ? 'none' : null;
+        }})()"#,
+        origin = serde_json::to_string(origin).unwrap_or_default(),
+        login_page = serde_json::to_string(login_page.split('#').next().unwrap_or(login_page))
+            .unwrap_or_default(),
+        otp = serde_json::to_string(AUTH_OTP_SELECTORS).unwrap_or_default(),
+        control = PASSKEY_SIGNIN_CONTROL_JS,
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(4_000);
+    loop {
+        match auth_eval(client, session_id, expression.clone()).await {
+            Ok(Some(Value::String(k))) => return k == "passkey",
+            Err(e) if !page_went_away(&e) => return false,
+            _ => {}
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// After the authenticator signed: wait for the outcome. The page moving on
+/// is success; a visible passkey / security-key error on the page the
+/// ceremony started from (or a fallback to a code or password page) is a
+/// refusal, reported with the site's message. `page` is that start URL.
+async fn check_passkey_accepted(
+    client: &super::cdp::client::CdpClient,
+    session_id: &str,
+    page: &str,
+) -> Result<(), String> {
+    let expression = format!(
+        r#"(() => {{
+            const visible = (el) => {{ const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== 'hidden'; }};
+            const alert = [...document.querySelectorAll('[role=alert], .flash-error, .flash-warn, .error, .alert, [aria-live=assertive]')]
+                .filter(visible)
+                .map((el) => (el.innerText || '').trim().replace(/\s+/g, ' '))
+                .find((t) => /passkey|security key|webauthn|通行密钥|安全密钥|パスキー|セキュリティ ?キー/i.test(t)
+                    && /unable|fail|could ?n.?t|cannot|not (be )?(recogni[sz]ed|accepted|valid|verified|allowed)|invalid|error|denied|rejected|try again|无法|失败|错误|未能|できません|失敗|エラー/i.test(t));
+            const stayed = location.href.split('#')[0] === {page};
+            const fallback = /two-factor\/app|otp|totp|\/password|\/login|\/signin|\/sign_in/i.test(location.pathname);
+            if (alert && (stayed || fallback)) return {{ refused: alert.slice(0, 160) }};
+            return stayed ? null : 'moved';
+        }})()"#,
+        page = serde_json::to_string(page.split('#').next().unwrap_or(page)).unwrap_or_default(),
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(8_000);
+    loop {
+        match auth_eval(client, session_id, expression.clone()).await {
+            Ok(Some(Value::Object(o))) => {
+                let alert = o.get("refused").and_then(Value::as_str).unwrap_or("");
+                return Err(format!(
+                    "auth login --bwu: the site did not accept the passkey (\"{alert}\"). If it \
+                     worked before, the site may track a signature counter that another client \
+                     raised; re-registering the passkey there resets it."
+                ));
+            }
+            Ok(Some(Value::String(_))) => {
+                // Moved on; give a redirect chain a moment to land on a
+                // refusal page before calling it accepted.
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                if let Ok(Some(Value::Object(o))) =
+                    auth_eval(client, session_id, expression.clone()).await
+                {
+                    let alert = o.get("refused").and_then(Value::as_str).unwrap_or("");
+                    return Err(format!(
+                        "auth login --bwu: the site did not accept the passkey (\"{alert}\")."
+                    ));
+                }
+                return Ok(());
+            }
+            Err(e) if !page_went_away(&e) => return Err(e),
+            _ => {}
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// Press the page's passkey sign-in control (a trusted click: some sites
+/// start the ceremony only on a user gesture). Sign-in wording only; never
+/// a control that adds or registers one.
+async fn click_passkey_button(
+    client: &super::cdp::client::CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    iframe_sessions: &HashMap<String, String>,
+    marker: &str,
+) -> Result<(), String> {
+    let tag = format!("bwupk-{marker}");
+    let expression = format!(
+        "(() => {{ const el = {PASSKEY_SIGNIN_CONTROL_JS}; if (!el) return false; \
+         el.setAttribute('data-cu-auth', {tag}); return true; }})()",
+        tag = serde_json::to_string(&tag).unwrap_or_default(),
+    );
+    if auth_eval(client, session_id, expression).await? != Some(Value::Bool(true)) {
+        return Err("no passkey sign-in button on this page".to_string());
+    }
+    interaction::click(
+        client,
+        session_id,
+        ref_map,
+        &format!("[data-cu-auth=\"{tag}\"]"),
+        "left",
+        1,
+        iframe_sessions,
+    )
+    .await
 }
 
 /// Type a one-time code into the marked field exactly once: focus, select
