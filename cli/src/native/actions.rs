@@ -16882,23 +16882,35 @@ const PASSKEY_ADDED_ERROR: &str =
 /// a passkey with it: `create()` is refused before it reaches Chrome. The
 /// original is kept under a symbol so [`RESTORE_CREATE_JS`] puts it back.
 const NO_CREATE_JS: &str = r#"(() => {
+    'use strict';
     const c = navigator.credentials, k = Symbol.for('cu-bwu-create');
     if (!c) return false;
-    if (c[k]) return true;
+    if (c[k]) return c.create !== c[k];
     const create = c.create;
-    Object.defineProperty(c, k, { value: create, configurable: true });
-    c.create = function (o) {
-        return (o && o.publicKey)
-            ? Promise.reject(new DOMException('chrome-use auth login --bwu does not register passkeys', 'NotAllowedError'))
-            : create.call(this, o);
-    };
-    return true;
+    try {
+        Object.defineProperty(c, k, { value: create, configurable: true });
+        c.create = function (o) {
+            return (o && o.publicKey)
+                ? Promise.reject(new DOMException('chrome-use auth login --bwu does not register passkeys', 'NotAllowedError'))
+                : create.call(this, o);
+        };
+    } catch (e) {
+        return false;
+    }
+    // True only when the wrapper really replaced create().
+    return c.create !== create && c[k] === create;
 })()"#;
 
 /// Undo [`NO_CREATE_JS`] on the current document.
 const RESTORE_CREATE_JS: &str = r#"(() => {
     const c = navigator.credentials, k = Symbol.for('cu-bwu-create');
-    if (c && c[k]) { c.create = c[k]; delete c[k]; }
+    if (!c || !Object.prototype.hasOwnProperty.call(c, k)) return true;
+    const original = c[k];
+    try { delete c.create; } catch (e) {}
+    if (c.create !== original) { try { c.create = original; } catch (e) {} }
+    try { delete c[k]; } catch (e) {}
+    // True only when create() is the original again and our marker is gone.
+    return c.create === original && !Object.prototype.hasOwnProperty.call(c, k);
 })()"#;
 
 /// Load the item's passkeys for this site into a virtual authenticator on the
@@ -17068,10 +17080,14 @@ async fn remove_passkeys(
         }
     }
     // A page that navigated away took the guard with it.
-    if let Err(e) = auth_eval(client, session_id, RESTORE_CREATE_JS.to_string()).await {
-        if !page_went_away(&e) {
-            failed.push(format!("restoring navigator.credentials.create: {e}"));
-        }
+    match auth_eval(client, session_id, RESTORE_CREATE_JS.to_string()).await {
+        Ok(Some(Value::Bool(true))) => {}
+        Err(e) if page_went_away(&e) => {}
+        Ok(other) => failed.push(format!(
+            "restoring navigator.credentials.create: the page kept the guard ({})",
+            other.map_or_else(|| "no result".to_string(), |v| v.to_string())
+        )),
+        Err(e) => failed.push(format!("restoring navigator.credentials.create: {e}")),
     }
     if let Err(e) = client
         .send_command("WebAuthn.disable", None, Some(session_id))
@@ -17151,6 +17167,9 @@ async fn auth_eval(
             Some(session_id),
         )
         .await?;
+    if let Some(ex) = r.exception_details {
+        return Err(format!("page script threw: {}", ex.text));
+    }
     Ok(r.result.value)
 }
 
