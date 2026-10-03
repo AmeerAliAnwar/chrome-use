@@ -121,14 +121,17 @@ chrome-use auth login --bwu --passkey       # sign in with the vault passkey
   if needed (never one that adds or registers a passkey, and the page cannot
   register one with it). Where WebAuthn is unavailable it falls back to the
   one-time code. `auth login --bwu --passkey` signs in with the passkey alone
-  (no password is read).
+  (no password is read). Passkeys work in a `--launch` browser only: on your
+  own Chrome (the extension relay) the page's request does not reach
+  chrome-use's authenticator, so `--passkey` refuses there and the default flow
+  reports `"passkey": "unsupported"` and uses the password and code as before.
   The site sees the vault's signature counter, 0 for a synced passkey, the
   same as the Bitwarden extension. A passkey that keeps a non-zero counter is
   refused (its new count would have to be written back to the vault). A site
   that refuses the passkey is reported with its message.
 - `--no-submit` fills only: no passkey and no one-time code (sites submit a
   code on its last digit).
-- Result: `{"item", "filled": [...], "submitted", "otp": "filled" | "not asked" | "none", "passkey": "used" | "not asked" | "none", "url"}`.
+- Result: `{"item", "filled": [...], "submitted", "otp": "filled" | "not asked" | "none", "passkey": "used" | "not asked" | "unsupported" | "none", "url"}`.
   Run `snapshot` afterwards to see whether the site accepted the login.
 
 ### Single fields

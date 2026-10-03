@@ -16516,11 +16516,26 @@ async fn handle_auth_login_bwu(cmd: &Value, state: &mut DaemonState) -> Result<V
     // time, so nothing that happened before can count as an answer.
     let mut authenticator: Option<PasskeyAuthenticator> = None;
     let mut webauthn_events = mgr.client.subscribe();
+    // On the user's own Chrome (extension relay) the page's WebAuthn request
+    // does not reach the virtual authenticator (tested: get() stays pending,
+    // no assertion; the cause is not established). Passkeys are not used
+    // there; the password / one-time code flow is unchanged.
+    let relay = mgr.on_relay();
     let mut passkey_state = if passkeys.is_empty() {
         "none"
+    } else if relay {
+        "unsupported"
     } else {
         "not asked"
     };
+    if passkey_first && relay {
+        return Err(
+            "auth login --bwu --passkey: passkeys are not supported on your own Chrome \
+                    (extension relay): there the page's WebAuthn request does not reach \
+                    chrome-use's authenticator. Use a --launch session, or sign in without --passkey."
+                .to_string(),
+        );
+    }
     if passkey_first {
         webauthn_events = mgr.client.subscribe();
         authenticator = install_passkeys(&mgr.client, &session_id, &passkeys, &host)
@@ -16565,8 +16580,8 @@ async fn handle_auth_login_bwu(cmd: &Value, state: &mut DaemonState) -> Result<V
                 PasskeyEvent::Asserted => {}
                 PasskeyEvent::Added => return Err(PASSKEY_ADDED_ERROR.to_string()),
                 PasskeyEvent::Timeout => {
-                    return Err("auth login --bwu --passkey: the page never asked for the passkey. \
-                                Open its passkey sign-in (a \"Sign in with a passkey\" button) and run it again."
+                    return Err("auth login --bwu --passkey: no passkey assertion was observed within 12s. \
+                                If the page has a passkey sign-in, open it and run this again."
                         .to_string())
                 }
             }
@@ -16722,6 +16737,7 @@ async fn handle_auth_login_bwu(cmd: &Value, state: &mut DaemonState) -> Result<V
         // key (and the item has one), answer it with the virtual authenticator.
         // Pages that do not use WebAuthn cost one quick check, no waiting.
         if !passkeys.is_empty()
+            && !relay
             && submitted
             && !no_submit
             && page_asks_for_passkey(&mgr.client, &session_id, &origin, &current).await
