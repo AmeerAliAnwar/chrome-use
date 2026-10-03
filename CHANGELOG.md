@@ -1,8 +1,19 @@
 # Changelog
 
-## 1.5.155
+## 1.5.156
 
 <!-- release:start -->
+### Bug Fixes
+
+- **The cookie argument checks that 1.5.155's notes described actually ship now.** In 1.5.155 the parser half of #395's review fixes never applied: `cookies get --url` returned the current page's cookies instead of that URL's, and `cookies get`/`clear` still let unknown or repeated arguments through. The daemon already refused `--name` on a full clear, so the browser could not be wiped. Now `cookies clear --name` needs `--domain` or `--url`, `--domain` with `--url` or a flag given twice is an error, and `cookies get` takes `--url` (repeatable) and rejects anything else. (#396)
+
+### Contributors
+
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.155
+
 ### Bug Fixes
 
 - **`cookies clear` no longer wipes the whole browser when asked for one site.** It ignored every argument and cleared all cookies: `cookies clear --domain platform.openai.com` on a real Chrome profile signed the user out of GitHub, claude.ai, x.com and every other site, while printing `✓ Cookies cleared`. Now `--domain <d>` (or `--url <u>`, using its host) deletes that domain's and its subdomains' cookies and never a parent domain's, `--name` narrows it to one cookie, and the result says how many were cleared and where. Clearing every cookie needs `--all --yes`; without `--yes` nothing is deleted and it says how many cookies on how many sites would go. Unknown arguments to `cookies clear`, `get` and `set` are errors instead of being skipped. Partitioned cookies are deleted too. (#395)
@@ -11,7 +22,6 @@
 ### Contributors
 
 - @leeguooooo
-<!-- release:end -->
 
 ## 1.5.154
 
