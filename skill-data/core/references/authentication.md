@@ -135,7 +135,7 @@ chrome-use auth login --bwu --passkey       # sign in with the vault passkey
   that refuses the passkey is reported with its message.
 - `--no-submit` fills only: no passkey and no one-time code (sites submit a
   code on its last digit).
-- Result: `{"item", "filled": [...], "submitted", "otp": "filled" | "not asked" | "none", "passkey": "used" | "not asked" | "unsupported" | "none", "url"}`.
+- Result: `{"item", "filled": [...], "submitted", "otp": "filled" | "not asked" | "none", "passkey": "used" | "not asked" | "unsupported" | "unavailable" | "none", "url"}`.
   Run `snapshot` afterwards to see whether the site accepted the login.
 
 ### Single fields
