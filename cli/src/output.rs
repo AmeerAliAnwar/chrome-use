@@ -3819,10 +3819,11 @@ Login Options:
 Bitwarden Login Options:
   --bwu                    Use bitwarden-use (0.7.0+); reuse the current login page
   --item <id|name>          Choose an account when the site has several
-  --passkey                Sign in with a vault passkey (bitwarden-use 0.9.0+)
-  --no-submit              Fill only; do not submit or install a passkey authenticator
+  --passkey                Sign in with a vault passkey in --launch mode (bwu 0.9.0+)
+  --no-submit              Fill only; skip TOTP and passkey authenticators
                            Cannot be combined with --passkey
-  Password login can answer TOTP or a supported passkey second factor.
+  On the extension relay, passkeys are unsupported; password/TOTP still work.
+  In --launch mode, password login can also answer a passkey second factor.
   A signed assertion is not proof of login; verify the authenticated destination.
 
 Login behavior:
@@ -3841,7 +3842,8 @@ Examples:
   chrome-use auth login github
   chrome-use auth login github --no-navigate
   chrome-use auth login --bwu
-  chrome-use auth login --bwu --item github.com --passkey
+  chrome-use --session passkey-demo --launch open https://github.com/login
+  chrome-use --session passkey-demo --launch auth login --bwu --item github.com --passkey
   chrome-use auth list
   chrome-use auth show github
   chrome-use auth delete github

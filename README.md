@@ -224,7 +224,7 @@ The agent operates in your Chrome: you'll see tabs opening, pages loading, click
 | `chrome-use site github/issues epiral/bb-browser --json` | Run a site adapter and get clean JSON from the site's own API |
 | `chrome-use session list` · `session stop [name]` | Manage session workers |
 | `chrome-use auth login --bwu [--item <id\|name>]` | Fill the current login page from Bitwarden; handles TOTP and supported passkey second factors |
-| `chrome-use auth login --bwu --passkey` | Sign in with a vault passkey alone (bitwarden-use 0.9.0+) |
+| `chrome-use auth login --bwu --passkey` | Sign in with a vault passkey in `--launch` mode (bwu 0.9.0+) |
 | `chrome-use status` | Relay, profile, extension, and session health |
 
 A field that shows your text is not proof the page saved it. `fill` warns
@@ -247,7 +247,10 @@ repeat `tab new` or automatically replay an action whose outcome is unknown.
 
 Open the site's login page, then run `chrome-use auth login --bwu`. When several
 accounts match, select one with `--item <id|name>`. Add `--passkey` to use only a
-vault passkey (bitwarden-use 0.9.0+); passwords and TOTP are not read in that mode.
+vault passkey in a `--launch` browser (bitwarden-use 0.9.0+); passwords, TOTP
+and custom fields are not read in that mode. On the extension relay, passkeys
+are unsupported: passkey-only login fails immediately, while ordinary login
+keeps the password/TOTP flow.
 Only synced passkeys with signature counter 0 are supported; nonzero counters
 need vault write-back and are refused. The temporary WebAuthn authenticator is
 removed after the attempt. If WebAuthn
@@ -257,14 +260,15 @@ is unavailable, ordinary login keeps the password flow; passkey-only login fails
 |---|---|
 | `--bwu` | Use the vault account for the current page (bwu 0.7.0+) |
 | `--item <id\|name>` | Select one matching account |
-| `--passkey` | Sign in with a supported vault passkey |
-| `--no-submit` | Fill only; installs no passkey authenticator; incompatible with `--passkey` |
+| `--passkey` | Sign in with a vault passkey in `--launch` mode |
+| `--no-submit` | Fill only; skips TOTP and passkey authenticators; incompatible with `--passkey` |
 
 ```bash
 chrome-use open https://github.com/login
 chrome-use auth login --bwu --item github.com
-chrome-use auth login --bwu --item github.com --passkey
-chrome-use snapshot -i
+chrome-use --session passkey-demo --launch open https://github.com/login
+chrome-use --session passkey-demo --launch auth login --bwu --item github.com --passkey
+chrome-use --session passkey-demo --launch snapshot -i
 ```
 
 Check the authenticated destination after login. A passkey assertion means

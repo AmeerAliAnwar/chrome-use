@@ -214,7 +214,7 @@ Agent 在你的 Chrome 里操作：你能实时看到开标签、加载、点击
 | `chrome-use site github/issues epiral/bb-browser --json` | 运行站点适配器，从网站自己的接口拿干净的 JSON |
 | `chrome-use session list` · `session stop [name]` | 管理会话 worker |
 | `chrome-use auth login --bwu [--item <id\|name>]` | 从 Bitwarden 填写当前登录页，处理 TOTP 和支持的 passkey 两步验证 |
-| `chrome-use auth login --bwu --passkey` | 只用密码库里的 passkey 登录（bitwarden-use 0.9.0+） |
+| `chrome-use auth login --bwu --passkey` | 在 `--launch` 浏览器中用 passkey 登录（bwu 0.9.0+） |
 | `chrome-use status` | 中继、profile、扩展与会话健康总览 |
 
 输入框里显示了你的文字，不代表页面已经记下。`fill` 发现表单的保存/提交按钮在填写前后都处于禁用时会警告；
@@ -231,8 +231,9 @@ chrome-use 会保留该标签并报告目标 ID。保持相同 session 和连接
 ### 用 Bitwarden 登录
 
 打开网站登录页后运行 `chrome-use auth login --bwu`。多个账号匹配时，用
-`--item <id|name>` 选一个。加 `--passkey` 只用 passkey 登录（需 bitwarden-use
-0.9.0+），此模式不读取密码或 TOTP。仅支持签名计数器为 0 的同步型 passkey；非零计数器需要写回密码库，当前会拒绝。
+`--item <id|name>` 选一个。在 `--launch` 浏览器中加 `--passkey` 只用 passkey
+登录（需 bitwarden-use 0.9.0+），不读取密码、TOTP 或自定义字段。扩展 relay
+暂不支持 passkey：passkey-only 登录立即报错，普通登录继续走密码/TOTP。仅支持签名计数器为 0 的同步型 passkey；非零计数器需要写回密码库，当前会拒绝。
 临时 WebAuthn 验证器在尝试结束后移除。
 环境不支持 WebAuthn 时，普通登录继续走密码流程；passkey-only 登录报错。
 
@@ -240,14 +241,15 @@ chrome-use 会保留该标签并报告目标 ID。保持相同 session 和连接
 |---|---|
 | `--bwu` | 使用当前网站的密码库账号（bwu 0.7.0+） |
 | `--item <id\|name>` | 选择一个匹配的账号 |
-| `--passkey` | 用支持的密码库 passkey 登录 |
-| `--no-submit` | 只填不提交，不安装 passkey 验证器；不能与 `--passkey` 同用 |
+| `--passkey` | 在 `--launch` 浏览器中用密码库 passkey 登录 |
+| `--no-submit` | 只填不提交，跳过 TOTP 和 passkey 验证器；不能与 `--passkey` 同用 |
 
 ```bash
 chrome-use open https://github.com/login
 chrome-use auth login --bwu --item github.com
-chrome-use auth login --bwu --item github.com --passkey
-chrome-use snapshot -i
+chrome-use --session passkey-demo --launch open https://github.com/login
+chrome-use --session passkey-demo --launch auth login --bwu --item github.com --passkey
+chrome-use --session passkey-demo --launch snapshot -i
 ```
 
 登录后检查是否到达已认证的目标页面。passkey assertion 只说明 Chrome 签了请求，

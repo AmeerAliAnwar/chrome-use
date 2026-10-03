@@ -168,7 +168,7 @@
       <!-- ============ Bitwarden ======= -->
       <h2>用 Bitwarden 密码与 passkey 登录</h2>
       <p>在登录页运行 <code>auth login --bwu</code>，从 <a href="https://github.com/leeguooooo/bitwarden-use">bitwarden-use</a>（0.7.0+）选择当前网站的账号。多个账号匹配时加 <code>--item</code>。密码、TOTP 和私钥通过 <code>bwu run</code> 传给子进程，不放进参数或输出。</p>
-      <p>加 <code>--passkey</code> 只用密码库里的 passkey 登录（需 bwu 0.9.0+），不读取密码、TOTP 或自定义字段。普通密码登录也可用 passkey 完成两步验证。凭证装进标签页上的临时 WebAuthn 验证器，由 Chrome 签名，尝试结束后移除。仅支持签名计数器为 0 的同步型 passkey；非零计数器需要写回密码库，当前会拒绝。环境不支持 WebAuthn 时，普通登录回退到密码流程；passkey-only 登录报错。</p>
+      <p>在 <code>--launch</code> 浏览器中加 <code>--passkey</code> 只用密码库里的 passkey 登录（需 bwu 0.9.0+），不读取密码、TOTP 或自定义字段。普通密码登录也可用 passkey 完成两步验证。凭证装进标签页上的临时 WebAuthn 验证器，由 Chrome 签名，尝试结束后移除。仅支持签名计数器为 0 的同步型 passkey；非零计数器需要写回密码库，当前会拒绝。扩展 relay 暂不支持 passkey：passkey-only 登录立即报错，普通登录继续走密码/TOTP。环境不支持 WebAuthn 时，普通登录回退到密码流程；passkey-only 登录报错。</p>
       <div class="du-code">
         <div class="du-code-head">
           <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
@@ -177,10 +177,11 @@
 <pre><code><span class="du-prompt">$</span> curl -fsSL https://raw.githubusercontent.com/leeguooooo/bitwarden-use/main/install.sh | sh
 <span class="du-prompt">$</span> chrome-use open https://github.com/login
 <span class="du-prompt">$</span> chrome-use auth login <span class="du-flag">--bwu --item</span> github.com
-<span class="du-prompt">$</span> chrome-use auth login <span class="du-flag">--bwu --item</span> github.com <span class="du-flag">--passkey</span>
-<span class="du-prompt">$</span> chrome-use snapshot <span class="du-flag">-i</span></code></pre>
+<span class="du-prompt">$</span> chrome-use <span class="du-flag">--session</span> passkey-demo <span class="du-flag">--launch</span> open https://github.com/login
+<span class="du-prompt">$</span> chrome-use <span class="du-flag">--session</span> passkey-demo <span class="du-flag">--launch</span> auth login <span class="du-flag">--bwu --item</span> github.com <span class="du-flag">--passkey</span>
+<span class="du-prompt">$</span> chrome-use <span class="du-flag">--session</span> passkey-demo <span class="du-flag">--launch</span> snapshot <span class="du-flag">-i</span></code></pre>
       </div>
-      <p><code>--no-submit</code> 只填不提交，也不安装 passkey 验证器；不能与 <code>--passkey</code> 同用。签名成功不代表网站接受了登录，需用 <code>snapshot</code> 或网站的已认证状态确认目标页面。</p>
+      <p><code>--no-submit</code> 只填不提交，不读取 TOTP，也不安装 passkey 验证器；不能与 <code>--passkey</code> 同用。签名成功不代表网站接受了登录，需用 <code>snapshot</code> 或网站的已认证状态确认目标页面。</p>
 
       <hr class="du-divider" />
 

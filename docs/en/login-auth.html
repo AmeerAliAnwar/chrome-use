@@ -176,7 +176,7 @@
       <!-- ============ Bitwarden ======= -->
       <h2>Sign in with Bitwarden passwords and passkeys</h2>
       <p>On the login page, run <code>auth login --bwu</code> to select the site's account through <a href="https://github.com/leeguooooo/bitwarden-use">bitwarden-use</a> (0.7.0+). Use <code>--item</code> when several accounts match. Passwords, TOTP and private keys are passed through <code>bwu run</code> to the child, never placed in arguments or output.</p>
-      <p>Add <code>--passkey</code> to sign in using only the vault passkey (bwu 0.9.0+), without reading passwords, TOTP or custom fields. Ordinary password login can also answer a passkey second factor. Credentials go into a temporary WebAuthn authenticator on the tab and Chrome signs the request; the authenticator is removed after the attempt. Only synced passkeys with counter 0 are supported; nonzero counters need vault write-back and are refused. Without WebAuthn support, ordinary login falls back to passwords; passkey-only login fails.</p>
+      <p>In a <code>--launch</code> browser, add <code>--passkey</code> to sign in using only the vault passkey (bwu 0.9.0+), without reading passwords, TOTP or custom fields. Ordinary password login can also answer a passkey second factor. Credentials go into a temporary WebAuthn authenticator on the tab and Chrome signs the request; the authenticator is removed after the attempt. Only synced passkeys with counter 0 are supported; nonzero counters need vault write-back and are refused. Passkeys are unsupported on the extension relay: passkey-only login fails immediately; ordinary login keeps the password/TOTP flow. Without WebAuthn support, ordinary login falls back to passwords; passkey-only login fails.</p>
       <div class="du-code">
         <div class="du-code-head">
           <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
@@ -185,10 +185,11 @@
 <pre><code><span class="du-prompt">$</span> curl -fsSL https://raw.githubusercontent.com/leeguooooo/bitwarden-use/main/install.sh | sh
 <span class="du-prompt">$</span> chrome-use open https://github.com/login
 <span class="du-prompt">$</span> chrome-use auth login <span class="du-flag">--bwu --item</span> github.com
-<span class="du-prompt">$</span> chrome-use auth login <span class="du-flag">--bwu --item</span> github.com <span class="du-flag">--passkey</span>
-<span class="du-prompt">$</span> chrome-use snapshot <span class="du-flag">-i</span></code></pre>
+<span class="du-prompt">$</span> chrome-use <span class="du-flag">--session</span> passkey-demo <span class="du-flag">--launch</span> open https://github.com/login
+<span class="du-prompt">$</span> chrome-use <span class="du-flag">--session</span> passkey-demo <span class="du-flag">--launch</span> auth login <span class="du-flag">--bwu --item</span> github.com <span class="du-flag">--passkey</span>
+<span class="du-prompt">$</span> chrome-use <span class="du-flag">--session</span> passkey-demo <span class="du-flag">--launch</span> snapshot <span class="du-flag">-i</span></code></pre>
       </div>
-      <p><code>--no-submit</code> fills only and installs no passkey authenticator; it cannot be combined with <code>--passkey</code>. A signed assertion does not prove site acceptance: check the authenticated destination with <code>snapshot</code> or the site's authenticated state.</p>
+      <p><code>--no-submit</code> fills only, skips TOTP and installs no passkey authenticator; it cannot be combined with <code>--passkey</code>. A signed assertion does not prove site acceptance: check the authenticated destination with <code>snapshot</code> or the site's authenticated state.</p>
 
       <hr class="du-divider" />
 
