@@ -253,7 +253,9 @@ are unsupported: passkey-only login fails immediately, while ordinary login
 keeps the password/TOTP flow.
 Only synced passkeys with signature counter 0 are supported; nonzero counters
 need vault write-back and are refused. The temporary WebAuthn authenticator is
-removed after the attempt. If WebAuthn
+removed after the attempt. A temporary page guard blocks ordinary passkey
+registration calls; retained native references can bypass it. Unexpected
+credential creation or unconfirmed cleanup aborts the command. If WebAuthn
 is unavailable, ordinary login keeps the password flow; passkey-only login fails.
 
 | Login option | Effect |

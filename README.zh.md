@@ -234,7 +234,8 @@ chrome-use 会保留该标签并报告目标 ID。保持相同 session 和连接
 `--item <id|name>` 选一个。在 `--launch` 浏览器中加 `--passkey` 只用 passkey
 登录（需 bitwarden-use 0.9.0+），不读取密码、TOTP 或自定义字段。扩展 relay
 暂不支持 passkey：passkey-only 登录立即报错，普通登录继续走密码/TOTP。仅支持签名计数器为 0 的同步型 passkey；非零计数器需要写回密码库，当前会拒绝。
-临时 WebAuthn 验证器在尝试结束后移除。
+临时 WebAuthn 验证器在尝试结束后移除。页面拦截会拒绝普通 passkey 注册调用，
+但预先保存的原始函数引用可绕过它。检测到意外注册或无法确认清理时，命令报错。
 环境不支持 WebAuthn 时，普通登录继续走密码流程；passkey-only 登录报错。
 
 | 登录选项 | 作用 |

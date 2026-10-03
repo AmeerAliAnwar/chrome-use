@@ -5,7 +5,7 @@
 <!-- release:start -->
 ### New Features
 
-- **`auth login --bwu` signs in with vault passkeys.** In a `--launch` browser with bitwarden-use 0.9.0+, a temporary WebAuthn authenticator can answer a passkey or security-key second factor; `--passkey` signs in with the passkey alone, without reading passwords, TOTP or custom fields. Synced passkeys report counter 0, as with the Bitwarden extension; nonzero counters are refused until vault write-back is supported. Only sign-in controls are clicked, passkey registration is blocked during the attempt, and the authenticator and registration guard are removed afterwards. Site refusals include the visible error message. Passkeys are explicitly unsupported on the extension relay: `--passkey` fails immediately and ordinary login retains the password/TOTP flow. (#398)
+- **`auth login --bwu` signs in with vault passkeys.** In a `--launch` browser with bitwarden-use 0.9.0+, a temporary WebAuthn authenticator can answer a passkey or security-key second factor; `--passkey` signs in with the passkey alone, without reading passwords, TOTP or custom fields. Synced passkeys report counter 0, as with the Bitwarden extension; nonzero counters are refused until vault write-back is supported. Only sign-in controls are clicked, normal passkey registration calls are blocked during the attempt, and the authenticator and registration guard are removed afterwards. Retained native function references can bypass the page guard; unexpected credential creation aborts the command, as does unconfirmed cleanup. Site refusals include the visible error message. Passkeys are explicitly unsupported on the extension relay: `--passkey` fails immediately and ordinary login retains the password/TOTP flow. (#398)
 
 ### Bug Fixes
 

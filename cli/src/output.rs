@@ -3824,6 +3824,7 @@ Bitwarden Login Options:
                            Cannot be combined with --passkey
   On the extension relay, passkeys are unsupported; password/TOTP still work.
   In --launch mode, password login can also answer a passkey second factor.
+  Unexpected registration or unconfirmed authenticator cleanup aborts the command.
   A signed assertion is not proof of login; verify the authenticated destination.
 
 Login behavior:
