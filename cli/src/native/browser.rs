@@ -2248,17 +2248,38 @@ impl BrowserManager {
         let timeout = tokio::time::Duration::from_millis(self.default_timeout_ms);
 
         tokio::time::timeout(timeout, async {
+            let mut check_interval = tokio::time::interval(tokio::time::Duration::from_millis(100));
+            check_interval.tick().await;
+
             loop {
-                match rx.recv().await {
-                    Ok(event) => {
-                        if event.method == event_name
-                            && event.session_id.as_deref() == Some(session_id)
-                        {
-                            return Ok(());
+                tokio::select! {
+                    recv_res = rx.recv() => {
+                        match recv_res {
+                            Ok(event) => {
+                                if event.method == event_name
+                                    && event.session_id.as_deref() == Some(session_id)
+                                {
+                                    return Ok(());
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    _ = check_interval.tick() => {
+                        if let Ok(state_val) = self.eval_in_context("document.readyState", session_id, None, Some(400)).await {
+                            if let Some(state_str) = state_val.as_str() {
+                                let is_ready = match wait_until {
+                                    WaitUntil::Load => state_str == "complete",
+                                    WaitUntil::DomContentLoaded => state_str == "interactive" || state_str == "complete",
+                                    _ => false,
+                                };
+                                if is_ready {
+                                    return Ok(());
+                                }
+                            }
+                        }
+                    }
                 }
             }
             Err("Event stream closed".to_string())
@@ -2304,7 +2325,8 @@ impl BrowserManager {
             }
         });
         let session_id = self.active_session_id()?.to_string();
-        self.eval_in_context(script, &session_id, None, timeout_ms).await
+        self.eval_in_context(script, &session_id, None, timeout_ms)
+            .await
     }
 
     /// Evaluate `script` in a specific frame's context (issue #58 `eval --frame`).
@@ -2314,7 +2336,8 @@ impl BrowserManager {
         frame_id: &str,
         iframe_sessions: &HashMap<String, String>,
     ) -> Result<Value, String> {
-        self.evaluate_in_frame_with_timeout(script, frame_id, iframe_sessions, None).await
+        self.evaluate_in_frame_with_timeout(script, frame_id, iframe_sessions, None)
+            .await
     }
 
     pub async fn evaluate_in_frame_with_timeout(
@@ -2325,7 +2348,9 @@ impl BrowserManager {
         timeout_ms: Option<u64>,
     ) -> Result<Value, String> {
         if let Some(oopif_session) = iframe_sessions.get(frame_id) {
-            return self.eval_in_context(script, oopif_session, None, timeout_ms).await;
+            return self
+                .eval_in_context(script, oopif_session, None, timeout_ms)
+                .await;
         }
 
         let session_id = self.active_session_id()?.to_string();

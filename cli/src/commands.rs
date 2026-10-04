@@ -100,6 +100,7 @@ const KNOWN_COMMANDS: &[&str] = &[
     "keep",
     "input",
     "fill-form",
+    "predict",
 ];
 
 /// Parse a `drag` offset argument: `60`, `+60`, `-12`, or `60,-3` (dx[,dy]).
@@ -790,7 +791,8 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         continue;
                     }
                     match a {
-                        "--key-events" | "--keys" | "--enter" | "--commit-enter" | "--clear" | "--fast" | "--immediate" => {}
+                        "--key-events" | "--keys" | "--enter" | "--commit-enter" | "--clear"
+                        | "--fast" | "--immediate" => {}
                         "--delay" => skip_next = true,
                         other => out.push(other),
                     }
@@ -3241,10 +3243,11 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 i += 1;
             }
             let fields_val = if let Some(f) = file {
-                let content = std::fs::read_to_string(&f).map_err(|e| ParseError::InvalidValue {
-                    message: format!("fill-form --file: cannot read {f}: {e}"),
-                    usage: "fill-form --file <path> | fill-form '<json>'",
-                })?;
+                let content =
+                    std::fs::read_to_string(&f).map_err(|e| ParseError::InvalidValue {
+                        message: format!("fill-form --file: cannot read {f}: {e}"),
+                        usage: "fill-form --file <path> | fill-form '<json>'",
+                    })?;
                 serde_json::from_str(&content).map_err(|e| ParseError::InvalidValue {
                     message: format!("fill-form: invalid JSON in {f}: {e}"),
                     usage: "fill-form --file <path>",
@@ -3261,6 +3264,90 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 });
             };
             Ok(json!({ "id": id, "action": "fillForm", "fields": fields_val }))
+        }
+        "predict" => {
+            if rest.is_empty() {
+                return Err(ParseError::MissingArguments {
+                    context: "predict".to_string(),
+                    usage: "predict <list|show|run|save|delete|match> [id] [--file <path>] [--url <pattern>]",
+                });
+            }
+            let subaction = &rest[0];
+            let mut auto_id: Option<String> = None;
+            let mut file: Option<String> = None;
+            let mut url_pattern: Option<String> = None;
+
+            let mut i = 1;
+            while i < rest.len() {
+                match rest[i].as_str() {
+                    "--file" | "-f" => {
+                        i += 1;
+                        if i < rest.len() {
+                            file = Some(rest[i].to_string());
+                        }
+                    }
+                    "--url" | "-u" | "--pattern" => {
+                        i += 1;
+                        if i < rest.len() {
+                            url_pattern = Some(rest[i].to_string());
+                        }
+                    }
+                    arg if !arg.starts_with("--") && auto_id.is_none() => {
+                        auto_id = Some(arg.to_string());
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+
+            let mut cmd = json!({
+                "id": id,
+                "action": "predict",
+                "subaction": subaction,
+            });
+
+            if let Some(ref aid) = auto_id {
+                cmd["automationId"] = json!(aid);
+            }
+
+            if subaction == "save" {
+                let automation_val = if let Some(ref f) = file {
+                    let content =
+                        std::fs::read_to_string(f).map_err(|e| ParseError::InvalidValue {
+                            message: format!("predict save --file: cannot read {f}: {e}"),
+                            usage: "predict save <id> --file <path.json> [--url <pattern>]",
+                        })?;
+                    let mut parsed: Value =
+                        serde_json::from_str(&content).map_err(|e| ParseError::InvalidValue {
+                            message: format!("predict save: invalid JSON in {f}: {e}"),
+                            usage: "predict save <id> --file <path.json>",
+                        })?;
+                    if let Some(ref aid) = auto_id {
+                        parsed["id"] = json!(aid);
+                    }
+                    if let Some(ref pat) = url_pattern {
+                        parsed["url_pattern"] = json!(pat);
+                    }
+                    parsed
+                } else if let Some(ref aid) = auto_id {
+                    json!({
+                        "id": aid,
+                        "name": aid,
+                        "url_pattern": url_pattern.unwrap_or_else(|| "*".to_string()),
+                        "preconditions": [],
+                        "anti_triggers": [],
+                        "steps": [],
+                    })
+                } else {
+                    return Err(ParseError::MissingArguments {
+                        context: "predict save".to_string(),
+                        usage: "predict save <id> --file <path> [--url <pattern>]",
+                    });
+                };
+                cmd["automation"] = automation_val;
+            }
+
+            Ok(cmd)
         }
         "batch" => {
             let bail = rest.contains(&"--bail");

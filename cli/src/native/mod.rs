@@ -32,6 +32,8 @@ mod observation;
 #[allow(dead_code)]
 pub mod policy;
 #[allow(dead_code)]
+pub mod predicted;
+#[allow(dead_code)]
 pub mod providers;
 #[allow(dead_code)]
 pub mod react;

@@ -105,6 +105,121 @@ pub fn session_flag_suffix(session: &str) -> String {
     }
 }
 
+/// Represents an active agent exclusive lock over a session and the data directory.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AgentLockInfo {
+    pub pid: u32,
+    pub owner_id: String,
+    pub session: String,
+    pub created_at: u64,
+}
+
+pub fn agent_lock_path(session: &str) -> PathBuf {
+    get_socket_dir().join(format!("{session}.agent.lock"))
+}
+
+pub fn global_folder_lock_path() -> PathBuf {
+    get_socket_dir().join("active_agent.lock")
+}
+
+pub fn current_process_owner_id() -> String {
+    std::env::var("AGENT_BROWSER_OWNER_ID")
+        .unwrap_or_else(|_| format!("agent-pid-{}", std::process::id()))
+}
+
+/// Check if the session or folder is locked by another live agent.
+/// If locked by another live process without a matching owner ID, returns Err.
+pub fn verify_agent_access(session: &str) -> Result<(), String> {
+    let current_pid = std::process::id();
+    let current_owner = current_process_owner_id();
+
+    // 1. Check session lock
+    let sess_path = agent_lock_path(session);
+    if sess_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&sess_path) {
+            if let Ok(info) = serde_json::from_str::<AgentLockInfo>(&content) {
+                if crate::connection::is_pid_alive(info.pid) {
+                    if info.pid != current_pid && info.owner_id != current_owner {
+                        return Err(format!(
+                            "folder_access_denied: Session '{session}' is locked by active agent (PID {}). Concurrent agent access denied.",
+                            info.pid
+                        ));
+                    }
+                } else {
+                    let _ = std::fs::remove_file(&sess_path);
+                }
+            }
+        }
+    }
+
+    // 2. Check global folder lock if present
+    let glob_path = global_folder_lock_path();
+    if glob_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&glob_path) {
+            if let Ok(info) = serde_json::from_str::<AgentLockInfo>(&content) {
+                if crate::connection::is_pid_alive(info.pid) {
+                    if info.pid != current_pid
+                        && info.owner_id != current_owner
+                        && info.session != session
+                    {
+                        return Err(format!(
+                            "folder_access_denied: Chrome-use data folder is locked exclusively by active agent (PID {}, session '{}'). Concurrent agent access denied.",
+                            info.pid, info.session
+                        ));
+                    }
+                } else {
+                    let _ = std::fs::remove_file(&glob_path);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Acquire an exclusive agent lock on the session and data folder.
+pub fn acquire_agent_lock(session: &str) -> Result<(), String> {
+    verify_agent_access(session)?;
+
+    let dir = get_socket_dir();
+    let _ = std::fs::create_dir_all(&dir);
+
+    let info = AgentLockInfo {
+        pid: std::process::id(),
+        owner_id: current_process_owner_id(),
+        session: session.to_string(),
+        created_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    };
+
+    let encoded = serde_json::to_string(&info).map_err(|e| e.to_string())?;
+    std::fs::write(agent_lock_path(session), &encoded).map_err(|e| e.to_string())?;
+    let _ = std::fs::write(global_folder_lock_path(), &encoded);
+
+    Ok(())
+}
+
+/// Release the agent lock for this session.
+pub fn release_agent_lock(session: &str) -> Result<(), String> {
+    let sess_path = agent_lock_path(session);
+    let _ = std::fs::remove_file(sess_path);
+
+    let glob_path = global_folder_lock_path();
+    if glob_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&glob_path) {
+            if let Ok(info) = serde_json::from_str::<AgentLockInfo>(&content) {
+                if info.pid == std::process::id() || info.session == session {
+                    let _ = std::fs::remove_file(&glob_path);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

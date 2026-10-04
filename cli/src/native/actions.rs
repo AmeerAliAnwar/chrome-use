@@ -958,11 +958,9 @@ impl DaemonState {
                         .await;
                     }
 
-                    let is_child_popup = te
-                        .target_info
-                        .opener_id
-                        .as_ref()
-                        .is_some_and(|oid| mgr.active_target_id().ok() == Some(oid.as_str()) || mgr.has_target(oid));
+                    let is_child_popup = te.target_info.opener_id.as_ref().is_some_and(|oid| {
+                        mgr.active_target_id().ok() == Some(oid.as_str()) || mgr.has_target(oid)
+                    });
 
                     if is_child_popup {
                         mgr.remember_created_target(&te.target_info.target_id);
@@ -1066,7 +1064,8 @@ impl DaemonState {
                         }
                         "Page.fileChooserOpened" => {
                             if let Some(ref mgr) = self.browser {
-                                let session_id = event.session_id.as_deref().or(mgr.active_session_id().ok());
+                                let session_id =
+                                    event.session_id.as_deref().or(mgr.active_session_id().ok());
                                 let client = mgr.client.clone();
                                 let sid = session_id.map(str::to_string);
                                 tokio::spawn(async move {
@@ -1639,7 +1638,18 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
             | "stream_enable"
             | "stream_disable"
             | "stream_status"
-    ) || (action == "read"
+            | "predict_list"
+            | "predict_show"
+            | "predict_save"
+            | "predict_delete"
+    ) || (action == "predict"
+        && matches!(
+            cmd.get("subaction")
+                .or_else(|| cmd.get("subcommand"))
+                .and_then(|v| v.as_str()),
+            Some("list") | Some("show") | Some("get") | Some("save") | Some("delete")
+        ))
+        || (action == "read"
         // `read <url>` (and --llms / --require-md) is a pure HTTP fetch — it
         // never touches the browser, so don't auto-launch. Only `read` with no
         // url reads the active tab and needs a browser.
@@ -1923,6 +1933,8 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                 state::dispatch_state_command(cmd)
                     .expect("dispatch_state_command must handle all state_* actions matched here")
             }
+            "predict" | "predict_run" | "predict_list" | "predict_show" | "predict_save"
+            | "predict_delete" | "predict_match" => handle_predict(cmd, state).await,
             "trace_start" => handle_trace_start(state).await,
             "trace_stop" => handle_trace_stop(cmd, state).await,
             "profiler_start" => handle_profiler_start(cmd, state).await,
@@ -4042,10 +4054,18 @@ async fn handle_evaluate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         Some(spec) => {
             let frame_id =
                 resolve_frame_spec(mgr, &state.ref_map, &state.iframe_sessions, spec).await?;
-            mgr.evaluate_in_frame_with_timeout(script, &frame_id, &state.iframe_sessions, timeout_ms)
+            mgr.evaluate_in_frame_with_timeout(
+                script,
+                &frame_id,
+                &state.iframe_sessions,
+                timeout_ms,
+            )
+            .await?
+        }
+        None => {
+            mgr.evaluate(script, timeout_ms.map(|t| json!({ "timeoutMs": t })))
                 .await?
         }
-        None => mgr.evaluate(script, timeout_ms.map(|t| json!({ "timeoutMs": t }))).await?,
     };
     let url = mgr.get_url().await.unwrap_or_default();
     Ok(json!({ "result": result, "origin": url }))
@@ -6130,25 +6150,35 @@ async fn handle_fill_form(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         return results;
     })"#;
 
-    let res = mgr.client.send_command_typed::<_, Value>(
-        "Runtime.callFunctionOn",
-        &cdp::types::CallFunctionOnParams {
-            function_declaration: fill_script.to_string(),
-            object_id: None,
-            arguments: Some(vec![cdp::types::CallArgument {
-                value: Some(fields.clone()),
+    let res = mgr
+        .client
+        .send_command_typed::<_, Value>(
+            "Runtime.callFunctionOn",
+            &cdp::types::CallFunctionOnParams {
+                function_declaration: fill_script.to_string(),
                 object_id: None,
-            }]),
-            return_by_value: Some(true),
-            await_promise: Some(false),
-        },
-        Some(&session_id),
-    ).await;
+                arguments: Some(vec![cdp::types::CallArgument {
+                    value: Some(fields.clone()),
+                    object_id: None,
+                }]),
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            Some(&session_id),
+        )
+        .await;
 
     let filled_results = match res {
-        Ok(v) => v.get("result").and_then(|r| r.get("value")).cloned().unwrap_or(v),
+        Ok(v) => v
+            .get("result")
+            .and_then(|r| r.get("value"))
+            .cloned()
+            .unwrap_or(v),
         Err(_) => {
-            let eval_script = format!("({fill_script})({})", serde_json::to_string(fields).unwrap_or_else(|_| "[]".into()));
+            let eval_script = format!(
+                "({fill_script})({})",
+                serde_json::to_string(fields).unwrap_or_else(|_| "[]".into())
+            );
             mgr.evaluate(&eval_script, None).await?
         }
     };
@@ -8338,6 +8368,68 @@ async fn handle_state_load(cmd: &Value, state: &DaemonState) -> Result<Value, St
 
     state::load_state(&mgr.client, &session_id, path).await?;
     Ok(json!({ "loaded": true, "path": path }))
+}
+
+async fn handle_predict(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let sub = cmd
+        .get("subaction")
+        .or_else(|| cmd.get("subcommand"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("run");
+
+    match sub {
+        "list" => {
+            let list = super::predicted::list_automations()?;
+            Ok(json!({ "automations": list }))
+        }
+        "show" | "get" => {
+            let id = cmd
+                .get("automationId")
+                .or_else(|| cmd.get("id"))
+                .and_then(|v| v.as_str())
+                .ok_or("Missing 'id' parameter")?;
+            let auto = super::predicted::load_automation(id)?;
+            Ok(json!({ "automation": auto }))
+        }
+        "save" => {
+            let auto_val = cmd
+                .get("automation")
+                .ok_or("Missing 'automation' parameter")?;
+            let auto: super::predicted::PredictedAutomation =
+                serde_json::from_value(auto_val.clone())
+                    .map_err(|e| format!("Invalid automation JSON: {e}"))?;
+            super::predicted::save_automation(&auto)?;
+            Ok(json!({ "saved": true, "id": auto.id }))
+        }
+        "delete" => {
+            let id = cmd
+                .get("automationId")
+                .or_else(|| cmd.get("id"))
+                .and_then(|v| v.as_str())
+                .ok_or("Missing 'id' parameter")?;
+            let deleted = super::predicted::delete_automation(id)?;
+            Ok(json!({ "deleted": deleted, "id": id }))
+        }
+        "match" => {
+            let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+            let url = mgr.get_url().await.unwrap_or_default();
+            let matches = super::predicted::find_matching_automations(&url)?;
+            Ok(json!({ "url": url, "matches": matches }))
+        }
+        "run" => {
+            let id = cmd
+                .get("automationId")
+                .or_else(|| cmd.get("id"))
+                .and_then(|v| v.as_str())
+                .ok_or("Missing 'id' parameter")?;
+            let mut auto = super::predicted::load_automation(id)?;
+            let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+            super::predicted::execute_predicted_automation(&mut auto, mgr).await
+        }
+        other => Err(format!(
+            "Unknown predict subaction '{other}'. Valid options: list, show, save, delete, match, run"
+        )),
+    }
 }
 
 // ---------------------------------------------------------------------------

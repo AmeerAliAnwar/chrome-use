@@ -1316,6 +1316,7 @@ pub fn send_command(mut cmd: Value, session: &str) -> Result<Response, String> {
     {
         let action = cmd.get("action").and_then(|a| a.as_str());
         crate::ownership::guard(session, crate::ownership::owner_of(session), action)?;
+        crate::ownership::verify_agent_access(session)?;
     }
 
     // Forward per-invocation env to the daemon. The daemon's environment is
