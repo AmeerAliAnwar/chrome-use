@@ -1597,15 +1597,15 @@ fn build_find_element_js(selector: &str) -> String {
   if (css) return css;
   const norm = s => (s == null ? '' : String(s)).replace(/\s+/g, ' ').trim();
   const hasTextMatch = typeof sel === 'string' ? sel.match(/^([a-zA-Z0-9_\-\.\#\*\[\]\=\"\':]+)?:(?:has-text|text)\((['"]?)(.*?)\2\)$/) : null;
-  if (hasTextMatch) {
+  if (hasTextMatch) {{
     const baseSel = hasTextMatch[1] || '*';
     const textTarget = norm(hasTextMatch[3]).toLowerCase();
-    try {
+    try {{
       const candidates = Array.from(document.querySelectorAll(baseSel));
       const textMatch = candidates.find(e => norm(e.innerText || e.textContent).toLowerCase().includes(textTarget));
       if (textMatch) return textMatch;
-    } catch (_e) {}
-  }
+    }} catch (_e) {{}}
+  }}
   const w = norm({want}); if (!w) return null;
   const wl = w.toLowerCase();
   const interactive = Array.from(document.querySelectorAll(

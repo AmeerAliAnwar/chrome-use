@@ -3242,18 +3242,18 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 }
                 i += 1;
             }
-            let fields_val = if let Some(f) = file {
+            let fields_val: Value = if let Some(f) = file {
                 let content =
                     std::fs::read_to_string(&f).map_err(|e| ParseError::InvalidValue {
                         message: format!("fill-form --file: cannot read {f}: {e}"),
                         usage: "fill-form --file <path> | fill-form '<json>'",
                     })?;
-                serde_json::from_str(&content).map_err(|e| ParseError::InvalidValue {
+                serde_json::from_str::<Value>(&content).map_err(|e| ParseError::InvalidValue {
                     message: format!("fill-form: invalid JSON in {f}: {e}"),
                     usage: "fill-form --file <path>",
                 })?
             } else if let Some(j) = json_str {
-                serde_json::from_str(&j).map_err(|e| ParseError::InvalidValue {
+                serde_json::from_str::<Value>(&j).map_err(|e| ParseError::InvalidValue {
                     message: format!("fill-form: invalid JSON argument: {e}"),
                     usage: "fill-form '<json>'",
                 })?
