@@ -3684,7 +3684,8 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .get("reuseTab")
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
-        || state.flags.browser.is_some();
+        || cmd.get("browser").is_some()
+        || mgr.on_relay();
     if should_reuse {
         if let Ok(Some(switched)) = mgr.reuse_tab_for_url(url).await {
             return Ok(with_site_hint(switched, url));
@@ -6155,10 +6156,10 @@ async fn handle_fill_form(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         .client
         .send_command_typed::<_, Value>(
             "Runtime.callFunctionOn",
-            &cdp::types::CallFunctionOnParams {
+            &super::cdp::types::CallFunctionOnParams {
                 function_declaration: fill_script.to_string(),
                 object_id: None,
-                arguments: Some(vec![cdp::types::CallArgument {
+                arguments: Some(vec![super::cdp::types::CallArgument {
                     value: Some(fields.clone()),
                     object_id: None,
                 }]),

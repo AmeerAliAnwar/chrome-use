@@ -3272,14 +3272,14 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     usage: "predict <list|show|run|save|delete|match> [id] [--file <path>] [--url <pattern>]",
                 });
             }
-            let subaction = &rest[0];
+            let subaction = rest[0];
             let mut auto_id: Option<String> = None;
             let mut file: Option<String> = None;
             let mut url_pattern: Option<String> = None;
 
             let mut i = 1;
             while i < rest.len() {
-                match rest[i].as_str() {
+                match rest[i] {
                     "--file" | "-f" => {
                         i += 1;
                         if i < rest.len() {

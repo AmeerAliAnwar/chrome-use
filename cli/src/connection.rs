@@ -274,7 +274,7 @@ fn get_pid_path(session: &str) -> PathBuf {
     get_socket_dir().join(format!("{}.pid", session))
 }
 
-fn read_registered_daemon_pid(session: &str) -> Option<u32> {
+pub fn read_registered_daemon_pid(session: &str) -> Option<u32> {
     fs::read_to_string(get_pid_path(session))
         .ok()
         .and_then(|value| value.trim().parse::<u32>().ok())

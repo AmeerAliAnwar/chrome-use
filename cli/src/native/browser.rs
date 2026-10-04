@@ -1468,6 +1468,7 @@ impl BrowserManager {
                     .to_string(),
                 attached: Some(true),
                 browser_context_id: None,
+                opener_id: None,
             });
         }
 
@@ -5011,6 +5012,7 @@ mod tests {
             url: String::new(),
             attached: None,
             browser_context_id: None,
+            opener_id: None,
         };
 
         assert!(should_track_target(&target));
@@ -5025,6 +5027,7 @@ mod tests {
             url: "chrome://newtab/".to_string(),
             attached: None,
             browser_context_id: None,
+            opener_id: None,
         };
 
         assert!(!should_track_target(&target));
@@ -5048,6 +5051,7 @@ mod tests {
             url: "https://example.com/popup".to_string(),
             attached: None,
             browser_context_id: None,
+            opener_id: None,
         };
 
         assert!(update_page_target_info_in_pages(&mut pages, &target));
