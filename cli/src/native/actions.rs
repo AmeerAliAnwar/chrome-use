@@ -3578,7 +3578,7 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .get("waitUntil")
         .and_then(|v| v.as_str())
         .map(WaitUntil::from_str)
-        .unwrap_or(WaitUntil::DomContentLoaded);
+        .unwrap_or(WaitUntil::Load);
 
     // If --headers was passed, store them keyed by origin and enable Fetch
     // interception. The background fetch_handler_task (started on launch)

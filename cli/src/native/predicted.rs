@@ -133,15 +133,14 @@ pub fn matches_pattern(url: &str, pattern: &str) -> bool {
         return true;
     }
     if pattern.starts_with('*') && pattern.ends_with('*') && pattern.len() > 2 {
-        let sub = &pattern[1..pattern.len() - 1];
-        return url.contains(sub);
+        if let Some(sub) = pattern.strip_prefix('*').and_then(|p| p.strip_suffix('*')) {
+            return url.contains(sub);
+        }
     }
-    if pattern.ends_with('*') {
-        let prefix = &pattern[..pattern.len() - 1];
+    if let Some(prefix) = pattern.strip_suffix('*') {
         return url.starts_with(prefix);
     }
-    if pattern.starts_with('*') {
-        let suffix = &pattern[1..];
+    if let Some(suffix) = pattern.strip_prefix('*') {
         return url.ends_with(suffix);
     }
     url.contains(pattern)

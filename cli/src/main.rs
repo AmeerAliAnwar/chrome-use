@@ -3398,8 +3398,7 @@ fn run_batch(
             Ok(_) => {
                 if flags.json {
                     print_json_error(
-                        "Invalid JSON input: expected an array of commands or action objects"
-                            .to_string(),
+                        "Invalid JSON input: expected an array of commands or action objects",
                     );
                 } else {
                     eprintln!(
