@@ -1,8 +1,19 @@
 # Changelog
 
-## 1.5.157
+## 1.5.158
 
 <!-- release:start -->
+### Bug Fixes
+
+- **Windows: a call no longer hangs after the session daemon starts.** The daemon was spawned with handle inheritance on, so it also held the stdout/stderr pipes of whoever ran chrome-use. The `chrome-use.exe` the caller started exited normally, but a caller reading its output to the end (Rust `Command::output()`, Python `subprocess.run`) kept waiting until the daemon exited, up to its 10-minute idle timeout. A new daemon starts after an idle exit, on `adopt`, or after a version change, so the relay seemed to work and then hang after idle. The standard handles are no longer inheritable when the daemon is spawned. (#399, likely cause of #392)
+
+### Contributors
+
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.157
+
 ### New Features
 
 - **`auth login --bwu` signs in with vault passkeys.** In a `--launch` browser with bitwarden-use 0.9.0+, a temporary WebAuthn authenticator can answer a passkey or security-key second factor; `--passkey` signs in with the passkey alone, without reading passwords, TOTP or custom fields. Synced passkeys report counter 0, as with the Bitwarden extension; nonzero counters are refused until vault write-back is supported. Only sign-in controls are clicked, normal passkey registration calls are blocked during the attempt, and the authenticator and registration guard are removed afterwards. Retained native function references can bypass the page guard; unexpected credential creation aborts the command, as does unconfirmed cleanup. Site refusals include the visible error message. Passkeys are explicitly unsupported on the extension relay: `--passkey` fails immediately and ordinary login retains the password/TOTP flow. (#398)
@@ -18,7 +29,6 @@
 ### Contributors
 
 - @leeguooooo
-<!-- release:end -->
 
 ## 1.5.156
 
