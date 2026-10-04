@@ -39,6 +39,9 @@ export function relayCommandBudgetMs(method, params) {
   if (typeof explicit === 'number' && explicit > 0) {
     return Math.min(explicit, PAYLOAD_MAX_TIMEOUT_MS)
   }
+  if (method === 'Page.captureScreenshot') {
+    return 20000
+  }
   const text = method === 'Input.insertText' ? params?.text : null
   if (typeof text !== 'string' || text.length === 0) return RELAY_COMMAND_TIMEOUT_MS
   const scaled = RELAY_COMMAND_TIMEOUT_MS + text.length * PAYLOAD_MS_PER_BYTE

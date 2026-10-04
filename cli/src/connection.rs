@@ -1566,6 +1566,12 @@ fn send_command_once(cmd: &Value, session: &str) -> Result<Response, String> {
         }
     })?;
 
+    if response_line.trim().is_empty() {
+        return Err(
+            "Daemon connection closed unexpectedly (EOF received before response).".to_string(),
+        );
+    }
+
     serde_json::from_str(&response_line).map_err(|e| format!("Invalid response: {}", e))
 }
 

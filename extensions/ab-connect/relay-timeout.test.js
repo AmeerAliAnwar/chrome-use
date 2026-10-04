@@ -93,6 +93,7 @@ test('a payload-sized command gets a budget proportional to its payload', () => 
   assert.equal(relayCommandBudgetMs('Page.navigate', { url: 'https://example.com' }), RELAY_COMMAND_TIMEOUT_MS)
   assert.equal(relayCommandBudgetMs('Input.insertText', {}), RELAY_COMMAND_TIMEOUT_MS)
   assert.equal(relayCommandBudgetMs('Input.insertText', { text: '' }), RELAY_COMMAND_TIMEOUT_MS)
+  assert.equal(relayCommandBudgetMs('Page.captureScreenshot', {}), 20000)
 
   // insertText scales: the 20KB payload that used to hit the flat 8s wall now
   // gets room. (Measured ~0.45s/KB in a rich editor; 2ms/byte is ~4x that.)

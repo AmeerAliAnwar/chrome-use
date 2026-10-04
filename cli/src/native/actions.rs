@@ -3578,7 +3578,7 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .get("waitUntil")
         .and_then(|v| v.as_str())
         .map(WaitUntil::from_str)
-        .unwrap_or(WaitUntil::Load);
+        .unwrap_or(WaitUntil::DomContentLoaded);
 
     // If --headers was passed, store them keyed by origin and enable Fetch
     // interception. The background fetch_handler_task (started on launch)
@@ -3677,14 +3677,15 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
 
     let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
 
-    // `--reuse-tab`: if a tab already shows this URL (same origin+path), switch
+    // `--reuse-tab` or `--browser`: if a tab already shows this URL (same origin+path), switch
     // to it instead of navigating — preserves any in-page state and stops
     // re-`open` from piling up duplicate tabs on rebind (issue #21).
-    if cmd
+    let should_reuse = cmd
         .get("reuseTab")
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
-    {
+        || state.flags.browser.is_some();
+    if should_reuse {
         if let Ok(Some(switched)) = mgr.reuse_tab_for_url(url).await {
             return Ok(with_site_hint(switched, url));
         }

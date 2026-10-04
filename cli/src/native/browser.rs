@@ -899,8 +899,9 @@ impl WaitUntil {
         match s {
             "domcontentloaded" => Self::DomContentLoaded,
             "networkidle" => Self::NetworkIdle,
-            "none" => Self::None,
-            _ => Self::Load,
+            "load" => Self::Load,
+            "none" | "commit" => Self::None,
+            _ => Self::DomContentLoaded,
         }
     }
 

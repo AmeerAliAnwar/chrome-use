@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs;
@@ -82,7 +84,7 @@ pub fn list_automations() -> Result<Vec<PredictedAutomation>, String> {
         }
     }
 
-    results.sort_by(|a, b| a.id.cmp(&b.id));
+    results.sort_by_key(|a| a.id.clone());
     Ok(results)
 }
 

@@ -597,10 +597,10 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     context: "open --wait-until".to_string(),
                     usage: "open <url> --wait-until <load|domcontentloaded|networkidle|none>",
                 })?;
-                if !["load", "domcontentloaded", "networkidle", "none"].contains(val) {
+                if !["load", "domcontentloaded", "networkidle", "none", "commit"].contains(val) {
                     return Err(ParseError::InvalidValue {
                         message: format!("Unknown --wait-until value: {}", val),
-                        usage: "open <url> --wait-until <load|domcontentloaded|networkidle|none>",
+                        usage: "open <url> --wait-until <load|domcontentloaded|networkidle|none|commit>",
                     });
                 }
                 nav_cmd["waitUntil"] = json!(val);
@@ -9179,5 +9179,34 @@ mod tests {
         .expect("selector + text");
         assert_eq!(cmd["selector"], "#q");
         assert_eq!(cmd["text"], "hello");
+    }
+
+    #[test]
+    fn test_predict_list_command() {
+        let cmd = parse_command(&args("predict list"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "predict");
+        assert_eq!(cmd["subaction"], "list");
+    }
+
+    #[test]
+    fn test_predict_run_command() {
+        let cmd = parse_command(&args("predict run my-automation"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "predict");
+        assert_eq!(cmd["subaction"], "run");
+        assert_eq!(cmd["automationId"], "my-automation");
+    }
+
+    #[test]
+    fn test_predict_save_command() {
+        let cmd = parse_command(
+            &args("predict save test-auto --url https://example.com/*"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "predict");
+        assert_eq!(cmd["subaction"], "save");
+        assert_eq!(cmd["automationId"], "test-auto");
+        assert_eq!(cmd["automation"]["id"], "test-auto");
+        assert_eq!(cmd["automation"]["url_pattern"], "https://example.com/*");
     }
 }
