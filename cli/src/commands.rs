@@ -98,6 +98,8 @@ const KNOWN_COMMANDS: &[&str] = &[
     "viewport",
     "resize",
     "keep",
+    "input",
+    "fill-form",
 ];
 
 /// Parse a `drag` offset argument: `60`, `+60`, `-12`, or `60,-3` (dx[,dy]).
@@ -729,6 +731,14 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             };
             Ok(json!({ "id": id, "action": "fill", "selector": sel, "value": value }))
         }
+        "input" => {
+            let mut fake_args = args.to_vec();
+            fake_args[0] = "type".to_string();
+            fake_args.push("--fast".to_string());
+            let mut cmd = parse_command_inner(&fake_args, flags)?;
+            cmd["action"] = json!("input");
+            Ok(cmd)
+        }
         "type" => {
             // `--key-events` (alias `--keys`): send real per-character keystrokes
             // instead of Input.insertText, so autocomplete/combobox widgets that
@@ -745,6 +755,10 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             if commit_enter {
                 key_events = true;
             }
+            // `--fast` / `--immediate`: use prototype descriptor setter directly on
+            // target element, bypassing per-character keystroke simulation and dispatching
+            // input/change events immediately (React/Vue controlled form inputs).
+            let fast = rest.iter().any(|a| *a == "--fast" || *a == "--immediate");
             // `--clear` clears the field before typing; `--delay <ms>` types with
             // a per-key delay. The daemon has always honored these, but the CLI
             // used to join every remaining arg into the text, so they leaked in
@@ -753,7 +767,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             let clear = rest.contains(&"--clear");
             let mut delay: Option<u64> = None;
             let type_usage =
-                "type <selector> <text>   (or: type --focused <text>) [--clear] [--delay <ms>] [--key-events] [--enter]";
+                "type <selector> <text>   (or: type --focused <text>) [--clear] [--delay <ms>] [--key-events] [--enter] [--fast]";
             if let Some(i) = rest.iter().position(|a| *a == "--delay") {
                 let raw = rest
                     .get(i + 1)
@@ -776,7 +790,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         continue;
                     }
                     match a {
-                        "--key-events" | "--keys" | "--enter" | "--commit-enter" | "--clear" => {}
+                        "--key-events" | "--keys" | "--enter" | "--commit-enter" | "--clear" | "--fast" | "--immediate" => {}
                         "--delay" => skip_next = true,
                         other => out.push(other),
                     }
@@ -792,6 +806,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     "id": id, "action": "type", "focused": true,
                     "text": rest.join(" "), "keyEvents": key_events,
                     "commitEnter": commit_enter, "clear": clear, "delay": delay,
+                    "fast": fast,
                 }));
             }
             // A lone argument used to become the SELECTOR with empty text, so
@@ -813,7 +828,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             }
             let sel = rest[0];
             Ok(
-                json!({ "id": id, "action": "type", "selector": sel, "text": rest[1..].join(" "), "keyEvents": key_events, "commitEnter": commit_enter, "clear": clear, "delay": delay }),
+                json!({ "id": id, "action": "type", "selector": sel, "text": rest[1..].join(" "), "keyEvents": key_events, "commitEnter": commit_enter, "clear": clear, "delay": delay, "fast": fast }),
             )
         }
         "pick" => {
@@ -1786,6 +1801,28 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
 
         // === Eval ===
         "eval" => {
+            let mut timeout_ms: Option<u64> = None;
+            let mut filtered_rest: Vec<&str> = Vec::new();
+            let mut skip_next = false;
+            for (idx, &arg) in rest.iter().enumerate() {
+                if skip_next {
+                    skip_next = false;
+                    continue;
+                }
+                if arg == "--timeout" {
+                    if let Some(val) = rest.get(idx + 1) {
+                        timeout_ms = val.parse::<u64>().ok();
+                        skip_next = true;
+                        continue;
+                    }
+                } else if let Some(stripped) = arg.strip_prefix("--timeout=") {
+                    timeout_ms = stripped.parse::<u64>().ok();
+                    continue;
+                }
+                filtered_rest.push(arg);
+            }
+            let rest = filtered_rest;
+
             // Optional leading `--frame <selector|url|index>` (issue #58): run the
             // script in that frame's context instead of the main frame. Default
             // (no flag) stays the main frame. Leading-only so it never eats a token
@@ -1858,6 +1895,10 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             let mut action = json!({ "id": id, "action": "evaluate", "script": script });
             if let Some(f) = frame {
                 action["frame"] = Value::String(f);
+            }
+            if let Some(t) = timeout_ms {
+                action["timeoutMs"] = json!(t);
+                action["timeout"] = json!(t);
             }
             Ok(action)
         }
@@ -3184,10 +3225,65 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             Ok(cmd)
         }
 
+        "fill-form" | "fillform" | "fillForm" => {
+            let mut file: Option<String> = None;
+            let mut json_str: Option<String> = None;
+            let mut i = 0;
+            while i < rest.len() {
+                if rest[i] == "--file" || rest[i] == "-f" {
+                    i += 1;
+                    if i < rest.len() {
+                        file = Some(rest[i].to_string());
+                    }
+                } else if !rest[i].starts_with("--") {
+                    json_str = Some(rest[i].to_string());
+                }
+                i += 1;
+            }
+            let fields_val = if let Some(f) = file {
+                let content = std::fs::read_to_string(&f).map_err(|e| ParseError::InvalidValue {
+                    message: format!("fill-form --file: cannot read {f}: {e}"),
+                    usage: "fill-form --file <path> | fill-form '<json>'",
+                })?;
+                serde_json::from_str(&content).map_err(|e| ParseError::InvalidValue {
+                    message: format!("fill-form: invalid JSON in {f}: {e}"),
+                    usage: "fill-form --file <path>",
+                })?
+            } else if let Some(j) = json_str {
+                serde_json::from_str(&j).map_err(|e| ParseError::InvalidValue {
+                    message: format!("fill-form: invalid JSON argument: {e}"),
+                    usage: "fill-form '<json>'",
+                })?
+            } else {
+                return Err(ParseError::MissingArguments {
+                    context: "fill-form".to_string(),
+                    usage: "fill-form '<json>' | fill-form --file <path>",
+                });
+            };
+            Ok(json!({ "id": id, "action": "fillForm", "fields": fields_val }))
+        }
         "batch" => {
             let bail = rest.contains(&"--bail");
-            let commands: Vec<&str> = rest.iter().filter(|a| **a != "--bail").copied().collect();
+            let mut file: Option<String> = None;
+            let mut commands = Vec::new();
+            let mut i = 0;
+            while i < rest.len() {
+                if rest[i] == "--file" || rest[i] == "-f" {
+                    i += 1;
+                    if i < rest.len() {
+                        file = Some(rest[i].to_string());
+                    }
+                } else if rest[i] == "--bail" {
+                    // skip
+                } else {
+                    commands.push(rest[i]);
+                }
+                i += 1;
+            }
             let mut cmd = json!({ "id": id, "action": "batch", "bail": bail });
+            if let Some(f) = file {
+                cmd["file"] = json!(f);
+            }
             if !commands.is_empty() {
                 cmd["commands"] = json!(commands);
             }

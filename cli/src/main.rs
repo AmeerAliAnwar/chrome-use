@@ -3000,16 +3000,17 @@ fn main() {
         return;
     }
 
-    // Handle batch command: from args or stdin
+    // Handle batch command: from args, file, or stdin
     if cmd.get("action").and_then(|v| v.as_str()) == Some("batch") {
         let bail = cmd.get("bail").and_then(|v| v.as_bool()).unwrap_or(false);
+        let file = cmd.get("file").and_then(|v| v.as_str()).map(str::to_string);
         let arg_commands = cmd.get("commands").and_then(|v| v.as_array()).map(|arr| {
             arr.iter()
                 .filter_map(|v| v.as_str())
                 .map(commands::shell_words_split)
                 .collect::<Vec<Vec<String>>>()
         });
-        run_batch(&flags, bail, arg_commands);
+        run_batch(&flags, bail, arg_commands, file);
         return;
     }
 
@@ -3319,33 +3320,104 @@ fn dispatch_script(flags: &Flags, cmd: serde_json::Value) {
     }
 }
 
-fn run_batch(flags: &Flags, bail: bool, arg_commands: Option<Vec<Vec<String>>>) {
-    let commands: Vec<Vec<String>> = if let Some(cmds) = arg_commands {
-        cmds
+enum BatchItem {
+    Args(Vec<String>),
+    Action(serde_json::Value),
+}
+
+fn run_batch(
+    flags: &Flags,
+    bail: bool,
+    arg_commands: Option<Vec<Vec<String>>>,
+    file: Option<String>,
+) {
+    let items: Vec<BatchItem> = if let Some(cmds) = arg_commands {
+        cmds.into_iter().map(BatchItem::Args).collect()
     } else {
         use std::io::Read as _;
 
-        let mut input = String::new();
-        if let Err(e) = std::io::stdin().read_to_string(&mut input) {
-            if flags.json {
-                print_json_error(format!("Failed to read stdin: {}", e));
-            } else {
-                eprintln!("{} Failed to read stdin: {}", color::error_indicator(), e);
+        let input = if let Some(ref path) = file {
+            match std::fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(e) => {
+                    if flags.json {
+                        print_json_error(format!("Failed to read batch file {}: {}", path, e));
+                    } else {
+                        eprintln!(
+                            "{} Failed to read batch file {}: {}",
+                            color::error_indicator(),
+                            path,
+                            e
+                        );
+                    }
+                    exit(1);
+                }
             }
-            exit(1);
-        }
+        } else {
+            let mut buf = String::new();
+            if let Err(e) = std::io::stdin().read_to_string(&mut buf) {
+                if flags.json {
+                    print_json_error(format!("Failed to read stdin: {}", e));
+                } else {
+                    eprintln!("{} Failed to read stdin: {}", color::error_indicator(), e);
+                }
+                exit(1);
+            }
+            buf
+        };
 
-        match serde_json::from_str(&input) {
-            Ok(c) => c,
+        match serde_json::from_str::<serde_json::Value>(&input) {
+            Ok(serde_json::Value::Array(arr)) => arr
+                .into_iter()
+                .filter_map(|item| match item {
+                    serde_json::Value::Array(sub_arr) => {
+                        let strings: Vec<String> = sub_arr
+                            .into_iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect();
+                        if strings.is_empty() {
+                            None
+                        } else {
+                            Some(BatchItem::Args(strings))
+                        }
+                    }
+                    serde_json::Value::String(s) => {
+                        let split = commands::shell_words_split(&s);
+                        if split.is_empty() {
+                            None
+                        } else {
+                            Some(BatchItem::Args(split))
+                        }
+                    }
+                    serde_json::Value::Object(map) => {
+                        Some(BatchItem::Action(serde_json::Value::Object(map)))
+                    }
+                    _ => None,
+                })
+                .collect(),
+            Ok(_) => {
+                if flags.json {
+                    print_json_error(
+                        "Invalid JSON input: expected an array of commands or action objects"
+                            .to_string(),
+                    );
+                } else {
+                    eprintln!(
+                        "{} Invalid JSON input: expected an array of commands or action objects.",
+                        color::error_indicator()
+                    );
+                }
+                exit(1);
+            }
             Err(e) => {
                 if flags.json {
                     print_json_error(format!(
-                        "Invalid JSON input: {}. Expected an array of string arrays, e.g. [[\"open\", \"https://example.com\"], [\"snapshot\"]]",
+                        "Invalid JSON input: {}. Expected an array of string arrays or action objects, e.g. [[\"open\", \"https://example.com\"], [\"snapshot\"]]",
                         e
                     ));
                 } else {
                     eprintln!(
-                        "{} Invalid JSON input: {}. Expected an array of string arrays.",
+                        "{} Invalid JSON input: {}. Expected an array of string arrays or action objects.",
                         color::error_indicator(),
                         e
                     );
@@ -3355,7 +3427,7 @@ fn run_batch(flags: &Flags, bail: bool, arg_commands: Option<Vec<Vec<String>>>) 
         }
     };
 
-    if commands.is_empty() {
+    if items.is_empty() {
         if flags.json {
             println!("[]");
         }
@@ -3367,36 +3439,47 @@ fn run_batch(flags: &Flags, bail: bool, arg_commands: Option<Vec<Vec<String>>>) 
     let mut results: Vec<serde_json::Value> = Vec::new();
     let mut had_error = false;
 
-    for (i, cmd_args) in commands.iter().enumerate() {
-        if cmd_args.is_empty() {
-            continue;
-        }
-
-        let parsed = match parse_command(cmd_args, flags) {
-            Ok(c) => c,
-            Err(e) => {
-                had_error = true;
-                if flags.json {
-                    results.push(json!({
-                        "command": cmd_args,
-                        "success": false,
-                        "error": e.format(),
-                    }));
-                    if bail {
-                        break;
-                    }
-                } else {
-                    eprintln!(
-                        "{} Command {}: {}",
-                        color::error_indicator(),
-                        i + 1,
-                        e.format()
-                    );
-                    if bail {
-                        exit(1);
+    for (i, item) in items.iter().enumerate() {
+        let (parsed, cmd_desc) = match item {
+            BatchItem::Args(cmd_args) => {
+                if cmd_args.is_empty() {
+                    continue;
+                }
+                match parse_command(cmd_args, flags) {
+                    Ok(c) => (c, json!(cmd_args)),
+                    Err(e) => {
+                        had_error = true;
+                        if flags.json {
+                            results.push(json!({
+                                "command": cmd_args,
+                                "success": false,
+                                "error": e.format(),
+                            }));
+                            if bail {
+                                break;
+                            }
+                        } else {
+                            eprintln!(
+                                "{} Command {}: {}",
+                                color::error_indicator(),
+                                i + 1,
+                                e.format()
+                            );
+                            if bail {
+                                exit(1);
+                            }
+                        }
+                        continue;
                     }
                 }
-                continue;
+            }
+            BatchItem::Action(act) => {
+                let mut c = act.clone();
+                if c.get("id").is_none() {
+                    c["id"] = json!(commands::gen_id());
+                }
+                let desc = c.get("action").cloned().unwrap_or(json!("action"));
+                (c, desc)
             }
         };
 
@@ -3409,7 +3492,7 @@ fn run_batch(flags: &Flags, bail: bool, arg_commands: Option<Vec<Vec<String>>>) 
             Ok(resp) => {
                 if flags.json {
                     results.push(json!({
-                        "command": cmd_args,
+                        "command": cmd_desc,
                         "success": resp.success,
                         "result": resp.data,
                         "error": resp.error,
@@ -3434,7 +3517,7 @@ fn run_batch(flags: &Flags, bail: bool, arg_commands: Option<Vec<Vec<String>>>) 
                 had_error = true;
                 if flags.json {
                     results.push(json!({
-                        "command": cmd_args,
+                        "command": cmd_desc,
                         "success": false,
                         "error": e.to_string(),
                     }));

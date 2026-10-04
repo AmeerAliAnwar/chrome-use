@@ -21,12 +21,15 @@ function unconfirmedActionError(method, error) {
  */
 export async function sendTabCommand(tabId, method, params, childSessionId, deps) {
   const dbg = childSessionId ? { tabId, sessionId: childSessionId } : { tabId }
+  const budget = relayCommandBudgetMs(method, params)
+  const isScaled = budget !== RELAY_COMMAND_TIMEOUT_MS
+  const checkHeartbeat = deps?.checkHeartbeat
   try {
     return await withRelayTimeout(
       deps.sendCommand(dbg, method, params),
       `chrome.debugger.sendCommand(${method})`,
-      relayCommandBudgetMs(method, params),
-      { payloadScaled: relayCommandBudgetMs(method, params) !== RELAY_COMMAND_TIMEOUT_MS },
+      budget,
+      { payloadScaled: isScaled, checkHeartbeat },
     )
   } catch (e) {
     if (isDebuggerAccessDenied(e)) throw debuggerAccessError(e)
@@ -46,8 +49,8 @@ export async function sendTabCommand(tabId, method, params, childSessionId, deps
       return await withRelayTimeout(
         deps.sendCommand({ tabId: recoveredTabId }, method, params),
         `chrome.debugger.sendCommand(${method}) retry`,
-        relayCommandBudgetMs(method, params),
-        { payloadScaled: relayCommandBudgetMs(method, params) !== RELAY_COMMAND_TIMEOUT_MS },
+        budget,
+        { payloadScaled: isScaled, checkHeartbeat },
       )
     } catch (retryError) {
       // The initial attempt may have been rejected before dispatch, but the

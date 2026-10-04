@@ -35,6 +35,10 @@ export const PAYLOAD_MAX_TIMEOUT_MS = 300000
  * budget, so this cannot slow down the failure of an ordinary hung command.
  */
 export function relayCommandBudgetMs(method, params) {
+  const explicit = params?.timeoutMs ?? params?._timeoutMs ?? params?.timeout
+  if (typeof explicit === 'number' && explicit > 0) {
+    return Math.min(explicit, PAYLOAD_MAX_TIMEOUT_MS)
+  }
   const text = method === 'Input.insertText' ? params?.text : null
   if (typeof text !== 'string' || text.length === 0) return RELAY_COMMAND_TIMEOUT_MS
   const scaled = RELAY_COMMAND_TIMEOUT_MS + text.length * PAYLOAD_MS_PER_BYTE
@@ -96,17 +100,41 @@ export async function withRelayTimeout(
   operation,
   label,
   timeoutMs = RELAY_COMMAND_TIMEOUT_MS,
-  { payloadScaled = false } = {},
+  { payloadScaled = false, checkHeartbeat = null, maxExtensions = 2 } = {},
 ) {
   const id = nextCommandId++
   inFlight.set(id, { label, startedAt: Date.now() })
   let timer
+  let extensionsDone = 0
+  let isSettled = false
+
   try {
     return await Promise.race([
-      Promise.resolve(operation),
+      Promise.resolve(operation).then(
+        (val) => { isSettled = true; return val; },
+        (err) => { isSettled = true; throw err; },
+      ),
       new Promise((_, reject) => {
-        timer = setTimeout(
-          () => {
+        const scheduleTimer = (currentTimeout) => {
+          timer = setTimeout(async () => {
+            if (isSettled) return
+
+            // Adaptive heartbeat check before declaring the session dead
+            if (typeof checkHeartbeat === 'function' && extensionsDone < maxExtensions) {
+              extensionsDone++
+              try {
+                const alive = await Promise.race([
+                  checkHeartbeat(),
+                  new Promise((r) => setTimeout(() => r(false), 1000)),
+                ])
+                if (alive && !isSettled) {
+                  // Renderer or debugger responded; extend the wait window
+                  scheduleTimer(timeoutMs)
+                  return
+                }
+              } catch {}
+            }
+
             const diag = { label, ...describeContext(id, Date.now()) }
             recordedTimeouts.push(diag)
             if (recordedTimeouts.length > MAX_RECORDED_TIMEOUTS) recordedTimeouts.shift()
@@ -134,12 +162,13 @@ export async function withRelayTimeout(
             error.name = RELAY_TIMEOUT_ERROR_NAME
             error.relayDiagnostics = diag
             reject(error)
-          },
-          timeoutMs,
-        )
+          }, currentTimeout)
+        }
+        scheduleTimer(timeoutMs)
       }),
     ])
   } finally {
+    isSettled = true
     clearTimeout(timer)
     inFlight.delete(id)
   }

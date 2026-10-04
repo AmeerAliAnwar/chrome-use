@@ -252,6 +252,13 @@ fn active_target_after_removal(
         return active_target_id.map(str::to_string);
     }
     if on_relay {
+        // If there is an active surviving real page (not a scratch blank page),
+        // re-anchor to it so subsequent commands don't fail with "Tab was closed" / "Target closed".
+        if let Some(page) = pages.get(active_page_index) {
+            if !page.url.is_empty() && page.url != "about:blank" {
+                return Some(page.target_id.clone());
+            }
+        }
         return Some(removed_target_id.to_string());
     }
     pages
@@ -1706,6 +1713,15 @@ impl BrowserManager {
                 Some(session_id),
             )
             .await;
+        // Arm file chooser interception to avoid modal freezes on OS file dialogs
+        let _ = self
+            .client
+            .send_command(
+                "Page.setInterceptFileChooserDialog",
+                Some(json!({ "enabled": true })),
+                Some(session_id),
+            )
+            .await;
         Ok(())
     }
 
@@ -1727,6 +1743,14 @@ impl BrowserManager {
         self.client
             .send_command_no_params("Network.enable", None)
             .await?;
+        let _ = self
+            .client
+            .send_command(
+                "Page.setInterceptFileChooserDialog",
+                Some(json!({ "enabled": true })),
+                None,
+            )
+            .await;
         Ok(())
     }
 
@@ -1782,7 +1806,7 @@ impl BrowserManager {
         Ok(())
     }
 
-    fn remember_created_target(&mut self, target_id: &str) {
+    pub fn remember_created_target(&mut self, target_id: &str) {
         if self.created_targets.insert(target_id.to_string()) {
             if let Err(error) = self.persist_created_targets() {
                 eprintln!("{error}");
@@ -2269,30 +2293,39 @@ impl BrowserManager {
         Ok(result.as_str().unwrap_or("").to_string())
     }
 
-    pub async fn evaluate(&self, script: &str, _args: Option<Value>) -> Result<Value, String> {
+    pub async fn evaluate(&self, script: &str, args: Option<Value>) -> Result<Value, String> {
+        let timeout_ms = args.as_ref().and_then(|a| {
+            if let Some(t) = a.as_u64() {
+                Some(t)
+            } else {
+                a.get("timeoutMs")
+                    .or_else(|| a.get("timeout"))
+                    .and_then(|v| v.as_u64())
+            }
+        });
         let session_id = self.active_session_id()?.to_string();
-        self.eval_in_context(script, &session_id, None).await
+        self.eval_in_context(script, &session_id, None, timeout_ms).await
     }
 
     /// Evaluate `script` in a specific frame's context (issue #58 `eval --frame`).
-    ///
-    /// - **Out-of-process iframe** (cross-origin; has its own auto-attached session
-    ///   in `iframe_sessions`): run on that session, which lands in the frame's own
-    ///   **main world** — exactly what you want for a cross-origin embed like a
-    ///   Google account-picker.
-    /// - **Same-process (in-page) frame**: there is no stealth-safe way to reach the
-    ///   frame's main world without `Runtime.enable`, so we run in a per-call
-    ///   **isolated world** via `Page.createIsolatedWorld`. The DOM is fully
-    ///   readable there, but page JS globals are not visible (same trade-off
-    ///   `get text --all-frames` already makes).
     pub async fn evaluate_in_frame(
         &self,
         script: &str,
         frame_id: &str,
         iframe_sessions: &HashMap<String, String>,
     ) -> Result<Value, String> {
+        self.evaluate_in_frame_with_timeout(script, frame_id, iframe_sessions, None).await
+    }
+
+    pub async fn evaluate_in_frame_with_timeout(
+        &self,
+        script: &str,
+        frame_id: &str,
+        iframe_sessions: &HashMap<String, String>,
+        timeout_ms: Option<u64>,
+    ) -> Result<Value, String> {
         if let Some(oopif_session) = iframe_sessions.get(frame_id) {
-            return self.eval_in_context(script, oopif_session, None).await;
+            return self.eval_in_context(script, oopif_session, None, timeout_ms).await;
         }
 
         let session_id = self.active_session_id()?.to_string();
@@ -2310,7 +2343,7 @@ impl BrowserManager {
             .ok_or_else(|| {
                 format!("Could not resolve an execution context for frame {frame_id}")
             })?;
-        self.eval_in_context(script, &session_id, Some(ctx_id))
+        self.eval_in_context(script, &session_id, Some(ctx_id), timeout_ms)
             .await
     }
 
@@ -2321,6 +2354,7 @@ impl BrowserManager {
         script: &str,
         session_id: &str,
         context_id: Option<i64>,
+        timeout_ms: Option<u64>,
     ) -> Result<Value, String> {
         // `replMode: true` lets successive `eval`s re-declare top-level
         // `let`/`const` instead of throwing "Identifier 'x' has already been
@@ -2340,6 +2374,10 @@ impl BrowserManager {
             "awaitPromise": !repl_mode,
             "replMode": repl_mode,
         });
+        if let Some(t) = timeout_ms {
+            params["timeoutMs"] = json!(t);
+            params["timeout"] = json!(t);
+        }
         if let Some(cid) = context_id {
             // `contextId` and `replMode` are mutually exclusive in Chrome; when we
             // pin a frame context, drop replMode (a fresh isolated world per call

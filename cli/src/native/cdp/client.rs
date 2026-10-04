@@ -66,6 +66,12 @@ const CDP_PAYLOAD_MAX_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 /// browser. Anything without a size-proportional payload keeps the flat budget,
 /// so an ordinary hung command still fails as fast as it used to.
 pub(crate) fn command_timeout(method: &str, params: Option<&Value>) -> std::time::Duration {
+    if let Some(explicit) = params
+        .and_then(|p| p.get("timeoutMs").or_else(|| p.get("timeout")))
+        .and_then(|t| t.as_u64())
+    {
+        return std::time::Duration::from_millis(explicit.saturating_add(5_000));
+    }
     if method != "Input.insertText" {
         return CDP_COMMAND_TIMEOUT;
     }

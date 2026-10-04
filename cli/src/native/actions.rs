@@ -958,6 +958,16 @@ impl DaemonState {
                         .await;
                     }
 
+                    let is_child_popup = te
+                        .target_info
+                        .opener_id
+                        .as_ref()
+                        .is_some_and(|oid| mgr.active_target_id().ok() == Some(oid.as_str()) || mgr.has_target(oid));
+
+                    if is_child_popup {
+                        mgr.remember_created_target(&te.target_info.target_id);
+                    }
+
                     let tab_id = mgr.assign_tab_id();
                     // Passively discovered (event-driven) — must NOT steal the
                     // active tab, or a foreign/user/other-session tab opening
@@ -1051,6 +1061,23 @@ impl DaemonState {
                                 serde_json::from_value::<TargetDestroyedEvent>(event.params.clone())
                             {
                                 destroyed_targets.push(te.target_id);
+                            }
+                            continue;
+                        }
+                        "Page.fileChooserOpened" => {
+                            if let Some(ref mgr) = self.browser {
+                                let session_id = event.session_id.as_deref().or(mgr.active_session_id().ok());
+                                let client = mgr.client.clone();
+                                let sid = session_id.map(str::to_string);
+                                tokio::spawn(async move {
+                                    let _ = client
+                                        .send_command(
+                                            "Page.handleFileChooser",
+                                            Some(json!({ "action": "cancel" })),
+                                            sid.as_deref(),
+                                        )
+                                        .await;
+                                });
                             }
                             continue;
                         }
@@ -1851,6 +1878,12 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
             "click" => handle_click(cmd, state).await,
             "dblclick" => handle_dblclick(cmd, state).await,
             "fill" => handle_fill(cmd, state).await,
+            "fillForm" | "fill_form" => handle_fill_form(cmd, state).await,
+            "input" => {
+                let mut type_cmd = cmd.clone();
+                type_cmd["fast"] = json!(true);
+                handle_type(&type_cmd, state).await
+            }
             "type" => handle_type(cmd, state).await,
             "press" => handle_press(cmd, state).await,
             "pick" => handle_pick(cmd, state).await,
@@ -3998,16 +4031,21 @@ async fn handle_evaluate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .and_then(|v| v.as_str())
         .ok_or("Missing 'script' parameter")?;
 
+    let timeout_ms = cmd
+        .get("timeoutMs")
+        .or_else(|| cmd.get("timeout"))
+        .and_then(|v| v.as_u64());
+
     // `--frame <index|url-substring|@ref|css-selector>` (issue #58): run in that
     // frame's context instead of the main frame. No flag → main frame (unchanged).
     let result = match cmd.get("frame").and_then(|v| v.as_str()) {
         Some(spec) => {
             let frame_id =
                 resolve_frame_spec(mgr, &state.ref_map, &state.iframe_sessions, spec).await?;
-            mgr.evaluate_in_frame(script, &frame_id, &state.iframe_sessions)
+            mgr.evaluate_in_frame_with_timeout(script, &frame_id, &state.iframe_sessions, timeout_ms)
                 .await?
         }
-        None => mgr.evaluate(script, None).await?,
+        None => mgr.evaluate(script, timeout_ms.map(|t| json!({ "timeoutMs": t }))).await?,
     };
     let url = mgr.get_url().await.unwrap_or_default();
     Ok(json!({ "result": result, "origin": url }))
@@ -5946,6 +5984,12 @@ async fn handle_type(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
+    let fast = cmd
+        .get("fast")
+        .or_else(|| cmd.get("immediate"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
     // `--key-events`: dispatch real per-character keyDown/keyUp instead of
     // Input.insertText, so autocomplete/combobox widgets that only react to key
     // events fire (e.g. Google's address postal-code lookup) (issue #4/#36).
@@ -6009,6 +6053,7 @@ async fn handle_type(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         delay,
         &state.iframe_sessions,
         key_events,
+        fast,
     )
     .await?;
     if commit_enter {
@@ -6038,6 +6083,77 @@ async fn handle_type(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         }
     }
     Ok(out)
+}
+
+async fn handle_fill_form(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
+
+    let fields = cmd
+        .get("fields")
+        .ok_or("Missing 'fields' parameter for fillForm (expected array or object)")?;
+
+    // Script executes all field updates in a single roundtrip using prototype descriptor setters
+    // to guarantee React 16/17/18/19 controlled input compatibility without dropping characters.
+    let fill_script = r#"(function(fields) {
+        const results = [];
+        const items = Array.isArray(fields)
+            ? fields
+            : Object.entries(fields).map(([k, v]) => ({ selector: k, value: v }));
+
+        for (const item of items) {
+            const sel = item.selector || item.name || (Array.isArray(item) ? item[0] : null);
+            const val = item.value !== undefined ? item.value : (Array.isArray(item) ? item[1] : '');
+            if (!sel) continue;
+
+            const el = document.querySelector(sel);
+            if (!el) {
+                results.push({ selector: sel, success: false, error: 'Element not found' });
+                continue;
+            }
+
+            el.focus();
+            const proto = Object.getPrototypeOf(el);
+            const desc = Object.getOwnPropertyDescriptor(proto, 'value')
+                || Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')
+                || Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value');
+
+            if (desc && desc.set) {
+                desc.set.call(el, String(val));
+            } else {
+                el.value = String(val);
+            }
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            results.push({ selector: sel, success: true });
+        }
+        return results;
+    })"#;
+
+    let res = mgr.client.send_command_typed::<_, Value>(
+        "Runtime.callFunctionOn",
+        &cdp::types::CallFunctionOnParams {
+            function_declaration: fill_script.to_string(),
+            object_id: None,
+            arguments: Some(vec![cdp::types::CallArgument {
+                value: Some(fields.clone()),
+                object_id: None,
+            }]),
+            return_by_value: Some(true),
+            await_promise: Some(false),
+        },
+        Some(&session_id),
+    ).await;
+
+    let filled_results = match res {
+        Ok(v) => v.get("result").and_then(|r| r.get("value")).cloned().unwrap_or(v),
+        Err(_) => {
+            let eval_script = format!("({fill_script})({})", serde_json::to_string(fields).unwrap_or_else(|_| "[]".into()));
+            mgr.evaluate(&eval_script, None).await?
+        }
+    };
+
+    Ok(json!({ "success": true, "filled": filled_results }))
 }
 
 /// Atomic combobox select: `pick <selector> --option "<text>"`. Opens the control

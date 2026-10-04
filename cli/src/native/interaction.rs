@@ -1759,6 +1759,7 @@ pub async fn type_text(
     delay_ms: Option<u64>,
     iframe_sessions: &HashMap<String, String>,
     key_events: bool,
+    fast: bool,
 ) -> Result<(), String> {
     let (object_id, effective_session_id) = resolve_element_object_id(
         client,
@@ -1768,6 +1769,51 @@ pub async fn type_text(
         iframe_sessions,
     )
     .await?;
+
+    if fast {
+        // Fast immediate setter for React/Vue controlled inputs:
+        // uses prototype descriptor setter to trigger synthetic event handlers without key delays.
+        let script = r#"function(val, shouldClear) {
+            this.focus();
+            if (shouldClear) {
+                this.value = '';
+            }
+            const proto = Object.getPrototypeOf(this);
+            const desc = Object.getOwnPropertyDescriptor(proto, 'value')
+                || Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')
+                || Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value');
+            if (desc && desc.set) {
+                desc.set.call(this, val);
+            } else {
+                this.value = val;
+            }
+            this.dispatchEvent(new Event('input', { bubbles: true }));
+            this.dispatchEvent(new Event('change', { bubbles: true }));
+        }"#;
+        client
+            .send_command_typed::<_, Value>(
+                "Runtime.callFunctionOn",
+                &CallFunctionOnParams {
+                    function_declaration: script.to_string(),
+                    object_id: Some(object_id),
+                    arguments: Some(vec![
+                        CallArgument {
+                            value: Some(json!(text)),
+                            object_id: None,
+                        },
+                        CallArgument {
+                            value: Some(json!(clear)),
+                            object_id: None,
+                        },
+                    ]),
+                    return_by_value: Some(true),
+                    await_promise: Some(false),
+                },
+                Some(&effective_session_id),
+            )
+            .await?;
+        return Ok(());
+    }
 
     // Focus
     client

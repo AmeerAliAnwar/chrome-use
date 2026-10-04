@@ -664,14 +664,26 @@ async function onHostMessage(msg) {
   } else if (typeof msg.id !== 'undefined' && msg.method === 'forwardCDPBatch') {
     try {
       const commands = Array.isArray(msg.params?.commands) ? msg.params.commands : [];
+      const stopOnError = msg.params?.stopOnError !== false;
       const results = [];
-      for (const item of commands) {
-        const itemResult = await handleForwardCdpCommand({
-          ...msg,
-          method: 'forwardCDPCommand',
-          params: item,
-        });
-        results.push(itemResult);
+      for (let i = 0; i < commands.length; i++) {
+        const item = commands[i];
+        try {
+          const itemResult = await handleForwardCdpCommand({
+            ...msg,
+            method: 'forwardCDPCommand',
+            params: item,
+          });
+          results.push({ index: i, method: item?.method, success: true, result: itemResult });
+        } catch (itemErr) {
+          results.push({
+            index: i,
+            method: item?.method,
+            success: false,
+            error: itemErr instanceof Error ? itemErr.message : String(itemErr),
+          });
+          if (stopOnError) break;
+        }
       }
       postToHost({ id: msg.id, result: { results } });
     } catch (err) {
@@ -806,6 +818,15 @@ async function recoverSessionTab(sessionId) {
 async function sendCdpToTab(tabId, method, params, childSessionId) {
   return await sendTabCommand(tabId, method, params, childSessionId, {
     sendCommand: (target, command, args) => chrome.debugger.sendCommand(target, command, args),
+    checkHeartbeat: async () => {
+      try {
+        const dbg = childSessionId ? { tabId, sessionId: childSessionId } : { tabId };
+        await chrome.debugger.sendCommand(dbg, 'Runtime.evaluate', { expression: '1+1', returnByValue: true });
+        return true;
+      } catch {
+        return false;
+      }
+    },
     detachTab,
     recoverSessionTab,
   });
@@ -1455,6 +1476,10 @@ async function attachTab(tabId, transactionIsActive) {
     'chrome.debugger.sendCommand(Page.enable)'
   ).catch(() => {});
   void withRelayTimeout(
+    chrome.debugger.sendCommand(dbg, 'Page.setInterceptFileChooserDialog', { enabled: true }),
+    'chrome.debugger.sendCommand(Page.setInterceptFileChooserDialog)'
+  ).catch(() => {});
+  void withRelayTimeout(
     chrome.debugger.sendCommand(dbg, 'Target.setAutoAttach', {
       autoAttach: true,
       flatten: true,
@@ -1518,13 +1543,14 @@ async function reattachTab(tabId, entry) {
       } catch {}
     };
     await arm('Page.enable');
+    await arm('Page.setInterceptFileChooserDialog', { enabled: true });
     await arm('Target.setAutoAttach', {
       autoAttach: true,
       flatten: true,
       waitForDebuggerOnStart: false,
     });
     for (const { method, params } of entry.replay.values()) {
-      if (method === 'Page.enable' || method === 'Target.setAutoAttach') continue;
+      if (method === 'Page.enable' || method === 'Page.setInterceptFileChooserDialog' || method === 'Target.setAutoAttach') continue;
       await arm(method, params);
     }
     return entry;

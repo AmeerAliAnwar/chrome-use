@@ -172,3 +172,35 @@ test('a scaled-budget timeout does not blame an unresponsive debugger', async ()
     },
   )
 })
+
+test('relayCommandBudgetMs respects explicit timeoutMs parameter', () => {
+  assert.equal(relayCommandBudgetMs('Runtime.evaluate', { timeoutMs: 20000 }), 20000)
+  assert.equal(relayCommandBudgetMs('Runtime.evaluate', { _timeoutMs: 15000 }), 15000)
+  assert.equal(relayCommandBudgetMs('Runtime.evaluate', { timeout: 25000 }), 25000)
+})
+
+test('withRelayTimeout extends timeout when checkHeartbeat returns true', async () => {
+  let heartbeats = 0
+  let resolveOp
+  const delayedOp = new Promise((resolve) => {
+    resolveOp = resolve
+  })
+
+  // Start with a 15ms timeout, but heartbeat extends it
+  const heartbeatChecker = async () => {
+    heartbeats++
+    if (heartbeats === 1) {
+      setTimeout(() => resolveOp('completed-after-heartbeat'), 10)
+      return true
+    }
+    return false
+  }
+
+  const result = await withRelayTimeout(delayedOp, 'Runtime.evaluate', 15, {
+    checkHeartbeat: heartbeatChecker,
+  })
+
+  assert.equal(result, 'completed-after-heartbeat')
+  assert.equal(heartbeats, 1)
+})
+
