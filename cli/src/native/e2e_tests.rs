@@ -1064,8 +1064,16 @@ async fn e2e_snapshot_and_click_ref() {
     .await;
     assert_success(&resp);
 
+    let html = concat!(
+        "data:text/html,<html><head><title>Example Domain</title></head><body>",
+        "<h1>Example Domain</h1>",
+        "<p>This domain is for use in illustrative examples in documents.</p>",
+        "<p><a href='https://www.iana.org/domains/example'>More information...</a></p>",
+        "</body></html>"
+    );
+
     let resp = execute_command(
-        &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+        &json!({ "id": "2", "action": "navigate", "url": html }),
         &mut state,
     )
     .await;
