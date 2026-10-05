@@ -901,7 +901,7 @@ impl WaitUntil {
             "networkidle" => Self::NetworkIdle,
             "load" => Self::Load,
             "none" | "commit" => Self::None,
-            _ => Self::DomContentLoaded,
+            _ => Self::Load,
         }
     }
 
@@ -2250,38 +2250,17 @@ impl BrowserManager {
         let timeout = tokio::time::Duration::from_millis(self.default_timeout_ms);
 
         tokio::time::timeout(timeout, async {
-            let mut check_interval = tokio::time::interval(tokio::time::Duration::from_millis(100));
-            check_interval.tick().await;
-
             loop {
-                tokio::select! {
-                    recv_res = rx.recv() => {
-                        match recv_res {
-                            Ok(event) => {
-                                if event.method == event_name
-                                    && event.session_id.as_deref() == Some(session_id)
-                                {
-                                    return Ok(());
-                                }
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                match rx.recv().await {
+                    Ok(event) => {
+                        if event.method == event_name
+                            && event.session_id.as_deref() == Some(session_id)
+                        {
+                            return Ok(());
                         }
                     }
-                    _ = check_interval.tick() => {
-                        if let Ok(state_val) = self.eval_in_context("document.readyState", session_id, None, Some(400)).await {
-                            if let Some(state_str) = state_val.as_str() {
-                                let is_ready = match wait_until {
-                                    WaitUntil::Load => state_str == "complete",
-                                    WaitUntil::DomContentLoaded => state_str == "interactive" || state_str == "complete",
-                                    _ => false,
-                                };
-                                if is_ready {
-                                    return Ok(());
-                                }
-                            }
-                        }
-                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
             Err("Event stream closed".to_string())

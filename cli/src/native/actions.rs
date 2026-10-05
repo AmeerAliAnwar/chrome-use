@@ -3677,16 +3677,14 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
 
     let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
 
-    // `--reuse-tab` or `--browser`: if a tab already shows this URL (same origin+path), switch
+    // `--reuse-tab`: if a tab already shows this URL (same origin+path), switch
     // to it instead of navigating — preserves any in-page state and stops
     // re-`open` from piling up duplicate tabs on rebind (issue #21).
-    let should_reuse = cmd
+    if cmd
         .get("reuseTab")
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
-        || cmd.get("browser").is_some()
-        || mgr.on_relay();
-    if should_reuse {
+    {
         if let Ok(Some(switched)) = mgr.reuse_tab_for_url(url).await {
             return Ok(with_site_hint(switched, url));
         }
