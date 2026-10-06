@@ -520,6 +520,8 @@ chrome-use dialog status         # Check if a dialog is currently open
 chrome-use eval "document.title"          # Simple expressions only
 chrome-use eval -b "<base64>"             # Any JavaScript (base64 encoded)
 chrome-use eval --stdin                   # Read script from stdin
+chrome-use eval --background "<expr>"     # Start a slow expression in the page and poll for it
+                                          # (past the extension relay's ~8s limit per evaluation)
 ```
 
 Use `-b`/`--base64` or `--stdin` for reliable execution. Shell escaping with nested quotes and special characters is error-prone.

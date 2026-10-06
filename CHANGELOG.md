@@ -5,6 +5,22 @@
 <!-- release:start -->
 ### New Features
 
+- **`eval --background <expr>` runs a slow expression past the relay's 8-second limit.** It starts the expression in the page and polls for its value, the way `site` adapters already run. A value that happens to contain an `error` field still counts as data. (#413)
+
+### Bug Fixes
+
+- **OpenCLI commands that wait inside the page no longer time out.** `jd/search`, for example, waits in the page for results and was cut off after 8 seconds with "relay timeout". Its evaluations now use `eval --background`. (#413)
+- **OpenCLI commands that need no browser run.** Commands like `pubmed/search` failed with `Cannot read properties of null (reading 'query')`, because they were handed a page they do not take. chrome-use now calls them the way OpenCLI does, using OpenCLI's own argument preparation and routing. (#413)
+
+### Contributors
+
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.164
+
+### New Features
+
 - **Rotating Yidun sliders.** `solve-slider` measures translation and rotation while dragging, matches the main puzzle silhouette, and checks the current question’s result. Unsupported or ambiguous shapes fail explicitly. (#412)
 
 ### Bug Fixes
@@ -20,7 +36,6 @@
 ### Contributors
 
 - @leeguooooo
-<!-- release:end -->
 
 ## 1.5.163
 
