@@ -1,8 +1,19 @@
 # Changelog
 
-## 1.5.159
+## 1.5.160
 
 <!-- release:start -->
+### Bug Fixes
+
+- **Switching to a tab that is still loading announces its site adapters.** A tab opened in the background can still read `about:blank` from the page when you switch to it, so 1.5.159 missed that site's `siteAdapters` hint. The hint now uses the url the command reported, taken from Chrome's tab info, and checks again on the next command if the site is still unknown. (#406)
+
+### Contributors
+
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.159
+
 ### New Features
 
 - **Site adapters are announced whenever you reach their site, not only on `open`/`snapshot`.** `tab new`, switching or closing tabs, `back`/`forward`/`reload`, a click or key press that navigates, `read`, and the first command on a tab the session did not open now attach the same `siteAdapters` hint when the page is on a different site than the last one announced. Staying on one site, you hear about it once. The text hint also names `chrome-use site info <pack>` for the arguments. (#405)
@@ -15,7 +26,6 @@
 ### Contributors
 
 - @leeguooooo
-<!-- release:end -->
 
 ## 1.5.158
 
