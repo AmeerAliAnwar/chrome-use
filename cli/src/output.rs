@@ -357,6 +357,22 @@ fn print_site_analyze(data: &serde_json::Value, strategy: &str, next: &[serde_js
 
 pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &OutputOptions) {
     print_response_body(resp, action, opts);
+    // A @ref that landed on a node other than the one its snapshot recorded:
+    // one stderr line each, so it is never silent — on a failed action too.
+    if !opts.json {
+        for r in resp
+            .data
+            .as_ref()
+            .and_then(|d| d.get("relocated"))
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+        {
+            if let Some(line) = relocation_line(r) {
+                eprintln!("{} {}", color::warning_indicator(), line);
+            }
+        }
+    }
     // Every successful text response gets its observation, including branches
     // such as eval/check that return before the generic Done renderer.
     if !opts.json && resp.success {
@@ -2216,6 +2232,30 @@ fn describe_find_target(t: &serde_json::Value) -> String {
         s.push_str(&format!(" (text matched {})", one(from)));
     }
     s
+}
+
+/// The stderr line for one `data.relocated` entry.
+fn relocation_line(r: &serde_json::Value) -> Option<String> {
+    let s = |v: Option<&serde_json::Value>| v.and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let ref_id = r.get("ref").and_then(|v| v.as_str())?;
+    let how = match r.get("how").and_then(|v| v.as_str()).unwrap_or("") {
+        "adaptive" => match r.get("score").and_then(|v| v.as_f64()) {
+            Some(score) => format!("adaptive match, score {score:.2}"),
+            None => "adaptive match".to_string(),
+        },
+        "role-name" => "role + name re-query".to_string(),
+        "dom-identity" => "its replacement's DOM attributes".to_string(),
+        other => other.to_string(),
+    };
+    let was = r.get("was");
+    Some(format!(
+        "{ref_id} relocated ({how}): snapshot had [{} \"{}\"], acted on [{} \"{}\"] — its \
+         original node is gone; re-run `snapshot -i` if that is not the control you meant",
+        s(was.and_then(|w| w.get("role"))),
+        s(was.and_then(|w| w.get("name"))),
+        s(r.get("role")),
+        s(r.get("name")),
+    ))
 }
 
 fn print_warning(resp: &Response) {
@@ -5933,6 +5973,31 @@ pub fn print_version() {
 mod tests {
     use super::{eval_result_text, format_a11y_text, format_storage_text, print_command_help};
     use serde_json::json;
+
+    #[test]
+    fn a_relocation_prints_what_the_ref_was_and_where_it_landed() {
+        let line = super::relocation_line(&json!({
+            "ref": "@e5", "how": "adaptive", "score": 0.82,
+            "role": "button", "name": "Save now",
+            "was": {"role": "button", "name": "Save"},
+        }))
+        .unwrap();
+        assert!(
+            line.starts_with("@e5 relocated (adaptive match, score 0.82)"),
+            "{line}"
+        );
+        assert!(line.contains("[button \"Save\"]"), "{line}");
+        assert!(line.contains("acted on [button \"Save now\"]"), "{line}");
+        assert!(line.contains("snapshot -i"), "{line}");
+
+        let line = super::relocation_line(&json!({
+            "ref": "@e2", "how": "role-name", "role": "link", "name": "Home",
+            "was": {"role": "link", "name": "Home"},
+        }))
+        .unwrap();
+        assert!(line.contains("(role + name re-query)"), "{line}");
+        assert!(super::relocation_line(&json!({"how": "adaptive"})).is_none());
+    }
 
     #[test]
     fn slider_solver_has_its_own_help_topic() {
