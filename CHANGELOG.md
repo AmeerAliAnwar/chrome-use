@@ -1,8 +1,21 @@
 # Changelog
 
-## 1.5.160
+## 1.5.161
 
 <!-- release:start -->
+### New Features
+
+- **OpenCLI's commands run as `site` commands.** With Node.js 20+ on PATH, `site update` installs a pinned [OpenCLI](https://github.com/jackwener/OpenCLI) (1.8.8, about 180 sites and 1,300 commands) into `~/.chrome-use/opencli` with `npm install --ignore-scripts`; no token is needed. A `name/cmd` that neither of our packs has runs through OpenCLI's own runtime, but every browser step goes through chrome-use, so it uses your current session and logins: `chrome-use site hackernews/best --limit 5 --json`. They are marked `(opencli)` in `site list`, `site info` shows their args, and the site hint lists them after ours. Our adapters win on a shared name. `AGENT_BROWSER_SITES_NO_OPENCLI=1` turns this off. (#407)
+- **`site analyze [url]` shows where a page's data comes from.** It lists the same-site API calls the page made, the state it embeds (`__NEXT_DATA__`, `__INITIAL_STATE__`, JSON script tags) and any anti-bot vendor. It then recommends reading the site's own API from the page, then embedded state, then the DOM, the order in which they break least, and lists next steps. Do the action that loads the data first, then analyze. (#407)
+- **`site verify <name>/<cmd> [args]` catches a broken adapter.** `--write-fixture` records the shape of a good result in `~/.chrome-use/site-fixtures/` (types only, no values). Later runs fail with exit 1 when a field disappears, changes type, or a list comes back empty. Works for OpenCLI commands too. (#407)
+
+### Contributors
+
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.160
+
 ### Bug Fixes
 
 - **Switching to a tab that is still loading announces its site adapters.** A tab opened in the background can still read `about:blank` from the page when you switch to it, so 1.5.159 missed that site's `siteAdapters` hint. The hint now uses the url the command reported, taken from Chrome's tab info, and checks again on the next command if the site is still unknown. (#406)
@@ -10,7 +23,6 @@
 ### Contributors
 
 - @leeguooooo
-<!-- release:end -->
 
 ## 1.5.159
 
