@@ -1,8 +1,19 @@
 # Changelog
 
-## 1.5.166
+## 1.5.167
 
 <!-- release:start -->
+### Bug Fixes
+
+- **`chrome-use status` no longer reports a dead relay as up.** When the native host exits abruptly, its relay address file stays on disk, and `status` used to read that file as a live connection, showing cached extension and profile details as current. It now asks the extension for a reply, waiting up to 10 seconds on a silent connection. If none arrives, it reports the relay as down and the cached details as unknown. (#411, thanks @Sean529)
+
+### Contributors
+
+- @Sean529
+<!-- release:end -->
+
+## 1.5.166
+
 ### Improvements
 
 - **`click` refuses a target that something else covers.** It used to click the element through the DOM (`element.click()`, `isTrusted=false`) and only warn, so agents often believed they had hit the real control. Now it fails with `click refused: #b is covered by <div id="cookie"> "Cookie banner" at its click point…`. `click --allow-dom` clicks it through the DOM anyway. `check`, downloads and sign-in keep the old fallback, because a styled checkbox covering its own hidden input is normal there and they verify the result themselves. (#414)
@@ -14,7 +25,6 @@ Borrowed from iphone-use.
 ### Contributors
 
 - @leeguooooo
-<!-- release:end -->
 
 ## 1.5.165
 
