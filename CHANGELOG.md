@@ -1,8 +1,29 @@
 # Changelog
 
-## 1.5.167
+## 1.5.168
 
 <!-- release:start -->
+### Improvements
+
+- **A ref that no longer matches its snapshot is never acted on as a guess.** When a `@ref`'s element was replaced, chrome-use still re-finds it. If the replacement has the same role and name, the action runs and the reply reports it (`relocated` in `--json`, a `⚠ @eN relocated` line on stderr). If the best match has a different name ("Delete" → "Delete all"), nothing is clicked. The error offers it as a new ref, `try @e7 [button] "Delete all"`, along with up to two other close matches. A text field re-found by its `id`, `name` or `data-testid` is still filled after its label changes, and reported (#356). `Unknown ref` errors now say what the ref was and suggest current refs. Borrowed from callstack/agent-device. (#419)
+- **`scroll down --until <selector|@ref|text=…>`** scrolls step by step until the target is in view, in one call. It stops at `--max-steps` (default 30), the timeout, or the end of the page, and fails with how far it got. `--until-text "…"` and `--selector <container>` work too. (#420)
+- **A snapshot of a canvas page comes with a screenshot.** When the tree is near-empty because a canvas fills the page, the snapshot attaches a 1200px screenshot path (`data.screenshot`). That saves a round trip. `AGENT_BROWSER_SPARSE_SCREENSHOT=0` turns it off. (#420)
+- **The core skill is a third of its size.** `skills get core` is 6 KB of rules and routing instead of 15.7 KB; the detail moved to the `core/<topic>` references. (#416)
+
+### Bug Fixes
+
+- **`--observe` before any snapshot no longer renumbers unchanged elements.** The delta reported unchanged links as removed and re-added under new refs, so a ref the agent held could point at a different control. (#418)
+- **`--observe` no longer lists other extensions' requests**, such as `chrome-extension://…/locales.json`. (#418)
+- **Local pages no longer suggest OpenCLI's desktop-app commands.** Every `localhost` page was offered 19 `antigravity/*` commands meant for a local Electron app. (#418)
+- **Extension tests no longer fail on a busy machine.** The duplicate-tab deadline tests now run on an injected fake clock instead of real 5–20 ms budgets. These tests had made two release preflights fail. (#417)
+
+### Contributors
+
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.167
+
 ### Bug Fixes
 
 - **`chrome-use status` no longer reports a dead relay as up.** When the native host exits abruptly, its relay address file stays on disk, and `status` used to read that file as a live connection, showing cached extension and profile details as current. It now asks the extension for a reply, waiting up to 10 seconds on a silent connection. If none arrives, it reports the relay as down and the cached details as unknown. (#411, thanks @Sean529)
@@ -10,7 +31,6 @@
 ### Contributors
 
 - @Sean529
-<!-- release:end -->
 
 ## 1.5.166
 
