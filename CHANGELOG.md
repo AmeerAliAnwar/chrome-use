@@ -1,8 +1,24 @@
 # Changelog
 
-## 1.5.158
+## 1.5.159
 
 <!-- release:start -->
+### New Features
+
+- **Site adapters are announced whenever you reach their site, not only on `open`/`snapshot`.** `tab new`, switching or closing tabs, `back`/`forward`/`reload`, a click or key press that navigates, `read`, and the first command on a tab the session did not open now attach the same `siteAdapters` hint when the page is on a different site than the last one announced. Staying on one site, you hear about it once. The text hint also names `chrome-use site info <pack>` for the arguments. (#405)
+- **A site you drive a lot without an adapter gets a suggestion to write one.** After 30 actions on a site in one session, or on a third day of use, one response carries `siteAdapterSuggestion` (stderr: `site adapter suggestion: …`). It tells the agent to ask you before writing anything. It comes once per site per session and not again for two weeks; local hosts and IPs are skipped, and `AGENT_BROWSER_SITES_NO_SUGGEST=1` turns it off. Only hosts and dates are kept, in `~/.chrome-use/site-usage.json`. The agent guide explains how to write your own adapter in `~/.chrome-use/my-sites` and register it with `site add`. (#405)
+
+### Improvements
+
+- **The official adapter pack takes precedence over the community pack.** `site update` records which pack each adapter came from. When both packs ship the same `name/cmd` (today `twitter/search` and `twitter/thread`), the official one is used, and for each site the hint lists official and your own adapters before community ones. (#405)
+
+### Contributors
+
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.158
+
 ### Bug Fixes
 
 - **Windows: a call no longer hangs after the session daemon starts.** The daemon was spawned with handle inheritance on, so it also held the stdout/stderr pipes of whoever ran chrome-use. The `chrome-use.exe` the caller started exited normally, but a caller reading its output to the end (Rust `Command::output()`, Python `subprocess.run`) kept waiting until the daemon exited, up to its 10-minute idle timeout. A new daemon starts after an idle exit, on `adopt`, or after a version change, so the relay seemed to work and then hang after idle. The standard handles are no longer inheritable when the daemon is spawned. (#399, likely cause of #392)
@@ -10,7 +26,6 @@
 ### Contributors
 
 - @leeguooooo
-<!-- release:end -->
 
 ## 1.5.157
 
