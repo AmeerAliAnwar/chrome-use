@@ -212,6 +212,18 @@ chrome-use wait --load networkidle      # Wait for network idle (or -l)
 chrome-use wait --fn "window.ready"     # Wait for JS condition (or -f)
 ```
 
+## CAPTCHA continuation
+
+```bash
+chrome-use solve-slider 1       # ordinary Yidun puzzle: initial attempt + one retry
+chrome-use skills get core/captcha  # type detection, visual clicks, result verification
+```
+
+A verified slider success returns `solved:true`; exhausted attempts return an
+error and a nonzero exit code. `solve-slider` does not recognize ordered icons.
+For an authorized task, inspect and attempt the visible challenge before
+handoff. See `core/captcha` for coordinate conversion and bounded retries.
+
 ## Mouse Control
 
 ```bash
@@ -345,6 +357,13 @@ state), its choice, and Jev's raw answers with probabilities. It is off unless
 set. It records the goal, the page text and field values, which includes
 anything already typed into the form, so treat the file as sensitive. The run report also splits `act_ms` into
 `act_read_ms`, `cmd_click_ms`, `cmd_press_ms` and `cmd_insert_ms`.
+
+## Response body provenance
+
+`network request <id>` reads the body from the renderer that captured it,
+including cross-origin frames. `responseBodyError` explains an unavailable or
+evicted body; it is not an empty response and not proof of server acceptance.
+The internal CDP session identifier is not included in JSON output.
 
 ## Network
 

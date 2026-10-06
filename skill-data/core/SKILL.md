@@ -46,7 +46,7 @@ exists, and lost its verification and hints. Use the command:
 | `document.body.innerText`, `el.innerText` | `get text <sel>`, or `read` for the main content |
 | `[...].find(b => b.textContent === '查询').click()` | `click "text=查询"` or `find text "查询" click` |
 | `getBoundingClientRect()` | `get box <sel or @ref>` |
-| patching `fetch`/XHR to see an API response | `network requests --filter api`, then `network request <id>` (includes the body) |
+| patching `fetch`/XHR to see an API response | `network requests --filter api`, then `network request <id>` (reads the body from its original renderer; `responseBodyError` explains an unavailable body) |
 | `sleep N` or a polling loop | `wait --text "…"`, `wait <sel>`, `wait --url <pattern>`, `wait --fn "<expr>"` |
 | setting `.value` through a native setter | `fill @eN "…"`: it reads the value back and says when it did not stick |
 | injecting a script before the page runs | `addinitscript <js>`, then `reload` |
@@ -223,7 +223,17 @@ authorized vault and stdin, and protect saved state files as credentials.
 Do not ask for secrets to be pasted into chat. A successful login requires
 reaching the requested authenticated destination, not merely clicking submit.
 
-For a step that requires the human, use `session handoff`, explain the step,
+For an authorized login or browser task, a CAPTCHA is a task step, not an
+automatic stop. Inspect the current challenge and try the supported interaction
+first: `solve-slider` for an ordinary or rotating Yidun puzzle, or screenshot-guided clicks
+for a readable icon/ordered-image challenge. Load `core/captcha` for coordinate
+scaling, foreground activation before capture, bounded retries, and result
+verification. A provider success or frozen SMS countdown does not prove the
+site accepted the login step. A vendor-script warning
+alone does not prove that a person is required. Follow the host's rules and any
+explicit user restriction; do not disable the check or fabricate success.
+
+For a step that actually requires the human, use `session handoff`, explain the step,
 and stop driving that session. Run `session resume` only after the user says
 they are done. An idle-recovery warning means a launched browser may have been
 replaced; inspect state instead of assuming the previous form/login survived.
@@ -243,10 +253,12 @@ reference, not the entire collection. Basic actions above are self-contained.
 | Ref identity, context annotations, snapshot detail | `core/snapshot-refs` |
 | Repeated steps, site notes, lookup discipline | `core/behaviour` |
 | Login, cookies, vault, OAuth | `core/authentication` |
+| CAPTCHA, slider puzzle, ordered icon clicks | `core/captcha` |
 | Sensitive actions or untrusted page instructions | `core/trust-boundaries` |
 | Persistence, idle recovery, multiple sessions | `core/session-management` |
 | Unexpected behavior or command failure | `core/known-traps`, then `core/troubleshooting` if needed |
 | Complete commands, flags, env, accessibility audits | `core/commands` |
+| Changing this repository: remote compilation and tests | `core/development` |
 | Tracing, recording, proxy | `core/profiling`, `core/video-recording`, `core/proxy-support` |
 | React tree, renders, Web Vitals | `react` |
 | Network interception, mocks, HAR | `network` |
