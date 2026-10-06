@@ -1,8 +1,23 @@
 # Changelog
 
-## 1.5.165
+## 1.5.166
 
 <!-- release:start -->
+### Improvements
+
+- **`click` refuses a target that something else covers.** It used to click the element through the DOM (`element.click()`, `isTrusted=false`) and only warn, so agents often believed they had hit the real control. Now it fails with `click refused: #b is covered by <div id="cookie"> "Cookie banner" at its click point…`. `click --allow-dom` clicks it through the DOM anyway. `check`, downloads and sign-in keep the old fallback, because a styled checkbox covering its own hidden input is normal there and they verify the result themselves. (#414)
+- **Every reply says where the time went.** `--json` replies carry `timing: {ms, cdpMs, cdpCalls, slowest}`, the costliest Chrome calls, and the daemon logs one line per command to `~/.chrome-use/timing.jsonl` (no URLs or page content; rotated at 20 MB; `AGENT_BROWSER_TIMING_LOG=0` turns it off). (#414)
+- **Screenshots default to 1200 px on the longest edge, down from 2000.** That is about 1.2k image tokens for a viewport instead of ~3.3k. Full-page shots are capped by width only, so a long page stays readable. `--full-res` keeps the captured size. (#414)
+
+Borrowed from iphone-use.
+
+### Contributors
+
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.165
+
 ### New Features
 
 - **`eval --background <expr>` runs a slow expression past the relay's 8-second limit.** It starts the expression in the page and polls for its value, the way `site` adapters already run. A value that happens to contain an `error` field still counts as data. (#413)
@@ -15,7 +30,6 @@
 ### Contributors
 
 - @leeguooooo
-<!-- release:end -->
 
 ## 1.5.164
 
