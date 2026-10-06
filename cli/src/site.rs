@@ -899,6 +899,13 @@ pub async fn update() -> Result<usize, String> {
     if let Ok(json) = serde_json::to_string(&provenance) {
         let _ = std::fs::write(dir.join(".provenance.json"), json);
     }
+    // OpenCLI's adapters run from its own package (see opencli.rs); a failure
+    // here never fails the update.
+    match tokio::task::spawn_blocking(crate::opencli::sync).await {
+        Ok(Err(e)) => eprintln!("site update: {e}"),
+        Err(e) => eprintln!("site update: opencli: {e}"),
+        _ => {}
+    }
     write_domain_index(&dir);
     if let Some(p) = last_update_path() {
         let _ = std::fs::write(p, now_secs().to_string());
@@ -1124,6 +1131,29 @@ fn write_domain_index(dir: &std::path::Path) {
             }
         }
     }
+    // OpenCLI commands ride along after ours, for names we don't already have.
+    let ours: std::collections::HashSet<String> = by_domain
+        .values()
+        .flat_map(|v| v.iter().map(|(_, s)| s.clone()))
+        .collect();
+    let mut opencli_by_domain: std::collections::BTreeMap<String, Vec<(bool, String)>> =
+        Default::default();
+    for entry in crate::opencli::manifest() {
+        let (Some(spec), Some(domain)) = (
+            crate::opencli::spec_of(&entry),
+            entry.get("domain").and_then(|v| v.as_str()),
+        ) else {
+            continue;
+        };
+        if domain.is_empty() || ours.contains(&spec) {
+            continue;
+        }
+        let read_only = entry.get("access").and_then(|v| v.as_str()) == Some("read");
+        opencli_by_domain
+            .entry(domain.to_string())
+            .or_default()
+            .push((read_only, spec));
+    }
     let ordered: std::collections::BTreeMap<String, Vec<String>> = by_domain
         .into_iter()
         .map(|(domain, mut v)| {
@@ -1139,6 +1169,19 @@ fn write_domain_index(dir: &std::path::Path) {
             (domain, v.into_iter().map(|(_, s)| s).collect())
         })
         .collect();
+    // OpenCLI goes in its own index so a lookup can always rank it after
+    // ours, even when the two packs spell the domain differently
+    // (`v2ex.com` vs `www.v2ex.com`).
+    let theirs: std::collections::BTreeMap<String, Vec<String>> = opencli_by_domain
+        .into_iter()
+        .map(|(domain, mut v)| {
+            v.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+            (domain, v.into_iter().map(|(_, s)| s).collect())
+        })
+        .collect();
+    if let Ok(json) = serde_json::to_string(&theirs) {
+        let _ = std::fs::write(dir.join(".index-opencli.json"), json);
+    }
     if let Ok(json) = serde_json::to_string(&ordered) {
         let _ = std::fs::write(dir.join(".index.json"), json);
     }
@@ -1199,22 +1242,30 @@ pub fn needs_refresh() -> bool {
 /// Reads the prebuilt `.index.json`; empty if the packs aren't synced yet.
 pub fn adapters_for_domain(host: &str) -> Vec<String> {
     let host = host.trim_start_matches("www.");
-    let Some(raw) = index_path().and_then(|p| std::fs::read_to_string(p).ok()) else {
-        return Vec::new();
-    };
-    let Ok(idx) = serde_json::from_str::<std::collections::BTreeMap<String, Vec<String>>>(&raw)
-    else {
-        return Vec::new();
-    };
-    // Preserve the index's per-domain ordering (read-only adapters first); just
-    // dedup if a host somehow matches multiple domain keys.
+    // Ours first, then OpenCLI's (its own index, see write_domain_index).
     let mut out: Vec<String> = Vec::new();
-    for (domain, specs) in idx {
-        let d = domain.trim_start_matches("www.");
-        if host == d || host.ends_with(&format!(".{d}")) {
-            for s in specs {
-                if !out.contains(&s) {
-                    out.push(s);
+    let files = [
+        index_path(),
+        sites_dir().map(|d| d.join(".index-opencli.json")),
+    ];
+    for path in files.into_iter().flatten() {
+        if path.ends_with(".index-opencli.json") && crate::opencli::disabled() {
+            continue;
+        }
+        let Some(idx) = std::fs::read_to_string(&path).ok().and_then(|raw| {
+            serde_json::from_str::<std::collections::BTreeMap<String, Vec<String>>>(&raw).ok()
+        }) else {
+            continue;
+        };
+        // Preserve each index's per-domain ordering (read-only first); dedup
+        // when a host matches several domain keys.
+        for (domain, specs) in idx {
+            let d = domain.trim_start_matches("www.");
+            if host == d || host.ends_with(&format!(".{d}")) {
+                for s in specs {
+                    if !out.contains(&s) {
+                        out.push(s);
+                    }
                 }
             }
         }
@@ -1344,6 +1395,363 @@ pub fn unix_now() -> u64 {
     now_secs()
 }
 
+/// Page-side half of `site analyze`: what an adapter author needs to pick a
+/// data source. Requests come from the Resource Timing buffer, so they cover
+/// what the page has loaded so far — interact first (search, scroll, open a
+/// list), then analyze, to catch the request that action made.
+pub const ANALYZE_JS: &str = r#"(() => {
+  const out = { url: location.href, host: location.hostname, title: document.title };
+  const host = location.hostname.replace(/^www\./, '');
+  const base = host.split('.').slice(-2).join('.');
+  const noise = /google-analytics|googletagmanager|doubleclick|googlesyndication|adtrafficquality|adservice|pagead|facebook\.net|hotjar|sentry|segment\.(io|com)|mixpanel|clarity\.ms|bat\.bing|newrelic|datadoghq|amplitude|\/collect\b|\/log(ging)?\b|\/track(ing)?\b|\/beacon\b|\/metrics?\b|\/report\b|\/telemetry\b|\/pixel\b/i;
+  const seen = new Set();
+  const api = [];
+  for (const e of performance.getEntriesByType('resource')) {
+    if (!['fetch', 'xmlhttprequest'].includes(e.initiatorType)) continue;
+    let u; try { u = new URL(e.name); } catch (_) { continue; }
+    const key = u.origin + u.pathname;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const sameSite = u.hostname === location.hostname || u.hostname.endsWith('.' + base) || u.hostname === base;
+    const reasons = [];
+    let score = 0;
+    if (noise.test(e.name)) { score -= 5; reasons.push('analytics/telemetry'); }
+    if (sameSite) { score += 2; reasons.push('same site'); }
+    if (/\/(api|ajax|graphql|gql|rest|v\d+|x\/|web-interface|rpc|data)\b/i.test(u.pathname)) { score += 3; reasons.push('api-like path'); }
+    if (/\.json\b/i.test(u.pathname)) { score += 2; reasons.push('json'); }
+    if (/graphql|gql/i.test(u.pathname)) reasons.push('graphql');
+    if (/[?&](page|cursor|offset|limit|size|count|keyword|q|query|id|uid)=/i.test(u.search)) { score += 1; reasons.push('paging/query params'); }
+    if (e.transferSize > 2000) { score += 1; reasons.push('sizeable body'); }
+    api.push({ url: e.name.length > 300 ? e.name.slice(0, 300) + '…' : e.name, type: e.initiatorType, sameSite, bytes: e.transferSize || 0, score, reasons });
+  }
+  api.sort((a, b) => b.score - a.score);
+  out.api = api.filter(a => a.score >= 2).slice(0, 12);
+  out.requestsSeen = api.length;
+
+  const known = ['__NEXT_DATA__', '__NUXT__', '__NUXT_DATA__', '__INITIAL_STATE__', '__INITIAL_DATA__', '__INITIAL_PROPS__', '__PRELOADED_STATE__', '__APOLLO_STATE__', '__REDUX_STATE__', '__SSR_DATA__', '__remixContext', '__UNIVERSAL_DATA_FOR_REHYDRATION__', 'ytInitialData', 'ytInitialPlayerResponse', '__pinia', '__INITIAL_SSR_STATE__', 'g_initialProps', '__STATE__'];
+  const names = new Set(known.filter(k => { try { return window[k] != null; } catch (_) { return false; } }));
+  for (const k of Object.getOwnPropertyNames(window)) {
+    if (names.size > 20) break;
+    if (/^__.*(STATE|DATA|PROPS|CONTEXT|STORE)__?$/i.test(k) || /^(initial|preloaded|ssr)(State|Data|Props)$/i.test(k)) {
+      try { if (window[k] && typeof window[k] === 'object') names.add(k); } catch (_) {}
+    }
+  }
+  const describe = v => {
+    let size = 0; try { size = JSON.stringify(v).length; } catch (_) { size = -1; }
+    const keys = v && typeof v === 'object' ? Object.keys(v).slice(0, 10) : [];
+    return { size, keys };
+  };
+  out.state = [];
+  for (const k of names) { try { out.state.push({ name: 'window.' + k, ...describe(window[k]) }); } catch (_) {} }
+  for (const el of document.querySelectorAll('script[type="application/json"], script[type="application/ld+json"]')) {
+    if (out.state.length > 25) break;
+    let v; try { v = JSON.parse(el.textContent); } catch (_) { continue; }
+    const sel = el.id ? 'script#' + el.id : 'script[type="' + el.type + '"]';
+    out.state.push({ name: sel, ...describe(v) });
+  }
+  // Extension-injected globals (Vue/React devtools) and telemetry config are
+  // not the page's data.
+  const junk = /devtools|rum|analytics|tracking|gtm|sentry/i;
+  const seenState = new Set();
+  out.state = out.state.filter(s => {
+    if (junk.test(s.name) || seenState.has(s.name)) return false;
+    seenState.add(s.name);
+    return s.size === -1 || s.size > 200;
+  });
+
+  out.webpack = Object.getOwnPropertyNames(window).filter(k => /^webpackChunk|^webpackJsonp/.test(k)).slice(0, 3);
+  out.signals = {
+    cookies: document.cookie.split(';').map(c => c.trim().split('=')[0]).filter(Boolean),
+    scripts: Array.from(document.scripts, s => s.src || '').filter(Boolean),
+    globals: Object.getOwnPropertyNames(window).filter(k => /_px|bmak|_abck|datadome|reese84|kpsdk|incap_ses|visid_incap|akam/i.test(k)),
+  };
+  out.loggedInHint = document.cookie.length > 0;
+  return out;
+})()"#;
+
+/// Turn the page scan into the `site analyze` report: drop the raw signals,
+/// attach anti-bot vendors and installed adapters, and recommend a data source
+/// in the order that breaks least often — a site's JSON API called from the
+/// page, then state the page already embeds, then the DOM.
+pub fn analyze_report(raw: &Value, vendors: &[&str], adapters: &[String]) -> Value {
+    let mut report = raw.clone();
+    if let Some(o) = report.as_object_mut() {
+        o.remove("signals");
+        o.remove("loggedInHint");
+    }
+    let api = raw
+        .get("api")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let state = raw
+        .get("state")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let webpack = raw
+        .get("webpack")
+        .and_then(|v| v.as_array())
+        .is_some_and(|a| !a.is_empty());
+    let host = raw.get("host").and_then(|v| v.as_str()).unwrap_or("");
+
+    let mut steps: Vec<String> = Vec::new();
+    let strategy;
+    if !adapters.is_empty() {
+        steps.push(format!(
+            "Adapters already exist for {host}: {}. Run `chrome-use site info <name>/<cmd>` before writing a new one.",
+            adapters.join(", ")
+        ));
+    }
+    if let Some(top) = api
+        .iter()
+        .find(|a| a.get("sameSite").and_then(|v| v.as_bool()) == Some(true))
+    {
+        strategy = "page-fetch";
+        let url = top.get("url").and_then(|v| v.as_str()).unwrap_or("");
+        steps.push(format!(
+            "Call the site's own API from the page: `fetch(url, {{credentials: 'include'}})`, starting from {url}. Check its JSON with `chrome-use eval` first, then map it to the fields the user needs."
+        ));
+    } else if let Some(s) = state.first() {
+        strategy = "page-state";
+        let name = s.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        steps.push(format!(
+            "No API call seen yet, but the page embeds its data in {name}. Read it in the adapter (no extra request). If the data you need comes from a later action, do that action and analyze again."
+        ));
+    } else {
+        strategy = "dom";
+        steps.push(
+            "No API call or embedded state found. Do the action that loads the data (search, scroll, open a list) and run `site analyze` again; fall back to reading the DOM only if nothing shows up — it breaks the most often.".to_string(),
+        );
+    }
+    if webpack {
+        steps.push("The page is a webpack bundle: its own modules (e.g. signed request helpers) can be reached via the webpackChunk global if the API needs a signature.".to_string());
+    }
+    if !vendors.is_empty() {
+        steps.push(format!(
+            "Anti-bot protection detected ({}). Keep requests inside the page (same-origin fetch with the page's cookies), keep the call rate low, and never replay them from outside the browser.",
+            vendors.join(", ")
+        ));
+    }
+    steps.push("Write the adapter to ~/.chrome-use/my-sites/<name>/<cmd>.js, register it once with `chrome-use site add ~/.chrome-use/my-sites`, run `site update`, then `chrome-use site verify <name>/<cmd> --write-fixture` to record what a good result looks like. Guide: `chrome-use skills get core/site-adapters`.".to_string());
+
+    if let Some(o) = report.as_object_mut() {
+        o.insert("antiBot".into(), json!(vendors));
+        o.insert("adapters".into(), json!(adapters));
+        o.insert("strategy".into(), json!(strategy));
+        o.insert("next".into(), json!(steps));
+    }
+    report
+}
+
+/// `~/.chrome-use/site-fixtures/<name>/<cmd>.json` — the recorded shape of a
+/// good result, for `site verify`.
+pub fn fixture_path(spec: &str) -> Option<PathBuf> {
+    let (name, cmd) = spec.split_once('/')?;
+    dirs_home().map(|h| {
+        h.join(".chrome-use")
+            .join("site-fixtures")
+            .join(name)
+            .join(format!("{cmd}.json"))
+    })
+}
+
+/// A structural summary of an adapter result: types per field, depth-limited,
+/// with array items merged over the first few elements. Values are dropped, so
+/// a fixture holds no user data.
+pub fn result_shape(v: &Value) -> Value {
+    shape_at(v, 0)
+}
+
+fn shape_at(v: &Value, depth: usize) -> Value {
+    match v {
+        Value::Null => json!("null"),
+        Value::Bool(_) => json!("boolean"),
+        Value::Number(_) => json!("number"),
+        Value::String(_) => json!("string"),
+        Value::Array(a) => {
+            let mut items = Value::Null;
+            if depth < 4 {
+                for el in a.iter().take(5) {
+                    items = merge_shape(items, shape_at(el, depth + 1));
+                }
+            }
+            json!({ "array": items, "nonEmpty": !a.is_empty() })
+        }
+        Value::Object(o) => {
+            if depth >= 4 {
+                return json!("object");
+            }
+            let fields: serde_json::Map<String, Value> = o
+                .iter()
+                .map(|(k, v)| (k.clone(), shape_at(v, depth + 1)))
+                .collect();
+            json!({ "object": fields })
+        }
+    }
+}
+
+/// Merge two shapes of sibling array items: keep fields present in any item,
+/// and let a concrete type win over "null".
+fn merge_shape(a: Value, b: Value) -> Value {
+    match (a, b) {
+        (Value::Null, b) => b,
+        (a, Value::String(t)) if t == "null" => a,
+        (Value::String(t), b) if t == "null" => b,
+        (Value::Object(mut x), Value::Object(y)) => {
+            if let (Some(Value::Object(fx)), Some(Value::Object(fy))) =
+                (x.get("object").cloned(), y.get("object"))
+            {
+                let mut merged = fx;
+                for (k, v) in fy {
+                    let cur = merged.remove(k).unwrap_or(Value::Null);
+                    merged.insert(k.clone(), merge_shape(cur, v.clone()));
+                }
+                x.insert("object".into(), Value::Object(merged));
+            }
+            Value::Object(x)
+        }
+        (a, _) => a,
+    }
+}
+
+/// Differences that mean the adapter broke: a field the fixture had is gone,
+/// a field changed type, or a list that had rows came back empty. New fields
+/// and null values are fine.
+pub fn shape_diff(expected: &Value, actual: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    diff_at(expected, actual, "result", &mut out);
+    out
+}
+
+fn kind(v: &Value) -> &str {
+    match v {
+        Value::String(t) => t.as_str(),
+        Value::Object(o) if o.contains_key("array") => "array",
+        Value::Object(o) if o.contains_key("object") => "object",
+        _ => "unknown",
+    }
+}
+
+fn diff_at(exp: &Value, act: &Value, path: &str, out: &mut Vec<String>) {
+    let (ke, ka) = (kind(exp), kind(act));
+    if ke == "null" || ka == "null" || ke == "unknown" {
+        return;
+    }
+    if ke != ka {
+        out.push(format!("{path}: was {ke}, now {ka}"));
+        return;
+    }
+    match ke {
+        "array" => {
+            let had = exp
+                .get("nonEmpty")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let has = act
+                .get("nonEmpty")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if had && !has {
+                out.push(format!("{path}: was a non-empty list, now empty"));
+                return;
+            }
+            if let (Some(e), Some(a)) = (exp.get("array"), act.get("array")) {
+                if !a.is_null() {
+                    diff_at(e, a, &format!("{path}[]"), out);
+                }
+            }
+        }
+        "object" => {
+            let (Some(fe), Some(fa)) = (
+                exp.get("object").and_then(|v| v.as_object()),
+                act.get("object").and_then(|v| v.as_object()),
+            ) else {
+                return;
+            };
+            for (k, ve) in fe {
+                match fa.get(k) {
+                    Some(va) => diff_at(ve, va, &format!("{path}.{k}"), out),
+                    None => out.push(format!("{path}.{k}: missing")),
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `site verify`: check a run's result against the stored fixture, or record
+/// one. Returns (ok, report).
+pub fn verify_result(spec: &str, result: &Value, write_fixture: bool) -> (bool, Value) {
+    let shape = result_shape(result);
+    let path = fixture_path(spec);
+    let empty = match result {
+        Value::Null => true,
+        Value::Array(a) => a.is_empty(),
+        Value::Object(o) => o.is_empty(),
+        Value::String(s) => s.is_empty(),
+        _ => false,
+    };
+    if write_fixture {
+        if empty {
+            return (
+                false,
+                json!({ "spec": spec, "ok": false, "issues": ["result is empty; not recording it as a fixture"] }),
+            );
+        }
+        let fixture = json!({ "spec": spec, "recordedAt": now_secs(), "shape": shape });
+        let written = path.as_ref().is_some_and(|p| {
+            p.parent()
+                .is_some_and(|d| std::fs::create_dir_all(d).is_ok())
+                && std::fs::write(
+                    p,
+                    serde_json::to_string_pretty(&fixture).unwrap_or_default(),
+                )
+                .is_ok()
+        });
+        return (
+            written,
+            json!({
+                "spec": spec,
+                "ok": written,
+                "fixture": path.map(|p| p.display().to_string()),
+                "recorded": written,
+            }),
+        );
+    }
+    let stored = path
+        .as_ref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok());
+    let Some(stored) = stored else {
+        let mut issues = Vec::new();
+        if empty {
+            issues.push("result is empty".to_string());
+        }
+        return (
+            !empty,
+            json!({
+                "spec": spec,
+                "ok": !empty,
+                "fixture": null,
+                "issues": issues,
+                "next": format!("no fixture yet: run `chrome-use site verify {spec} … --write-fixture` once the result looks right"),
+            }),
+        );
+    };
+    let issues = shape_diff(stored.get("shape").unwrap_or(&Value::Null), &shape);
+    let ok = issues.is_empty();
+    (
+        ok,
+        json!({
+            "spec": spec,
+            "ok": ok,
+            "fixture": path.map(|p| p.display().to_string()),
+            "issues": issues,
+        }),
+    )
+}
+
 /// Map CLI args to the adapter's `args` object. Positional args fill the adapter's
 /// declared `args` keys in order; `--key value` overrides by name. The adapter
 /// validates required args itself.
@@ -1392,6 +1800,51 @@ mod tests {
         assert!(source_rank(Some(&official)) < source_rank(Some(&community)));
         assert!(source_rank(Some(&extra)) < source_rank(Some(&community)));
         assert_eq!(source_rank(None), source_rank(Some(&community)));
+    }
+
+    #[test]
+    fn analyze_prefers_same_site_api_then_state_then_dom() {
+        let api = json!({"host":"x.com","api":[{"url":"https://x.com/i/api/graphql/Q","sameSite":true}],"state":[],"webpack":[],"signals":{}});
+        let r = analyze_report(&api, &[], &[]);
+        assert_eq!(r["strategy"], "page-fetch");
+        assert!(r.get("signals").is_none());
+        let state =
+            json!({"host":"a.com","api":[],"state":[{"name":"window.__NEXT_DATA__","size":900}]});
+        assert_eq!(analyze_report(&state, &[], &[])["strategy"], "page-state");
+        let dom = json!({"host":"a.com","api":[{"url":"https://cdn.other.net/x","sameSite":false}],"state":[]});
+        let r = analyze_report(&dom, &["akamai"], &["a/b".to_string()]);
+        assert_eq!(r["strategy"], "dom");
+        assert_eq!(r["antiBot"][0], "akamai");
+        let next = r["next"].to_string();
+        assert!(next.contains("a/b") && next.contains("Anti-bot"));
+    }
+
+    #[test]
+    fn verify_flags_missing_fields_type_changes_and_emptied_lists() {
+        let good = json!({"items":[{"id":1,"title":"a","tag":null},{"id":2,"title":"b","tag":"x"}],"total":2});
+        let exp = result_shape(&good);
+        assert!(shape_diff(&exp, &result_shape(&good)).is_empty());
+        // extra field and null value are fine
+        let extra = json!({"items":[{"id":3,"title":null,"tag":"y","new":true}],"total":1});
+        assert!(shape_diff(&exp, &result_shape(&extra)).is_empty());
+        let broken = json!({"items":[{"id":"3"}],"total":1});
+        let d = shape_diff(&exp, &result_shape(&broken));
+        assert!(
+            d.iter()
+                .any(|x| x.contains("result.items[].id: was number, now string")),
+            "{d:?}"
+        );
+        assert!(
+            d.iter()
+                .any(|x| x.contains("result.items[].title: missing")),
+            "{d:?}"
+        );
+        let emptied = json!({"items":[],"total":0});
+        let d = shape_diff(&exp, &result_shape(&emptied));
+        assert!(
+            d.iter().any(|x| x.contains("non-empty list, now empty")),
+            "{d:?}"
+        );
     }
 
     #[test]
