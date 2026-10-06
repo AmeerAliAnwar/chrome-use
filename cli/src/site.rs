@@ -18,6 +18,8 @@ use serde_json::{json, Value};
 
 pub const COMMUNITY_SITES_SOURCE: &str = "epiral/bb-sites";
 pub const OFFICIAL_SITES_SOURCE: &str = "leeguooooo/chrome-use-sites";
+/// Sync order is precedence: later sources overwrite a shared `name/cmd`, so the
+/// official pack stays last to win over the community one.
 const DEFAULT_SITES_SOURCES: [&str; 2] = [COMMUNITY_SITES_SOURCE, OFFICIAL_SITES_SOURCE];
 
 /// Built-in adapter sources, synced on every update without user configuration.
@@ -862,18 +864,31 @@ pub async fn update() -> Result<usize, String> {
 
     // 1) Built-in packs — both are first-class defaults. A hard failure preserves
     // the original contract: an incomplete first sync must not look successful.
+    // Which source each adapter came from. Sources overlay in order, so a later
+    // one wins a shared `name/cmd` both on disk and here — the official pack is
+    // synced after the community one so ours takes precedence (see
+    // DEFAULT_SITES_SOURCES), and a configured extra source overrides both.
+    let mut provenance: std::collections::BTreeMap<String, String> = Default::default();
     for source in default_sources() {
-        sync_source(&client, source, None, &dir)
+        let written = sync_source(&client, source, None, &dir)
             .await
             .map_err(|e| format!("site update: default source `{source}` failed: {e}"))?;
+        for spec in written {
+            provenance.insert(spec, source.to_string());
+        }
     }
 
     // 2) Extra sources (private/org packs). Best-effort, overlaid on top. Built-in
     // names are filtered by read_sources() for compatibility with old config files.
     let token = sources_token();
     for source in read_sources() {
-        if let Err(e) = sync_source(&client, &source, token.as_deref(), &dir).await {
-            eprintln!("site update: source `{source}` skipped: {e}");
+        match sync_source(&client, &source, token.as_deref(), &dir).await {
+            Ok(written) => {
+                for spec in written {
+                    provenance.insert(spec, source.clone());
+                }
+            }
+            Err(e) => eprintln!("site update: source `{source}` skipped: {e}"),
         }
     }
 
@@ -881,6 +896,9 @@ pub async fn update() -> Result<usize, String> {
     let count = list_adapters().map(|l| l.len()).unwrap_or(0);
     // Build the domain→adapters index and stamp the sync time so navigation can
     // suggest adapters (auto-trigger) and `needs_refresh` can pace re-syncs.
+    if let Ok(json) = serde_json::to_string(&provenance) {
+        let _ = std::fs::write(dir.join(".provenance.json"), json);
+    }
     write_domain_index(&dir);
     if let Some(p) = last_update_path() {
         let _ = std::fs::write(p, now_secs().to_string());
@@ -911,7 +929,7 @@ async fn sync_source(
     source: &str,
     token: Option<&str>,
     dir: &std::path::Path,
-) -> Result<usize, String> {
+) -> Result<Vec<String>, String> {
     // Local directory: copy the adapter tree verbatim (no strip).
     let as_path = PathBuf::from(source);
     if as_path.is_dir() {
@@ -965,7 +983,7 @@ async fn fetch_zip_into(
     token: Option<&str>,
     dir: &std::path::Path,
     strip_top: bool,
-) -> Result<usize, String> {
+) -> Result<Vec<String>, String> {
     let mut req = client.get(url);
     if let Some(tok) = token {
         req = req.header("Authorization", format!("Bearer {tok}"));
@@ -982,7 +1000,7 @@ async fn fetch_zip_into(
 
     let cursor = std::io::Cursor::new(bytes);
     let mut zip = zip::ZipArchive::new(cursor).map_err(|e| format!("bad zip: {e}"))?;
-    let mut count = 0usize;
+    let mut written = Vec::new();
     for i in 0..zip.len() {
         let mut f = zip.by_index(i).map_err(|e| e.to_string())?;
         let Some(enclosed) = f.enclosed_name() else {
@@ -1011,16 +1029,27 @@ async fn fetch_zip_into(
         let mut buf = Vec::new();
         std::io::copy(&mut f, &mut buf).map_err(|e| e.to_string())?;
         std::fs::write(&out, &buf).map_err(|e| e.to_string())?;
-        if out.extension().and_then(|e| e.to_str()) == Some("js") {
-            count += 1;
+        if let Some(spec) = spec_of(&rel) {
+            written.push(spec);
         }
     }
-    Ok(count)
+    Ok(written)
+}
+
+/// `<name>/<cmd>.js` (relative to the sites dir) → `name/cmd`, for runnable
+/// adapters only; helpers, tests and deeper paths → None.
+fn spec_of(rel: &std::path::Path) -> Option<String> {
+    let parts: Vec<&str> = rel.iter().filter_map(|c| c.to_str()).collect();
+    let [name, file] = parts.as_slice() else {
+        return None;
+    };
+    let stem = file.strip_suffix(".js")?;
+    is_runnable_adapter_stem(stem).then(|| format!("{name}/{stem}"))
 }
 
 /// Copy a local adapter tree (a directory of `<name>/<cmd>.js` packs) into `dir`.
-fn copy_local_tree(src: &std::path::Path, dir: &std::path::Path) -> Result<usize, String> {
-    let mut count = 0usize;
+fn copy_local_tree(src: &std::path::Path, dir: &std::path::Path) -> Result<Vec<String>, String> {
+    let mut written = Vec::new();
     for entry in walkdir_js(src) {
         let rel = entry.strip_prefix(src).map_err(|e| e.to_string())?;
         let out = dir.join(rel);
@@ -1028,11 +1057,11 @@ fn copy_local_tree(src: &std::path::Path, dir: &std::path::Path) -> Result<usize
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
         std::fs::copy(&entry, &out).map_err(|e| e.to_string())?;
-        if out.extension().and_then(|e| e.to_str()) == Some("js") {
-            count += 1;
+        if let Some(spec) = spec_of(rel) {
+            written.push(spec);
         }
     }
-    Ok(count)
+    Ok(written)
 }
 
 /// Recursively collect `.js` files under `root` (shallow, dependency-free walk).
@@ -1078,6 +1107,7 @@ fn now_secs() -> u64 {
 /// domain, read-only adapters are listed first (then alphabetical) so the
 /// auto-suggested example leads with a safe read, not a write action.
 fn write_domain_index(dir: &std::path::Path) {
+    let provenance = read_provenance(dir);
     let mut by_domain: std::collections::BTreeMap<String, Vec<(bool, String)>> = Default::default();
     for spec in list_adapters().unwrap_or_default() {
         if let Ok(a) = load_adapter(&spec) {
@@ -1097,13 +1127,38 @@ fn write_domain_index(dir: &std::path::Path) {
     let ordered: std::collections::BTreeMap<String, Vec<String>> = by_domain
         .into_iter()
         .map(|(domain, mut v)| {
-            // read-only (true) first, then by spec name
-            v.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+            // ours (official / configured) before community, then read-only
+            // (true) first, then by spec name
+            v.sort_by(|a, b| {
+                let ra = source_rank(provenance.get(&a.1));
+                let rb = source_rank(provenance.get(&b.1));
+                ra.cmp(&rb)
+                    .then_with(|| b.0.cmp(&a.0))
+                    .then_with(|| a.1.cmp(&b.1))
+            });
             (domain, v.into_iter().map(|(_, s)| s).collect())
         })
         .collect();
     if let Ok(json) = serde_json::to_string(&ordered) {
         let _ = std::fs::write(dir.join(".index.json"), json);
+    }
+}
+
+/// `.provenance.json` — `name/cmd` → the source it was synced from. Empty for
+/// packs synced before it existed (every adapter then ranks as community).
+fn read_provenance(dir: &std::path::Path) -> std::collections::BTreeMap<String, String> {
+    std::fs::read_to_string(dir.join(".provenance.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+/// Sort rank for a source: our own adapters (the official pack or a configured
+/// extra source) ahead of the community pack.
+fn source_rank(source: Option<&String>) -> u8 {
+    match source.map(String::as_str) {
+        Some(COMMUNITY_SITES_SOURCE) | None => 1,
+        Some(_) => 0,
     }
 }
 
@@ -1167,6 +1222,128 @@ pub fn adapters_for_domain(host: &str) -> Vec<String> {
     out
 }
 
+/// `~/.chrome-use/site-usage.json` — per host: the days it was driven (last
+/// 30 distinct) and when we last suggested writing an adapter for it. Hosts
+/// only, never paths; local to this machine.
+fn usage_path() -> Option<PathBuf> {
+    dirs_home().map(|h| h.join(".chrome-use").join("site-usage.json"))
+}
+
+/// Actions in one session on an adapter-less host before suggesting one.
+const SUGGEST_SESSION_ACTIONS: u32 = 30;
+/// ...or this many distinct days on it, with at least a few actions today.
+const SUGGEST_DAYS: usize = 3;
+const SUGGEST_DAYS_MIN_ACTIONS: u32 = 5;
+/// Don't ask again about the same host within this window.
+const SUGGEST_COOLDOWN_SECS: u64 = 14 * 86_400;
+
+fn is_local_host(host: &str) -> bool {
+    host.is_empty()
+        || host == "localhost"
+        || host.ends_with(".localhost")
+        || host.ends_with(".local")
+        || host.parse::<std::net::IpAddr>().is_ok()
+        || host
+            .trim_matches(['[', ']'])
+            .parse::<std::net::IpAddr>()
+            .is_ok()
+}
+
+/// Pure decision: should a host with this usage get an adapter suggestion now?
+pub fn should_suggest_adapter(
+    host: &str,
+    session_actions: u32,
+    days_used: usize,
+    last_suggested: Option<u64>,
+    now: u64,
+) -> bool {
+    if is_local_host(host) {
+        return false;
+    }
+    if last_suggested.is_some_and(|t| now.saturating_sub(t) < SUGGEST_COOLDOWN_SECS) {
+        return false;
+    }
+    session_actions >= SUGGEST_SESSION_ACTIONS
+        || (days_used >= SUGGEST_DAYS && session_actions >= SUGGEST_DAYS_MIN_ACTIONS)
+}
+
+fn read_usage() -> serde_json::Map<String, Value> {
+    usage_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default()
+}
+
+fn write_usage(map: &serde_json::Map<String, Value>) {
+    if let Some(p) = usage_path() {
+        if let Some(parent) = p.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(p, Value::Object(map.clone()).to_string());
+    }
+}
+
+/// Note that `host` was driven today. Call once per host per session; returns
+/// the number of distinct days it has been used (today included).
+pub fn record_usage_day(host: &str) -> usize {
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let mut map = read_usage();
+    let entry = map.entry(host.to_string()).or_insert_with(|| json!({}));
+    let mut days: Vec<String> = entry
+        .get("days")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|d| d.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    if !days.contains(&today) {
+        days.push(today);
+        let excess = days.len().saturating_sub(30);
+        days.drain(..excess);
+        entry["days"] = json!(days);
+        write_usage(&map);
+    }
+    days.len()
+}
+
+/// When this host was last suggested for an adapter, if ever.
+pub fn last_suggested(host: &str) -> Option<u64> {
+    read_usage()
+        .get(host)
+        .and_then(|e| e.get("suggested"))
+        .and_then(|v| v.as_u64())
+}
+
+pub fn mark_suggested(host: &str) {
+    let mut map = read_usage();
+    let entry = map.entry(host.to_string()).or_insert_with(|| json!({}));
+    entry["suggested"] = json!(now_secs());
+    write_usage(&map);
+}
+
+/// The `siteAdapterSuggestion` payload: frequent use of a site with no adapter.
+/// Phrased as a question for the user — writing one is their call.
+pub fn adapter_suggestion(host: &str, session_actions: u32, days_used: usize) -> Value {
+    json!({
+        "domain": host,
+        "actionsThisSession": session_actions,
+        "daysUsed": days_used,
+        "message": format!(
+            "{host} is driven often and has no site adapter. Ask the user whether to \
+             turn the repeated steps into one (a single `chrome-use site <name>/<cmd>` call); \
+             only write it if they agree. Guide: `chrome-use skills get core/site-adapters`."
+        ),
+    })
+}
+
+/// `now_secs` for callers outside this module.
+pub fn unix_now() -> u64 {
+    now_secs()
+}
+
 /// Map CLI args to the adapter's `args` object. Positional args fill the adapter's
 /// declared `args` keys in order; `--key value` overrides by name. The adapter
 /// validates required args itself.
@@ -1195,6 +1372,64 @@ pub fn map_args(adapter: &Adapter, positional: &[String], named: &[(String, Stri
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn spec_of_keeps_runnable_adapters_only() {
+        use std::path::Path;
+        assert_eq!(
+            spec_of(Path::new("twitter/search.js")).as_deref(),
+            Some("twitter/search")
+        );
+        assert_eq!(spec_of(Path::new("twitter/_helper.js")), None);
+        assert_eq!(spec_of(Path::new("README.md")), None);
+        assert_eq!(spec_of(Path::new("a/b/c.js")), None);
+    }
+
+    #[test]
+    fn official_and_configured_sources_rank_before_community() {
+        let official = OFFICIAL_SITES_SOURCE.to_string();
+        let community = COMMUNITY_SITES_SOURCE.to_string();
+        let extra = "acme/internal-sites".to_string();
+        assert!(source_rank(Some(&official)) < source_rank(Some(&community)));
+        assert!(source_rank(Some(&extra)) < source_rank(Some(&community)));
+        assert_eq!(source_rank(None), source_rank(Some(&community)));
+    }
+
+    #[test]
+    fn adapter_suggestion_thresholds() {
+        let now = 10_000_000;
+        assert!(!should_suggest_adapter("example.com", 29, 1, None, now));
+        assert!(should_suggest_adapter("example.com", 30, 1, None, now));
+        assert!(should_suggest_adapter("example.com", 5, 3, None, now));
+        assert!(!should_suggest_adapter("example.com", 4, 3, None, now));
+        // cooldown
+        assert!(!should_suggest_adapter(
+            "example.com",
+            99,
+            9,
+            Some(now - 86_400),
+            now
+        ));
+        assert!(should_suggest_adapter(
+            "example.com",
+            99,
+            9,
+            Some(now - 15 * 86_400),
+            now
+        ));
+        // local hosts never
+        for h in [
+            "",
+            "localhost",
+            "app.localhost",
+            "nas.local",
+            "127.0.0.1",
+            "[::1]",
+            "192.168.0.5",
+        ] {
+            assert!(!should_suggest_adapter(h, 99, 9, None, now), "{h}");
+        }
+    }
+
     use super::*;
 
     const SAMPLE: &str = r#"/* @meta

@@ -593,6 +593,15 @@ pub struct DaemonState {
     /// Session-scoped setup applied to the active page, replayed onto tabs the
     /// daemon creates or adopts. See [`SessionSetup`].
     pub session_setup: SessionSetup,
+    /// Host whose `site` adapters were last surfaced (or checked and found
+    /// none — stored as the host anyway, `""` for hostless pages). `None` until
+    /// the session first touches a page, so attaching to an already-open tab
+    /// also gets the hint. See `annotate_site_change`.
+    pub site_hint_host: Option<String>,
+    /// Successful actions per host this session, and hosts already offered an
+    /// adapter suggestion — see `suggest_site_adapter`.
+    pub site_usage: HashMap<String, u32>,
+    pub site_suggested: HashSet<String>,
 }
 
 impl DaemonState {
@@ -657,6 +666,9 @@ impl DaemonState {
                 .unwrap_or(25_000),
             viewport: None,
             session_setup: SessionSetup::default(),
+            site_hint_host: None,
+            site_usage: HashMap::new(),
+            site_suggested: Default::default(),
         }
     }
 
@@ -2588,6 +2600,11 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         }
     }
 
+    if ok {
+        annotate_site_change(action, cmd, &mut resp, state).await;
+        suggest_site_adapter(&mut resp, state);
+    }
+
     // Auto-report pending JavaScript dialog so agents know why commands may hang
     if action != "dialog" {
         if let Some(ref dialog) = state.pending_dialog {
@@ -4248,6 +4265,150 @@ fn with_site_hint(mut result: Value, fallback_url: &str) -> Value {
         }
     }
     result
+}
+
+/// Actions after which the active page may sit on a different site than the
+/// last one we told the agent about: tab moves, history moves, clicks that
+/// navigate, and the read verbs an agent starts with on a tab it didn't open.
+const SITE_CHANGE_ACTIONS: &[&str] = &[
+    "navigate",
+    "tab_new",
+    "tab_switch",
+    "tab_close",
+    "tab_adopt",
+    "tab_duplicate",
+    "back",
+    "forward",
+    "reload",
+    "click",
+    "dblclick",
+    "press",
+    "read",
+    "do",
+    "actions",
+];
+
+/// Auto-trigger, generalised: `open` and `snapshot` always carry
+/// `siteAdapters`, but an agent also reaches a site by switching tabs, going
+/// back, clicking a link, or attaching to a tab the user already had open. After
+/// those, if the active page's host differs from the one last surfaced, attach
+/// the same `siteAdapters` hint. Same host → nothing, so a session that stays on
+/// one site hears about its adapters once rather than on every click.
+async fn annotate_site_change(
+    action: &str,
+    cmd: &Value,
+    resp: &mut Value,
+    state: &mut DaemonState,
+) {
+    let data_hint = resp
+        .get("data")
+        .and_then(|d| d.get("siteAdapters"))
+        .and_then(|h| h.get("domain"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    if let Some(host) = data_hint {
+        // `open` / `snapshot` already said it; remember so we don't repeat.
+        state.site_hint_host = Some(host);
+        return;
+    }
+    let first_touch = state.site_hint_host.is_none();
+    if !first_touch && !SITE_CHANGE_ACTIONS.contains(&action) {
+        return;
+    }
+    // A blocking dialog freezes page JS; don't add a stall to report a hint.
+    if state.pending_dialog.is_some() {
+        return;
+    }
+    let Some(mgr) = state.browser.as_ref() else {
+        return;
+    };
+    let mut url = match tokio::time::timeout(Duration::from_millis(1500), mgr.get_url()).await {
+        Ok(Ok(u)) if !u.is_empty() => u,
+        _ => mgr.cached_active_url(),
+    };
+    // `tab new <url>` returns before the new tab has left about:blank; judge
+    // it by where it is going.
+    if url.is_empty() || url == "about:blank" {
+        if let Some(requested) = cmd.get("url").and_then(|v| v.as_str()) {
+            url = requested.to_string();
+        }
+    }
+    let host = url::Url::parse(&url)
+        .ok()
+        .and_then(|u| u.host_str().map(String::from))
+        .unwrap_or_default();
+    if state.site_hint_host.as_deref() == Some(host.as_str()) {
+        return;
+    }
+    state.site_hint_host = Some(host);
+    let hint = with_site_hint(json!({ "url": url }), &url);
+    let Some(adapters) = hint.get("siteAdapters") else {
+        return;
+    };
+    insert_data_field(resp, "siteAdapters", adapters.clone());
+}
+
+/// The other half of the auto-trigger: a site the agent keeps driving that has
+/// NO adapter. Count successful actions per host; once it is clearly a regular
+/// (many actions this session, or several days of use), attach
+/// `siteAdapterSuggestion` so the agent asks the user whether to capture the
+/// repeated steps as an adapter. Once per host per session, and not again for
+/// two weeks after it was offered. `AGENT_BROWSER_SITES_NO_SUGGEST=1` disables.
+fn suggest_site_adapter(resp: &mut Value, state: &mut DaemonState) {
+    let Some(host) = state.site_hint_host.clone() else {
+        return;
+    };
+    if host.is_empty() || state.site_suggested.contains(&host) {
+        return;
+    }
+    let count = state.site_usage.entry(host.clone()).or_insert(0);
+    *count += 1;
+    let count = *count;
+    if count == 1 {
+        // First action on this host this session: stamp today's use. Skip the
+        // adapter-index lookup until there's a reason to decide.
+        let _ = crate::site::record_usage_day(&host);
+        return;
+    }
+    if std::env::var_os("AGENT_BROWSER_SITES_NO_SUGGEST").is_some() {
+        return;
+    }
+    if count < 5 {
+        return;
+    }
+    let days = crate::site::record_usage_day(&host);
+    let now = crate::site::unix_now();
+    if !crate::site::should_suggest_adapter(
+        &host,
+        count,
+        days,
+        crate::site::last_suggested(&host),
+        now,
+    ) {
+        return;
+    }
+    // Sites that already have adapters get `siteAdapters` instead.
+    state.site_suggested.insert(host.clone());
+    if !crate::site::adapters_for_domain(&host).is_empty() {
+        return;
+    }
+    crate::site::mark_suggested(&host);
+    insert_data_field(
+        resp,
+        "siteAdapterSuggestion",
+        crate::site::adapter_suggestion(&host, count, days),
+    );
+}
+
+fn insert_data_field(resp: &mut Value, key: &str, value: Value) {
+    if let Some(obj) = resp.as_object_mut() {
+        let data = obj
+            .entry("data")
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if let Some(d) = data.as_object_mut() {
+            d.insert(key.into(), value);
+        }
+    }
 }
 
 /// After navigation, probe the page for known anti-bot vendor fingerprints
