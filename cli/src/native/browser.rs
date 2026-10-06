@@ -1629,6 +1629,16 @@ impl BrowserManager {
         }
 
         // No match — list what the extension could see (its chrome.tabs view).
+        let profile_info = match (
+            resp.get("profileEmail").and_then(|v| v.as_str()),
+            resp.get("profileId").and_then(|v| v.as_str()),
+        ) {
+            (Some(email), Some(id)) => format!(" (profile: {email} / {id})"),
+            (Some(email), None) => format!(" (profile: {email})"),
+            (None, Some(id)) => format!(" (profile: {id})"),
+            (None, None) => String::new(),
+        };
+
         let mut open: Vec<String> = resp
             .get("candidates")
             .and_then(|v| v.as_array())
@@ -1641,11 +1651,16 @@ impl BrowserManager {
             .unwrap_or_default();
         open.sort();
         open.dedup();
+        let candidate_list = if open.is_empty() {
+            String::new()
+        } else {
+            format!("\n  {}", open.join("\n  "))
+        };
         Err(format!(
             "adopt: no open tab matching `{spec}` (by targetId or URL substring).\n\
-             {} tab(s) the extension can see:\n  {}",
+             {} tab(s) the extension can see{}:{candidate_list}",
             open.len(),
-            open.join("\n  ")
+            profile_info
         ))
     }
 

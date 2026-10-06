@@ -264,6 +264,7 @@ pub async fn run_daemon(session: &str) {
     let _ = fs::remove_file(socket_dir.join(format!("{}.engine", session)));
     let _ = fs::remove_file(socket_dir.join(format!("{}.provider", session)));
     let _ = fs::remove_file(socket_dir.join(format!("{}.extensions", session)));
+    let _ = fs::remove_file(socket_dir.join(format!("{}.profile", session)));
 
     if let Err(e) = result {
         let _ = writeln!(std::io::stderr(), "Daemon error: {}", e);

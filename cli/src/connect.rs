@@ -2940,6 +2940,21 @@ pub fn relay_url_for_browser(selector: &str) -> Result<String, String> {
     relay_profile_for_browser(selector).map(|(_, _, ws)| ws)
 }
 
+/// Resolve a relay endpoint for an optional browser selector (or `AGENT_BROWSER_PROFILE`),
+/// falling back to the generic `relay_url()` when no selector is given.
+pub fn relay_url_for_selector_or_default(selector: Option<&str>) -> Result<Option<String>, String> {
+    if let Some(sel) = selector.filter(|s| !s.trim().is_empty()) {
+        return relay_url_for_browser(sel).map(Some);
+    }
+    if let Ok(prof) = std::env::var("AGENT_BROWSER_PROFILE") {
+        let prof = prof.trim();
+        if !prof.is_empty() {
+            return relay_url_for_browser(prof).map(Some);
+        }
+    }
+    Ok(relay_url())
+}
+
 /// The same resolution, but keeping the profile's identity as well as its
 /// endpoint.
 ///

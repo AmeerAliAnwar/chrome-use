@@ -1948,7 +1948,15 @@ fn main() {
             // quitting/restarting Chrome — verified locally that a running Chrome
             // picks the host back up on its own, no restart needed. So if the host
             // is registered, register-to-be-safe and poll for the relay to come up.
-            if connect::relay_url().is_none() && crate::connect::host_installed() {
+            let target_browser = flags.browser.as_deref().or(flags.profile.as_deref());
+            let current_relay = match connect::relay_url_for_selector_or_default(target_browser) {
+                Ok(url) => url,
+                Err(e) => {
+                    eprintln!("{} {e}", color::error_indicator());
+                    exit(1);
+                }
+            };
+            if current_relay.is_none() && crate::connect::host_installed() {
                 crate::connect::ensure_host_installed();
                 eprint!(
                     "{} extension relay reconnecting (the worker wakes ~every 30s)…",
@@ -1956,13 +1964,15 @@ fn main() {
                 );
                 let _ = std::io::Write::flush(&mut std::io::stderr());
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
-                while connect::relay_url().is_none() && std::time::Instant::now() < deadline {
+                while connect::relay_url_for_selector_or_default(target_browser).ok().flatten().is_none()
+                    && std::time::Instant::now() < deadline
+                {
                     std::thread::sleep(std::time::Duration::from_millis(750));
                 }
                 eprintln!();
             }
-            match connect::relay_url() {
-                Some(url) => {
+            match connect::relay_url_for_selector_or_default(target_browser) {
+                Ok(Some(url)) => {
                     // The connect path reads `flags.cdp` (parsed from the original
                     // argv, which was `extension connect` → None), NOT `clean`.
                     // Without this the relay URL is dropped and we fall through to
@@ -1973,7 +1983,11 @@ fn main() {
                     flags.auto_connect = false;
                     clean = vec!["connect".to_string(), url];
                 }
-                None if !crate::connect::host_installed() => {
+                Err(e) => {
+                    eprintln!("{} {e}", color::error_indicator());
+                    exit(1);
+                }
+                Ok(None) if !crate::connect::host_installed() => {
                     // Host not set up → register it + open the Store page (one
                     // click). Never the dev-mode "Load unpacked" lecture.
                     crate::connect::ensure_host_installed();
@@ -1981,7 +1995,7 @@ fn main() {
                     eprintln!("{}", crate::connect::extension_not_installed_message());
                     exit(1);
                 }
-                None => {
+                Ok(None) => {
                     // Extension IS set up — the worker just hasn't reconnected yet.
                     // Accurate guidance: retry, or reload ONLY the extension. NEVER
                     // "restart Chrome" (a running Chrome picks the host up on its
@@ -2030,7 +2044,15 @@ fn main() {
                 // Same as `extension connect`: the worker may be mid-reconnect, so
                 // wait for the relay to come up instead of failing instantly (which
                 // misled users into restarting Chrome).
-                if connect::relay_url().is_none() && crate::connect::host_installed() {
+                let target_browser = flags.browser.as_deref().or(flags.profile.as_deref());
+                let current_relay = match connect::relay_url_for_selector_or_default(target_browser) {
+                    Ok(url) => url,
+                    Err(e) => {
+                        eprintln!("{} {e}", color::error_indicator());
+                        exit(1);
+                    }
+                };
+                if current_relay.is_none() && crate::connect::host_installed() {
                     crate::connect::ensure_host_installed();
                     eprint!(
                         "{} extension relay reconnecting (the worker wakes ~every 30s)…",
@@ -2038,24 +2060,30 @@ fn main() {
                     );
                     let _ = std::io::Write::flush(&mut std::io::stderr());
                     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
-                    while connect::relay_url().is_none() && std::time::Instant::now() < deadline {
+                    while connect::relay_url_for_selector_or_default(target_browser).ok().flatten().is_none()
+                        && std::time::Instant::now() < deadline
+                    {
                         std::thread::sleep(std::time::Duration::from_millis(750));
                     }
                     eprintln!();
                 }
-                match connect::relay_url() {
-                    Some(url) => {
+                match connect::relay_url_for_selector_or_default(target_browser) {
+                    Ok(Some(url)) => {
                         flags.cdp = Some(url.clone());
                         flags.auto_connect = false;
                         clean = vec!["connect".to_string(), url];
                     }
-                    None if !crate::connect::host_installed() => {
+                    Err(e) => {
+                        eprintln!("{} {e}", color::error_indicator());
+                        exit(1);
+                    }
+                    Ok(None) if !crate::connect::host_installed() => {
                         crate::connect::ensure_host_installed();
                         crate::connect::open_url(crate::connect::STORE_URL);
                         eprintln!("{}", crate::connect::extension_not_installed_message());
                         exit(1);
                     }
-                    None => {
+                    Ok(None) => {
                         eprintln!(
                             "{} The chrome-use extension is installed but its background worker \
                              hasn't reconnected to the native host yet (MV3 workers sleep, ~30s \
@@ -2394,12 +2422,17 @@ fn main() {
     // can't reuse the dead binding, then wait (bounded, with progress) for the MV3
     // worker to republish the relay — the fresh daemon then connects clean. Opt
     // out with AGENT_BROWSER_NO_AUTO_RECONNECT. Skipped for --launch/--cdp.
+    let target_browser = flags.browser.as_deref().or(flags.profile.as_deref());
+    let relay_target_up = connect::relay_url_for_selector_or_default(target_browser)
+        .ok()
+        .flatten()
+        .is_some();
     if flags.auto_connect
         && flags.cdp.is_none()
         && !flags.force_launch
         && std::env::var("AGENT_BROWSER_NO_AUTO_RECONNECT").is_err()
         && connect::host_installed()
-        && connect::relay_url().is_none()
+        && !relay_target_up
         // Don't disturb a session that already has a healthy daemon — e.g. one
         // driving a `--launch`ed browser (its follow-up commands omit --launch and
         // would otherwise trip this relay-down branch and get the daemon killed). A
@@ -2421,7 +2454,7 @@ fn main() {
                 exit(1);
             }
         };
-        if connect::relay_url().is_none()
+        if connect::relay_url_for_selector_or_default(target_browser).ok().flatten().is_none()
             && !connection::probe_daemon_healthy(&flags.session, std::time::Duration::from_secs(3))
         {
             connection::kill_stale_daemon(&flags.session);
@@ -2460,7 +2493,9 @@ fn main() {
             );
             let _ = std::io::Write::flush(&mut std::io::stderr());
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
-            while connect::relay_url().is_none() && std::time::Instant::now() < deadline {
+            while connect::relay_url_for_selector_or_default(target_browser).ok().flatten().is_none()
+                && std::time::Instant::now() < deadline
+            {
                 std::thread::sleep(std::time::Duration::from_millis(300));
             }
             eprintln!();
