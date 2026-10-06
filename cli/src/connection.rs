@@ -1691,6 +1691,15 @@ fn send_command_once(cmd: &Value, session: &str) -> Result<Response, String> {
         }
     })?;
 
+    if response_line.trim().is_empty() {
+        kill_stale_daemon(session);
+        return Err(format!(
+            "daemon disconnected unexpectedly for session '{session}'. \
+             The unreachable daemon was stopped and its stale state was cleared. \
+             Rerun the command to start a fresh daemon."
+        ));
+    }
+
     serde_json::from_str(&response_line).map_err(|e| format!("Invalid response: {}", e))
 }
 
@@ -2173,6 +2182,9 @@ mod tests {
         assert!(!is_transient_error("Invalid JSON syntax"));
         assert!(!is_transient_error("Permission denied"));
         assert!(!is_transient_error("Daemon not found"));
+        assert!(!is_transient_error(
+            "daemon disconnected unexpectedly for session 'test'. The unreachable daemon was stopped and its stale state was cleared. Rerun the command to start a fresh daemon."
+        ));
     }
 
     /// Exact values, so a change to the derivation is a deliberate act rather
