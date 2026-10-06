@@ -1,8 +1,19 @@
 # Changelog
 
-## 1.5.162
+## 1.5.163
 
 <!-- release:start -->
+### Improvements
+
+- **A failing adapter no longer hides a working OpenCLI command of the same name.** When one of our adapters fails and OpenCLI has a read command with that name, chrome-use runs OpenCLI's instead. Example: `hackernews/top` from the community pack fetches an API the page's security policy blocks, so it always failed; it now returns data through OpenCLI. Your arguments carry over by name, with common aliases mapped (`count` → `limit`, `q` → `query`). stderr says what happened; `--json` adds `source: "opencli"` and `fallbackFrom`. Write commands never retry. (#409)
+
+### Contributors
+
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.162
+
 ### Bug Fixes
 
 - **OpenCLI commands install on Windows.** `site update` looked for `npm`, but on Windows it is `npm.cmd`, so OpenCLI was silently skipped there. (#408)
@@ -11,7 +22,6 @@
 ### Contributors
 
 - @leeguooooo
-<!-- release:end -->
 
 ## 1.5.161
 
