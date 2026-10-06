@@ -4322,9 +4322,20 @@ async fn annotate_site_change(
     let Some(mgr) = state.browser.as_ref() else {
         return;
     };
-    let mut url = match tokio::time::timeout(Duration::from_millis(1500), mgr.get_url()).await {
-        Ok(Ok(u)) if !u.is_empty() => u,
-        _ => mgr.cached_active_url(),
+    // Prefer the url the command reported (a tab switch gets it from Chrome's
+    // tab info, which is right even while the page JS still reads about:blank).
+    let reported = resp
+        .get("data")
+        .and_then(|d| d.get("url"))
+        .and_then(|v| v.as_str())
+        .filter(|u| !u.is_empty() && *u != "about:blank")
+        .map(String::from);
+    let mut url = match reported {
+        Some(u) => u,
+        None => match tokio::time::timeout(Duration::from_millis(1500), mgr.get_url()).await {
+            Ok(Ok(u)) if !u.is_empty() => u,
+            _ => mgr.cached_active_url(),
+        },
     };
     // `tab new <url>` returns before the new tab has left about:blank; judge
     // it by where it is going.
@@ -4337,6 +4348,12 @@ async fn annotate_site_change(
         .ok()
         .and_then(|u| u.host_str().map(String::from))
         .unwrap_or_default();
+    if host.is_empty() {
+        // A tab still loading in the background reads as about:blank. Leave
+        // the host unknown so the next command looks again.
+        state.site_hint_host = None;
+        return;
+    }
     if state.site_hint_host.as_deref() == Some(host.as_str()) {
         return;
     }
