@@ -1,8 +1,20 @@
 # Changelog
 
-## 1.5.161
+## 1.5.162
 
 <!-- release:start -->
+### Bug Fixes
+
+- **OpenCLI commands install on Windows.** `site update` looked for `npm`, but on Windows it is `npm.cmd`, so OpenCLI was silently skipped there. (#408)
+- **An OpenCLI command can no longer run forever.** It stops after 300 seconds, or after its own `timeout` argument plus 60 seconds when that is longer (login flows wait for you), and says so. `AGENT_BROWSER_OPENCLI_TIMEOUT=<seconds>` changes the limit. (#408)
+
+### Contributors
+
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.161
+
 ### New Features
 
 - **OpenCLI's commands run as `site` commands.** With Node.js 20+ on PATH, `site update` installs a pinned [OpenCLI](https://github.com/jackwener/OpenCLI) (1.8.8, about 180 sites and 1,300 commands) into `~/.chrome-use/opencli` with `npm install --ignore-scripts`; no token is needed. A `name/cmd` that neither of our packs has runs through OpenCLI's own runtime, but every browser step goes through chrome-use, so it uses your current session and logins: `chrome-use site hackernews/best --limit 5 --json`. They are marked `(opencli)` in `site list`, `site info` shows their args, and the site hint lists them after ours. Our adapters win on a shared name. `AGENT_BROWSER_SITES_NO_OPENCLI=1` turns this off. (#407)
@@ -12,7 +24,6 @@
 ### Contributors
 
 - @leeguooooo
-<!-- release:end -->
 
 ## 1.5.160
 
