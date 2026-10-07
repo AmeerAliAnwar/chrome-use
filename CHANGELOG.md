@@ -1,8 +1,26 @@
 # Changelog
 
-## 1.5.168
+## 1.5.169
 
 <!-- release:start -->
+### Bug Fixes
+
+- **`close --all` no longer closes other people's sessions by accident.** While another session is live, it closes nothing, lists the other sessions, and says to run `chrome-use close` for your own or add `--force` for all. In an 8-agent test, two agents ran `close --all` when stuck and wiped the other seven sessions mid-task. (#429)
+- **A session closed from outside says so.** Its next command used to run silently in a new blank tab. Agents saw `about:blank`, assumed the form was lost, and submitted twice. Now the next command warns that the tabs were closed by `close --all` (or `session stop`/`prune`) from a named session, and says to check whether a submission already went through before redoing it. (#431)
+- **`tab select --activate` won't hide another session's tab.** While another live session's tab is in front of the window, it is refused; add `--force` to override. The background-tab note now explains that a click there usually did reach the page: wait for the result and re-read, and don't resubmit. (#431)
+- **`pick` handles autocomplete fields.** `pick @e6 --option "Kyoto"` types the text, waits for the suggestions, clicks the best match ("Kyoto" over "Kyoto Station") and checks the field took it. `pick <ref> "<text>"` works too, and `select` on a non-native combobox points to `pick`. Almost every agent in the test fell back to typing and clicking by hand. (#430)
+
+### Improvements
+
+- **The core skill again lists the commands to use instead of `eval`**, in 5 rows: text, click, counting, waiting, and setting values. (#428)
+
+### Contributors
+
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.168
+
 ### Improvements
 
 - **A ref that no longer matches its snapshot is never acted on as a guess.** When a `@ref`'s element was replaced, chrome-use still re-finds it. If the replacement has the same role and name, the action runs and the reply reports it (`relocated` in `--json`, a `⚠ @eN relocated` line on stderr). If the best match has a different name ("Delete" → "Delete all"), nothing is clicked. The error offers it as a new ref, `try @e7 [button] "Delete all"`, along with up to two other close matches. A text field re-found by its `id`, `name` or `data-testid` is still filled after its label changes, and reported (#356). `Unknown ref` errors now say what the ref was and suggest current refs. Borrowed from callstack/agent-device. (#419)
@@ -20,7 +38,6 @@
 ### Contributors
 
 - @leeguooooo
-<!-- release:end -->
 
 ## 1.5.167
 
