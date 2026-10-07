@@ -1,8 +1,32 @@
 # Changelog
 
-## 1.5.171
+## 1.5.172
 
 <!-- release:start -->
+### New Features
+
+- **Chrome profiles by name, routed, and connected on demand.** (#443, fixes #437)
+  - `chrome-use browsers` lists every Chrome profile with its display name, directory, account and whether it is connected, plus a `connect` command for each unconnected one.
+  - `--browser` accepts a display name, directory, email, id, or a unique name prefix (`--browser dav`).
+  - A session prints which profile it uses (and why) on first attach and on `open`.
+  - `browsers --who github.com` shows which profiles look signed in to a site. It reads cookie names only, never values.
+  - `"profiles": {"default": …, "routes": […]}` in `~/.chrome-use/config.json` picks a profile by URL.
+  - `chrome-use connect --browser <name>` opens the extension's store page, a window, or its settings in that profile, as needed, and waits for it to connect. So a profile is set up the first time it is needed, not all twelve up front.
+- **Login walls are detected.** When a page lands on its site's sign-in page, chrome-use says so once per host and points to `chrome-use auth login --bwu`. With `"auth": {"autoLogin": "bwu"}` it signs in from the vault and returns to the original page. (#438, fixes #434)
+
+### Bug Fixes
+
+- **A click on a background tab no longer takes 5 seconds after a `fill`.** On a profile with a password manager, filling a login field left the page hidden, and Chrome took about 5 s to deliver each mouse event to a hidden page. chrome-use now makes the page render again before a pointer event: about 0.2 s instead of 5.2 s. (#439)
+- **`chrome-use report --submit` files through the github.com form in the user's Chrome** when `gh` is unavailable. The API-based site adapter could never authenticate. Long bodies are filled in, not truncated. (#440)
+- **`report --new` is now `report --new-issue`.** `--new` is also the global `--launch` alias. (#441)
+
+### Contributors
+
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.171
+
 ### New Features
 
 - **`chrome-use report` drafts a GitHub issue from what went wrong.** It builds the draft from the local failure log, with version, OS, extension and connection mode. URL queries, cookies, tokens, typed values, emails and home paths are redacted first. It searches open issues for the same failure signature; when one matches, it adds a "+1, also seen on …" comment instead of a duplicate. `--submit` files through `gh`, the user's logged-in Chrome, or a prefilled issue URL. It refuses unless the user agreed (`--yes`, or `report.auto` in `~/.chrome-use/config.json` / `AGENT_BROWSER_REPORT_AUTO=1`). When the same failure repeats or an `eval` follows a failed command, the reply suggests offering a report once (`reportSuggestion`); `AGENT_BROWSER_NO_REPORT_HINTS=1` turns that off. (#436)
@@ -18,7 +42,6 @@
 
 - @AmeerAliAnwar
 - @leeguooooo
-<!-- release:end -->
 
 ## 1.5.170
 
