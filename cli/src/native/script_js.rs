@@ -53,6 +53,7 @@ pub async fn run_js(
     // Actor loop: service one bridged op at a time until the engine finishes and
     // drops its sender (channel closes). `__log` is handled locally (no browser).
     let mut logs: Vec<Value> = Vec::new();
+    let mut advisories: Vec<Value> = Vec::new();
     while let Some(msg) = req_rx.recv().await {
         let action = msg.cmd.get("action").and_then(|v| v.as_str()).unwrap_or("");
         if action == "__log" {
@@ -62,13 +63,18 @@ pub async fn run_js(
             continue;
         }
         let result = Box::pin(execute_command(&msg.cmd, state)).await;
+        super::progress::collect_advisories(&result, &mut advisories);
         let _ = msg.reply.send(result);
     }
 
     match engine.await {
-        Ok(Ok(ret)) => Ok(json!({ "return": ret, "logs": logs })),
-        Ok(Err(e)) => Err(e),
-        Err(e) => Err(format!("script engine thread failed: {}", e)),
+        Ok(Ok(ret)) => Ok(json!({ "return": ret, "logs": logs, "advisories": advisories })),
+        Ok(Err(e)) => {
+            Ok(json!({"ok":false,"return":null,"error":e,"logs":logs,"advisories":advisories}))
+        }
+        Err(e) => Ok(
+            json!({"ok":false,"return":null,"error":format!("script engine thread failed: {e}"),"logs":logs,"advisories":advisories}),
+        ),
     }
 }
 
@@ -194,8 +200,8 @@ const CU_PRELUDE: &str = r#"
 globalThis.cu = {
   _call(action, params) {
     const r = JSON.parse(__cu(action, JSON.stringify(params || {})));
-    if (!r || r.success !== true) {
-      throw new Error((r && r.error) || ('cu.' + action + ' failed'));
+    if (!r || r.success !== true || (action === 'script' && r.data && r.data.ok === false)) {
+      throw new Error((r && (r.error || (r.data && r.data.error))) || ('cu.' + action + ' failed'));
     }
     return r.data;
   },
@@ -367,6 +373,7 @@ pub async fn run_js_in(
     // Same actor loop as a one-shot run: the thread drops its `cu_tx` when the
     // job finishes, which closes this channel and ends the loop.
     let mut logs: Vec<Value> = Vec::new();
+    let mut advisories: Vec<Value> = Vec::new();
     while let Some(msg) = req_rx.recv().await {
         let action = msg.cmd.get("action").and_then(|v| v.as_str()).unwrap_or("");
         if action == "__log" {
@@ -376,6 +383,7 @@ pub async fn run_js_in(
             continue;
         }
         let result = Box::pin(execute_command(&msg.cmd, state)).await;
+        super::progress::collect_advisories(&result, &mut advisories);
         let _ = msg.reply.send(result);
     }
 
@@ -384,13 +392,17 @@ pub async fn run_js_in(
         handle.busy = false;
     }
     match outcome {
-        Ok(Ok(ret)) => Ok(json!({ "return": ret, "logs": logs, "context": name })),
-        Ok(Err(e)) => Err(e),
+        Ok(Ok(ret)) => {
+            Ok(json!({ "return": ret, "logs": logs, "advisories": advisories, "context": name }))
+        }
+        Ok(Err(e)) => Ok(
+            json!({"ok":false,"return":null,"error":e,"logs":logs,"advisories":advisories,"context":name}),
+        ),
         Err(_) => {
             state.script_contexts.map.remove(name);
-            Err(format!(
+            Ok(json!({"ok":false,"return":null,"error":format!(
                 "script context `{name}` ended without a result; it has been released"
-            ))
+            ),"logs":logs,"advisories":advisories,"context":name}))
         }
     }
 }
@@ -558,5 +570,29 @@ mod persistent_context_tests {
         let mut contexts = JsContexts::default();
         assert!(!contexts.drop_context("nope"));
         assert!(contexts.names().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod advisory_tests {
+    use serde_json::json;
+
+    #[test]
+    fn discarded_script_results_still_collect_bounded_advisories() {
+        let mut advisories = Vec::new();
+        crate::native::progress::collect_advisories(
+            &json!({"success":true,"data":{"result":"ordinary"}}),
+            &mut advisories,
+        );
+        assert!(advisories.is_empty());
+        for _ in 0..25 {
+            crate::native::progress::collect_advisories(
+                &json!({"success":true,"data":{"observed":{"noProgress":
+                {"hint":"Inspect state", "retryAction":false}}}}),
+                &mut advisories,
+            );
+        }
+        assert_eq!(advisories.len(), 20);
+        assert_eq!(advisories[0]["retryAction"], false);
     }
 }
