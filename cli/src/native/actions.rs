@@ -10450,6 +10450,8 @@ async fn handle_mouse(cmd: &Value, state: &DaemonState) -> Result<Value, String>
     let button = cmd.get("button").and_then(|v| v.as_str()).unwrap_or("none");
     let click_count = cmd.get("clickCount").and_then(|v| v.as_i64()).unwrap_or(0);
 
+    super::interaction::restore_rendering_if_hidden(&mgr.client, &session_id).await;
+
     mgr.client
         .send_command(
             "Input.dispatchMouseEvent",
@@ -13557,6 +13559,7 @@ async fn handle_wheel(cmd: &Value, state: &DaemonState) -> Result<Value, String>
     // Humanize: at Off this is one instant wheel event (unchanged); at
     // Fast/Human the scroll is split into eased, slightly-jittered segments so
     // it ramps and settles like a real wheel/trackpad flick.
+    super::interaction::restore_rendering_if_hidden(&mgr.client, &session_id).await;
     let level = humanize::active_level();
     let seed = humanize::next_seed();
     for (dx, dy, delay) in humanize::scroll_segments(delta_x, delta_y, level, seed) {
@@ -15256,6 +15259,7 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         }
     };
 
+    super::interaction::restore_rendering_if_hidden(&mgr.client, &source_session_id).await;
     // Mouse down at source
     mgr.client
         .send_command(
@@ -19298,6 +19302,7 @@ async fn handle_input_mouse(cmd: &Value, state: &mut DaemonState) -> Result<Valu
             .map(|v| v as i32),
     );
 
+    super::interaction::restore_rendering_if_hidden(&mgr.client, &session_id).await;
     mgr.client
         .send_command_typed::<_, Value>("Input.dispatchMouseEvent", &params, Some(&session_id))
         .await?;
@@ -19406,6 +19411,7 @@ async fn handle_mousemove(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         None,
     );
 
+    super::interaction::restore_rendering_if_hidden(&mgr.client, &session_id).await;
     mgr.client
         .send_command_typed::<_, Value>("Input.dispatchMouseEvent", &params, Some(&session_id))
         .await?;
@@ -19429,6 +19435,7 @@ async fn handle_mousedown(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         None,
     );
 
+    super::interaction::restore_rendering_if_hidden(&mgr.client, &session_id).await;
     mgr.client
         .send_command_typed::<_, Value>("Input.dispatchMouseEvent", &params, Some(&session_id))
         .await?;
@@ -19452,6 +19459,7 @@ async fn handle_mouseup(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
         None,
     );
 
+    super::interaction::restore_rendering_if_hidden(&mgr.client, &session_id).await;
     mgr.client
         .send_command_typed::<_, Value>("Input.dispatchMouseEvent", &params, Some(&session_id))
         .await?;
