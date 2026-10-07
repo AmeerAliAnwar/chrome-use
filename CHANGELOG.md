@@ -1,8 +1,22 @@
 # Changelog
 
-## 1.5.172
+## 1.5.173
 
 <!-- release:start -->
+### Improvements
+
+- **A repeated action that changes nothing is flagged.** When an action reports success but repeated complete, settled observations show no change (no requests, resources or frame changes), `--observe` adds `observed.noProgress`. It is advice only: it doesn't change `success` and nothing is replayed. A popup, a dialog or an incomplete observation resets it. (#444)
+- **Script and batch failures are no longer hidden.** A nested program that returns `ok:false` now fails its caller instead of passing on transport success alone. Failed and nested runs keep up to 20 advisories. (#444)
+- **`timing` separates total Chrome time from wall-clock time.** It reports summed request time (`cdpMs`), the union of request intervals (`cdpBusyMs`) and the rest (`nonCdpMs`). The two independent snapshot enrichment reads now run concurrently. (#444)
+- **Static pages have search metadata and bilingual usage guides.** (#442, #445)
+
+### Contributors
+
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.172
+
 ### New Features
 
 - **Chrome profiles by name, routed, and connected on demand.** (#443, fixes #437)
@@ -23,7 +37,6 @@
 ### Contributors
 
 - @leeguooooo
-<!-- release:end -->
 
 ## 1.5.171
 
