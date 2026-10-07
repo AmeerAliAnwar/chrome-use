@@ -1,8 +1,20 @@
 # Changelog
 
-## 1.5.169
+## 1.5.170
 
 <!-- release:start -->
+### Improvements
+
+- **A `wait --text` timeout names the page's actual wording when only the case or spacing differs.** Waiting for "Grand Total" on a page that says "Grand total" used to time out after 25 seconds with only a general reminder that matching is case-sensitive, and agents then fell back to `eval`. Now the error says the page does show "Grand total" and gives the exact `wait --text` to use. (#432)
+- **The core skill's `extract` example runs as written.** Agents copied the placeholder `extract --schema '{rows,fields}'` literally and got a JSON error. (#432)
+
+### Contributors
+
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.169
+
 ### Bug Fixes
 
 - **`close --all` no longer closes other people's sessions by accident.** While another session is live, it closes nothing, lists the other sessions, and says to run `chrome-use close` for your own or add `--force` for all. In an 8-agent test, two agents ran `close --all` when stuck and wiped the other seven sessions mid-task. (#429)
@@ -17,7 +29,6 @@
 ### Contributors
 
 - @leeguooooo
-<!-- release:end -->
 
 ## 1.5.168
 
