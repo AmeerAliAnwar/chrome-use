@@ -317,6 +317,10 @@ fn get_version_path(session: &str) -> PathBuf {
     get_socket_dir().join(format!("{}.version", session))
 }
 
+fn get_profile_path(session: &str) -> PathBuf {
+    get_socket_dir().join(format!("{}.profile", session))
+}
+
 /// Path to the sidecar file that records the URL the previous daemon was on,
 /// used to restore navigation after a version-mismatch restart. Only written
 /// when the version-mismatch branch fires; cleared after the new daemon
@@ -531,6 +535,8 @@ pub fn cleanup_stale_files(session: &str) {
     let _ = fs::remove_file(&pid_path);
     let version_path = get_version_path(session);
     let _ = fs::remove_file(&version_path);
+    let profile_path = get_profile_path(session);
+    let _ = fs::remove_file(&profile_path);
     let stream_path = get_socket_dir().join(format!("{}.stream", session));
     let _ = fs::remove_file(&stream_path);
     // Drop the ownership sidecar too (issue #89): a dead session's handoff
@@ -1191,6 +1197,28 @@ pub(crate) fn ensure_daemon_with_lifecycle_lock(
                 kill_stale_daemon(session);
                 // Fall through to spawn a new daemon below
             } else {
+                let profile_path = get_profile_path(session);
+                if let Ok(bound) = fs::read_to_string(&profile_path) {
+                    let bound = bound.trim();
+                    if !bound.is_empty() {
+                        let requested = opts.cdp.or(opts.profile);
+                        if let Some(req) = requested {
+                            let req = req.trim();
+                            if !req.is_empty()
+                                && req.trim_end_matches('/') != bound.trim_end_matches('/')
+                            {
+                                return Err(format!(
+                                    "Session '{session}' is already bound to profile/endpoint '{bound}'. Cannot switch to '{req}' on an existing session. Start a new session with --session <name>.",
+                                ));
+                            }
+                        }
+                    }
+                } else if let Some(req) = opts.cdp.or(opts.profile) {
+                    let req = req.trim();
+                    if !req.is_empty() {
+                        let _ = fs::write(&profile_path, req);
+                    }
+                }
                 return Ok(DaemonResult {
                     already_running: true,
                 });
@@ -1293,6 +1321,13 @@ pub(crate) fn ensure_daemon_with_lifecycle_lock(
 
     for _ in 0..50 {
         if daemon_ready(session) {
+            let profile_path = get_profile_path(session);
+            if let Some(bound) = opts.cdp.or(opts.profile) {
+                let bound = bound.trim();
+                if !bound.is_empty() {
+                    let _ = fs::write(&profile_path, bound);
+                }
+            }
             return Ok(DaemonResult {
                 already_running: false,
             });
@@ -2378,6 +2413,23 @@ mod tests {
 
         cleanup_stale_files("test-session");
         assert!(!version_path.exists());
+
+        let _ = fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn test_cleanup_stale_files_removes_profile() {
+        let dir = std::env::temp_dir().join("ab-test-cleanup-profile");
+        let _ = fs::create_dir_all(&dir);
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        _guard.set("AGENT_BROWSER_SOCKET_DIR", dir.to_str().unwrap());
+
+        let profile_path = dir.join("test-session.profile");
+        let _ = fs::write(&profile_path, "ws://127.0.0.1:41337/profile-1");
+        assert!(profile_path.exists());
+
+        cleanup_stale_files("test-session");
+        assert!(!profile_path.exists());
 
         let _ = fs::remove_dir(&dir);
     }

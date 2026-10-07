@@ -983,9 +983,12 @@ async function handleForwardCdpCommand(msg) {
       candidates.find((t) => tabs.get(t.id)?.targetId === spec) ||
       candidates.find((t) => (t.url || '').toLowerCase().includes(specL));
     if (!match || !match.id) {
+      const extra = await buildHelloIdentity();
       return {
         targetId: null,
         candidates: candidates.map((t) => ({ url: t.url || '', title: t.title || '' })),
+        profileId: extra.profileId || null,
+        profileEmail: extra.profileEmail || null,
       };
     }
     const entry = await attachTab(match.id); // attaches + announces attachedToTarget
