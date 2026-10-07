@@ -1,8 +1,21 @@
 # Changelog
 
-## 1.5.174
+## 1.5.175
 
 <!-- release:start -->
+### Bug Fixes
+
+- **An upgrade no longer throws away a running session's tab.** When the CLI found its daemon on an older version, it stopped the daemon in a way that closed every tab the session had opened. The next command ran on a blank page with "Unknown ref". Now the session's own tab is kept, refs carry over (and still go through the identity checks), and the first command says what happened. When upgrading from 1.5.174 or older, the old daemon can't hand over its refs: the tab is still kept, and the first `@ref` command says to run `snapshot -i`. (#450, fixes #448)
+- **`auth login` and `auth login --bwu` work with sign-in forms inside same-site iframes**, such as Apple's sign-in on App Store Connect. They fill the frame's fields with trusted input, handle username-then-password forms, submit with the sign-in button (never a passkey or Google button), and report a 2FA code step without guessing. (#452, fixes #449)
+- **A password manager's inline menu is cleared before every command that touches the page**, including `get text`, `eval`, `press` and frame commands, not just `click` and `fill`. If Chrome's whole window is hidden (for example full screen in another Space while you're in the terminal), the menu can't be closed without taking your focus. The error now says so: bring Chrome to the front once, or press Escape in that tab. (#452)
+
+### Contributors
+
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.174
+
 ### Bug Fixes
 
 - Fixed **repeated unchanged action hints across CLI calls** being reset by the CLI's browser readiness check. A successful launch reuse on the same connection, target and session keeps the observation streak; rebinding, failed checks and loading storage state still clear it. (#447)
@@ -15,7 +28,6 @@
 ### Contributors
 
 - @leeguooooo
-<!-- release:end -->
 
 ## 1.5.173
 
