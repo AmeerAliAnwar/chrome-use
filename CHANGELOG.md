@@ -1,8 +1,20 @@
 # Changelog
 
-## 1.5.175
+## 1.5.176
 
 <!-- release:start -->
+### Bug Fixes
+
+- **`auth login --bwu` on an already signed-in page returns at once.** It used to wait 25 seconds for a login field and then fail with "no login field appeared", which agents read as a failed login. Now a page that isn't a sign-in URL and shows no login field after a short look returns `alreadySignedIn: true` in about 3 seconds, with nothing typed. Sign-in pages keep the full wait. (#453)
+- **The first command after an upgrade says refs were lost, even when the old daemon had already idled out.** In that case the session's tab was kept, but the first `@ref` command said "no snapshot has run in this session" instead of explaining the upgrade. Daemons now leave a version record that outlives them, so the new one can tell it replaced an older version. (#454, refs #448)
+
+### Contributors
+
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.175
+
 ### Bug Fixes
 
 - **An upgrade no longer throws away a running session's tab.** When the CLI found its daemon on an older version, it stopped the daemon in a way that closed every tab the session had opened. The next command ran on a blank page with "Unknown ref". Now the session's own tab is kept, refs carry over (and still go through the identity checks), and the first command says what happened. When upgrading from 1.5.174 or older, the old daemon can't hand over its refs: the tab is still kept, and the first `@ref` command says to run `snapshot -i`. (#450, fixes #448)
@@ -12,7 +24,6 @@
 ### Contributors
 
 - @leeguooooo
-<!-- release:end -->
 
 ## 1.5.174
 
