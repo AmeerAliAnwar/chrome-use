@@ -2190,7 +2190,10 @@ fn main() {
                 );
                 let _ = std::io::Write::flush(&mut std::io::stderr());
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
-                while connect::relay_url_for_selector_or_default(target_browser).ok().flatten().is_none()
+                while connect::relay_url_for_selector_or_default(target_browser)
+                    .ok()
+                    .flatten()
+                    .is_none()
                     && std::time::Instant::now() < deadline
                 {
                     std::thread::sleep(std::time::Duration::from_millis(750));
@@ -2271,7 +2274,8 @@ fn main() {
                 // wait for the relay to come up instead of failing instantly (which
                 // misled users into restarting Chrome).
                 let target_browser = flags.browser.as_deref().or(flags.profile.as_deref());
-                let current_relay = match connect::relay_url_for_selector_or_default(target_browser) {
+                let current_relay = match connect::relay_url_for_selector_or_default(target_browser)
+                {
                     Ok(url) => url,
                     Err(e) => {
                         eprintln!("{} {e}", color::error_indicator());
@@ -2286,7 +2290,10 @@ fn main() {
                     );
                     let _ = std::io::Write::flush(&mut std::io::stderr());
                     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
-                    while connect::relay_url_for_selector_or_default(target_browser).ok().flatten().is_none()
+                    while connect::relay_url_for_selector_or_default(target_browser)
+                        .ok()
+                        .flatten()
+                        .is_none()
                         && std::time::Instant::now() < deadline
                     {
                         std::thread::sleep(std::time::Duration::from_millis(750));
@@ -2682,7 +2689,10 @@ fn main() {
                 exit(1);
             }
         };
-        if connect::relay_url_for_selector_or_default(target_browser).ok().flatten().is_none()
+        if connect::relay_url_for_selector_or_default(target_browser)
+            .ok()
+            .flatten()
+            .is_none()
             && !connection::probe_daemon_healthy(&flags.session, std::time::Duration::from_secs(3))
         {
             connection::kill_stale_daemon(&flags.session);
@@ -2721,7 +2731,10 @@ fn main() {
             );
             let _ = std::io::Write::flush(&mut std::io::stderr());
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
-            while connect::relay_url_for_selector_or_default(target_browser).ok().flatten().is_none()
+            while connect::relay_url_for_selector_or_default(target_browser)
+                .ok()
+                .flatten()
+                .is_none()
                 && std::time::Instant::now() < deadline
             {
                 std::thread::sleep(std::time::Duration::from_millis(300));

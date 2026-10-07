@@ -1204,7 +1204,9 @@ pub(crate) fn ensure_daemon_with_lifecycle_lock(
                         let requested = opts.cdp.or(opts.profile);
                         if let Some(req) = requested {
                             let req = req.trim();
-                            if !req.is_empty() && req.trim_end_matches('/') != bound.trim_end_matches('/') {
+                            if !req.is_empty()
+                                && req.trim_end_matches('/') != bound.trim_end_matches('/')
+                            {
                                 return Err(format!(
                                     "Session '{session}' is already bound to profile/endpoint '{bound}'. Cannot switch to '{req}' on an existing session. Start a new session with --session <name>.",
                                 ));
