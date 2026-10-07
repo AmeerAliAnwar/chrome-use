@@ -5673,8 +5673,11 @@ Batch:
   batch [--bail] ["cmd" ...]  Execute multiple commands sequentially (args or stdin)
   script <file|->             Run JSON or JS steps in one daemon round trip.
                               Script ok:false fails even if transport succeeded.
-                              data.advisories retains up to 20 noProgress hints
-                              through nested/failed scripts; text prints them once.
+                              CLI JSON prints bare program data; advisories retains
+                              up to 20 hints (daemon: data.advisories), including
+                              nested/failed scripts; text prints them once.
+                              Batch JSON is a result array; script/batch omit
+                              top-level timing.
                               --bail stops on first error (default: continue all)
 
 Agent loop (experimental):
@@ -5876,6 +5879,9 @@ Options:
                              data URL payloads omitted. Full capture: network requests --json
                              Observation status is separate from action success;
                              partial/unavailable results must not trigger action replay.
+                             Successful same-context connection reuse preserves the
+                             noProgress streak; new/rebound/failed connections or
+                             storage-state loads clear it.
   --settle-ms <ms>           Ceiling on the wait before an observation captures
                              (default 1000, or AGENT_BROWSER_SETTLE_MS). The wait
                              ends early on DOM quiet + no in-flight request; a
