@@ -1,8 +1,27 @@
 # Changelog
 
-## 1.5.170
+## 1.5.171
 
 <!-- release:start -->
+### New Features
+
+- **`chrome-use report` drafts a GitHub issue from what went wrong.** It builds the draft from the local failure log, with version, OS, extension and connection mode. URL queries, cookies, tokens, typed values, emails and home paths are redacted first. It searches open issues for the same failure signature; when one matches, it adds a "+1, also seen on …" comment instead of a duplicate. `--submit` files through `gh`, the user's logged-in Chrome, or a prefilled issue URL. It refuses unless the user agreed (`--yes`, or `report.auto` in `~/.chrome-use/config.json` / `AGENT_BROWSER_REPORT_AUTO=1`). When the same failure repeats or an `eval` follows a failed command, the reply suggests offering a report once (`reportSuggestion`); `AGENT_BROWSER_NO_REPORT_HINTS=1` turns that off. (#436)
+
+### Bug Fixes
+
+- **A password manager's inline menu no longer blocks the tab.** When Bitwarden's autofill menu made Chrome refuse access to the tab, the old workaround (#373) never actually hid the page, and background tabs had no recovery at all. chrome-use now closes the menu and continues: `snapshot`, `fill`, `click` and `press` work, a click runs once, and your foreground tab is left as it was. If it still cannot recover, the error says not to close tabs, stop the session or relaunch. (#435)
+- **A daemon that drops the connection is cleared immediately** instead of being retried five times. (#421, thanks @AmeerAliAnwar)
+- **`adopt` and `extension connect` use the selected profile's relay**, and a session bound to one profile refuses to switch to another. (#422, fixes #400 and #403, thanks @AmeerAliAnwar)
+- **Refusals no longer offer the `--force` override.** An agent refused by `tab select --activate` reran it with `--force` the moment the error named it. The core skill now says a background tab still receives clicks, so wait for the result instead of activating it. (#433)
+
+### Contributors
+
+- @AmeerAliAnwar
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.170
+
 ### Improvements
 
 - **A `wait --text` timeout names the page's actual wording when only the case or spacing differs.** Waiting for "Grand Total" on a page that says "Grand total" used to time out after 25 seconds with only a general reminder that matching is case-sensitive, and agents then fell back to `eval`. Now the error says the page does show "Grand total" and gives the exact `wait --text` to use. (#432)
@@ -11,7 +30,6 @@
 ### Contributors
 
 - @leeguooooo
-<!-- release:end -->
 
 ## 1.5.169
 
