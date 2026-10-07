@@ -81,7 +81,7 @@
 
       <h2>v1.5.x</h2>
       <ul class="du-changelog">
-        <li><strong>v1.5.176</strong>（未发布）：页面已登录时 <code>auth login --bwu</code> 约 3 秒内返回 <code>alreadySignedIn</code>，不再等 25 秒后报"找不到登录框"，也不会输入任何内容；登录页仍按原来的方式等待（#453）。旧 daemon 已因空闲退出后再升级时，第一条 <code>@ref</code> 命令也会说明是升级导致 refs 失效、标签页已保留，不再显示"这个会话还没有 snapshot"（#454）。贡献者：@leeguooooo。</li>
+        <li><strong>v1.5.176</strong>（2026-10-07）：页面已登录时 <code>auth login --bwu</code> 约 3 秒内返回 <code>alreadySignedIn</code>，不再等 25 秒后报"找不到登录框"，也不会输入任何内容；登录页仍按原来的方式等待（#453）。旧 daemon 已因空闲退出后再升级时，第一条 <code>@ref</code> 命令也会说明是升级导致 refs 失效、标签页已保留，不再显示"这个会话还没有 snapshot"（#454）。贡献者：@leeguooooo。</li>
         <li><strong>v1.5.175</strong>（2026-10-07）：升级后不再丢掉正在运行的会话的标签页，refs 尽量接回并经过身份校验；从 1.5.174 及更早版本升级时标签页保留，第一条 <code>@ref</code> 命令会提示重新 <code>snapshot -i</code>（#450，修复 #448）。<code>auth login</code> / <code>--bwu</code> 支持同站 iframe 里的登录表单（如 App Store Connect 的 Apple 登录），用可信输入填写，处理先账号后密码的表单，点登录按钮提交，遇到两步验证会报告而不猜（#452，修复 #449）。所有会碰到页面的命令都会先处理密码管理器的内联菜单；Chrome 整个窗口被隐藏时无法在不抢焦点的情况下关掉菜单，报错会说明需要把 Chrome 切到前台一次或在标签页里按 Esc（#452）。贡献者：@leeguooooo。</li>
         <li><strong>v1.5.174</strong>（2026-10-07）：修复普通 CLI 调用准备浏览器时清掉连续观察计数的问题；同一连接、目标和会话的成功复用保留计数，重绑定、失败或加载 storage state 仍清空。新增真实 CLI 回归，核验按钮实际执行、batch 后置条件、失败与嵌套脚本提示和清理；文档明确普通命令、batch、script 的 JSON 输出层级。贡献者：@leeguooooo。 (#447)</li>
         <li><strong>v1.5.173</strong>（2026-10-07）：操作报告成功但多次完整观察都没有任何变化时，<code>--observe</code> 会提示 <code>observed.noProgress</code>，只作提醒，不改结果、不重放。嵌套脚本返回 <code>ok:false</code> 时，调用方随之失败，不再只看传输是否成功。<code>timing</code> 区分 Chrome 请求累计耗时和实际占用的时间，快照的两次独立读取改为并发（#444）。静态页面补齐搜索元数据和双语使用指南（#442、#445）。贡献者：@leeguooooo。</li>
