@@ -51,6 +51,16 @@ fn request_line(method: &str, url: &str) -> (String, bool) {
     (shorten(&line, MAX_LINE_BYTES), shortened)
 }
 
+fn is_extension_url(url: &str) -> bool {
+    [
+        "chrome-extension://",
+        "moz-extension://",
+        "safari-web-extension://",
+    ]
+    .iter()
+    .any(|p| url.starts_with(p))
+}
+
 pub(super) fn summarize_requests<'a>(
     requests: impl IntoIterator<Item = (&'a str, &'a str)>,
 ) -> RequestSummary {
@@ -61,6 +71,11 @@ pub(super) fn summarize_requests<'a>(
         shortened: 0,
     };
     for (method, url) in requests {
+        // Another extension's own fetches (locale files and the like) are not
+        // the page's response to the action.
+        if is_extension_url(url) {
+            continue;
+        }
         result.total += 1;
         if result.lines.len() == MAX_REQUESTS {
             result.omitted += 1;
@@ -76,6 +91,16 @@ pub(super) fn summarize_requests<'a>(
 #[cfg(test)]
 mod tests {
     use super::{human_check_vendor, human_check_verdict, resource_lines};
+
+    #[test]
+    fn extension_requests_are_not_the_pages_response() {
+        let s = super::summarize_requests([
+            ("GET", "chrome-extension://abc/locales.json"),
+            ("POST", "https://example.com/api/cart"),
+        ]);
+        assert_eq!(s.total, 1);
+        assert!(s.lines[0].contains("/api/cart"));
+    }
 
     #[test]
     fn human_check_vendors_are_recognized_by_url() {
@@ -122,6 +147,10 @@ mod tests {
         let v = human_check_verdict(false, &entries).unwrap();
         assert_eq!(v["verdict"], "blocked_by_human_check");
         assert_eq!(v["vendor"], "OpenAI Sentinel");
+        let hint = v["hint"].as_str().unwrap();
+        assert!(hint.contains("does not prove a person is required"));
+        assert!(hint.contains("core/captcha"));
+        assert!(!hint.contains("waiting for a person"));
         // A click that visibly did something is not blocked.
         assert!(human_check_verdict(true, &entries).is_none());
         // Nothing human-check related: no verdict.
@@ -317,7 +346,7 @@ pub(crate) fn signin_rejection(url: &str) -> Option<serde_json::Value> {
 }
 
 /// Known human-check / anti-automation vendors, by a URL they load (#377).
-/// Only recognized and reported, never worked around.
+/// Reports loaded resources; recognition does not establish solvability.
 pub(super) fn human_check_vendor(url: &str) -> Option<&'static str> {
     let u = url.to_ascii_lowercase();
     let host = u
@@ -358,8 +387,9 @@ pub(super) fn human_check_vendor(url: &str) -> Option<&'static str> {
 }
 
 /// When an action changed nothing on the page but a human-check script loaded
-/// during it, the page is waiting for a person (#377). The verdict names the
-/// vendor and says to hand off; it never suggests getting around it.
+/// during it, report the vendor as a diagnostic lead (#377). The script load
+/// does not establish that personal presence is required. Inspect the visible
+/// challenge before deciding whether ordinary interaction or handoff is needed.
 pub(super) fn human_check_verdict(
     changed: bool,
     entries: &[serde_json::Value],
@@ -375,9 +405,11 @@ pub(super) fn human_check_verdict(
         "verdict": "blocked_by_human_check",
         "vendor": vendor,
         "url": shorten(url, 120),
-        "hint": "the action loaded this human-check script and the page did not change: it is \
-                 waiting for a person. Do not repeat the click. Hand off with `session handoff` \
-                 and resume after the user has completed it.",
+        "hint": "the action loaded this human-check script and the page did not change. \
+                 This does not prove a person is required. Do not repeat the original submit. \
+                 Inspect the visible challenge; for an authorized task, load `core/captcha`, \
+                 try supported ordinary interactions, and verify the result. Hand off only \
+                 if attempts fail or personal presence is required.",
     }))
 }
 

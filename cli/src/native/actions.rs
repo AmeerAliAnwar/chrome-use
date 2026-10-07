@@ -218,6 +218,9 @@ fn set_json_path(root: &mut Value, path: &str, val: Value) {
 /// `network requests`. WebSocket frame payloads are intentionally excluded.
 #[derive(Clone, serde::Serialize)]
 pub struct TrackedRequest {
+    /// Renderer that observed this request; a body can belong to an OOPIF.
+    #[serde(skip)]
+    pub session_id: Option<String>,
     pub url: String,
     pub method: String,
     pub headers: Value,
@@ -574,6 +577,12 @@ pub struct DaemonState {
     pub mouse_state: MouseState,
     /// Tracks the currently open JavaScript dialog (alert/confirm/prompt), if any.
     pub pending_dialog: Option<PendingDialog>,
+    /// Why this session's previous browser or tabs are gone, read by the
+    /// client's auto-connect `launch` (sent before the first command of a fresh
+    /// daemon) and reported on the next real command's reply. Without it a
+    /// fresh daemon on the relay connected in that `launch`, so the command
+    /// that followed found a browser and never said the old tabs were gone.
+    replaced_browser_pending: Option<String>,
     /// When true, automatically dismiss `beforeunload` dialogs and accept `alert`
     /// dialogs so they never block the agent.  Enabled by default.
     pub auto_dialog: bool,
@@ -593,6 +602,15 @@ pub struct DaemonState {
     /// Session-scoped setup applied to the active page, replayed onto tabs the
     /// daemon creates or adopts. See [`SessionSetup`].
     pub session_setup: SessionSetup,
+    /// Host whose `site` adapters were last surfaced (or checked and found
+    /// none — stored as the host anyway, `""` for hostless pages). `None` until
+    /// the session first touches a page, so attaching to an already-open tab
+    /// also gets the hint. See `annotate_site_change`.
+    pub site_hint_host: Option<String>,
+    /// Successful actions per host this session, and hosts already offered an
+    /// adapter suggestion — see `suggest_site_adapter`.
+    pub site_usage: HashMap<String, u32>,
+    pub site_suggested: HashSet<String>,
 }
 
 impl DaemonState {
@@ -640,6 +658,7 @@ impl DaemonState {
             dialog_handler_task: None,
             mouse_state: MouseState::default(),
             pending_dialog: None,
+            replaced_browser_pending: None,
             auto_dialog: !matches!(
                 env::var("AGENT_BROWSER_NO_AUTO_DIALOG").as_deref(),
                 Ok("1" | "true" | "yes")
@@ -657,6 +676,9 @@ impl DaemonState {
                 .unwrap_or(25_000),
             viewport: None,
             session_setup: SessionSetup::default(),
+            site_hint_host: None,
+            site_usage: HashMap::new(),
+            site_suggested: Default::default(),
         }
     }
 
@@ -1418,6 +1440,7 @@ impl DaemonState {
                                         .to_string();
                                     let timestamp = unix_timestamp_millis() as u64;
                                     self.tracked_requests.push(TrackedRequest {
+                                        session_id: event.session_id.clone(),
                                         url,
                                         method,
                                         headers,
@@ -1450,6 +1473,7 @@ impl DaemonState {
                                 .to_string();
                             let timestamp = unix_timestamp_millis() as u64;
                             self.tracked_requests.push(TrackedRequest {
+                                session_id: event.session_id.clone(),
                                 url,
                                 method: "GET".to_string(),
                                 headers: json!({}),
@@ -1521,11 +1545,11 @@ impl DaemonState {
                                         .get("mimeType")
                                         .and_then(|v| v.as_str())
                                         .map(String::from);
-                                    if let Some(entry) = self
-                                        .tracked_requests
-                                        .iter_mut()
-                                        .rev()
-                                        .find(|e| e.request_id == request_id)
+                                    if let Some(entry) =
+                                        self.tracked_requests.iter_mut().rev().find(|e| {
+                                            e.request_id == request_id
+                                                && e.session_id == event.session_id
+                                        })
                                     {
                                         entry.status = status;
                                         entry.mime_type = resp_mime;
@@ -1663,6 +1687,10 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     // clear otherwise, so a value from an earlier command never leaks forward.
     match cmd.get("_clickMode").and_then(|v| v.as_str()) {
         Some(m) if !m.is_empty() => std::env::set_var("AGENT_BROWSER_CLICK_MODE", m),
+        // `click --allow-dom`: the pre-1.5.166 default, for this command only.
+        _ if cmd.get("allowDom").and_then(|v| v.as_bool()) == Some(true) => {
+            std::env::set_var("AGENT_BROWSER_CLICK_MODE", "dom-fallback")
+        }
         _ => std::env::remove_var("AGENT_BROWSER_CLICK_MODE"),
     }
     // Humanize: set the session level from the client's --humanize / env. Only
@@ -1750,6 +1778,18 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     // previous one, so the reply can say so instead of describing the fresh
     // `about:blank` as if it were the page they left (issue #216).
     let mut replaced_browser: Option<String> = None;
+    // A fresh daemon on the relay is connected by the client's `launch`, which
+    // comes before the agent's own command and whose reply nobody reads. Take
+    // the marker there and report it on the command that follows.
+    if action == "launch" {
+        if state.browser.is_none() {
+            if let Some(reason) = super::daemon::take_reaped_marker(&state.session_id) {
+                state.replaced_browser_pending = Some(reason);
+            }
+        }
+    } else if let Some(reason) = state.replaced_browser_pending.take() {
+        replaced_browser = Some(reason);
+    }
     let skip_launch = matches!(
         action,
         "" | "launch"
@@ -1963,7 +2003,15 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
             .ok()
             .map(|v| super::observation::ResourceMark::from_value(&v))
             .unwrap_or_default();
-        let snap = observe_snapshot(state).await;
+        // With no snapshot taken yet there are no refs the action could be
+        // using, so register the baseline: otherwise the after-tree is numbered
+        // from scratch and the delta reports unchanged links as removed and
+        // re-added under new refs.
+        let snap = if state.ref_map.has_snapshot() {
+            observe_snapshot(state).await
+        } else {
+            observe_snapshot_registering(state).await
+        };
         Some((url, snap, (req_mark, resource_mark)))
     } else {
         None
@@ -2000,8 +2048,9 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
             "content" => handle_content(state).await,
             "evaluate" => handle_evaluate(cmd, state).await,
             "site" => handle_site(cmd, state).await,
+            "site_analyze" => handle_site_analyze(cmd, state).await,
             "script" => super::script::handle_script(cmd, state).await,
-            "close" => handle_close(state).await,
+            "close" => handle_close(cmd, state).await,
             "keep" => handle_keep(cmd, state).await,
             "stealth_status" => handle_stealth_status(state).await,
             "snapshot" => handle_snapshot(cmd, state).await,
@@ -2470,14 +2519,9 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     // without this line concludes the page navigated away, and a human who left
     // a form half-filled is told nothing at all.
     if let Some(why) = replaced_browser {
+        let on_relay = state.browser.as_ref().is_some_and(|m| m.on_relay());
         if let Some(obj) = resp.as_object_mut() {
-            let note = format!(
-                "This session's previous browser is gone ({why}) and a fresh one was launched \
-                 for this command — anything open in the old window, including typed input, is \
-                 not here. A launched browser is reaped after the daemon sits idle \
-                 (AGENT_BROWSER_IDLE_TIMEOUT_MS, default 600000ms; set 0 to keep it). While a \
-                 human is working in the window, `session handoff` also holds it open."
-            );
+            let note = replaced_browser_note(&why, on_relay);
             match obj.get("warning").and_then(|v| v.as_str()) {
                 Some(existing) => {
                     let merged = format!("{note}\n{existing}");
@@ -2586,6 +2630,11 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                 }
             }
         }
+    }
+
+    if ok {
+        annotate_site_change(action, cmd, &mut resp, state).await;
+        suggest_site_adapter(&mut resp, state);
     }
 
     // Auto-report pending JavaScript dialog so agents know why commands may hang
@@ -4250,6 +4299,167 @@ fn with_site_hint(mut result: Value, fallback_url: &str) -> Value {
     result
 }
 
+/// Actions after which the active page may sit on a different site than the
+/// last one we told the agent about: tab moves, history moves, clicks that
+/// navigate, and the read verbs an agent starts with on a tab it didn't open.
+const SITE_CHANGE_ACTIONS: &[&str] = &[
+    "navigate",
+    "tab_new",
+    "tab_switch",
+    "tab_close",
+    "tab_adopt",
+    "tab_duplicate",
+    "back",
+    "forward",
+    "reload",
+    "click",
+    "dblclick",
+    "press",
+    "read",
+    "do",
+    "actions",
+];
+
+/// Auto-trigger, generalised: `open` and `snapshot` always carry
+/// `siteAdapters`, but an agent also reaches a site by switching tabs, going
+/// back, clicking a link, or attaching to a tab the user already had open. After
+/// those, if the active page's host differs from the one last surfaced, attach
+/// the same `siteAdapters` hint. Same host → nothing, so a session that stays on
+/// one site hears about its adapters once rather than on every click.
+async fn annotate_site_change(
+    action: &str,
+    cmd: &Value,
+    resp: &mut Value,
+    state: &mut DaemonState,
+) {
+    let data_hint = resp
+        .get("data")
+        .and_then(|d| d.get("siteAdapters"))
+        .and_then(|h| h.get("domain"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    if let Some(host) = data_hint {
+        // `open` / `snapshot` already said it; remember so we don't repeat.
+        state.site_hint_host = Some(host);
+        return;
+    }
+    let first_touch = state.site_hint_host.is_none();
+    if !first_touch && !SITE_CHANGE_ACTIONS.contains(&action) {
+        return;
+    }
+    // A blocking dialog freezes page JS; don't add a stall to report a hint.
+    if state.pending_dialog.is_some() {
+        return;
+    }
+    let Some(mgr) = state.browser.as_ref() else {
+        return;
+    };
+    // Prefer the url the command reported (a tab switch gets it from Chrome's
+    // tab info, which is right even while the page JS still reads about:blank).
+    let reported = resp
+        .get("data")
+        .and_then(|d| d.get("url"))
+        .and_then(|v| v.as_str())
+        .filter(|u| !u.is_empty() && *u != "about:blank")
+        .map(String::from);
+    let mut url = match reported {
+        Some(u) => u,
+        None => match tokio::time::timeout(Duration::from_millis(1500), mgr.get_url()).await {
+            Ok(Ok(u)) if !u.is_empty() => u,
+            _ => mgr.cached_active_url(),
+        },
+    };
+    // `tab new <url>` returns before the new tab has left about:blank; judge
+    // it by where it is going.
+    if url.is_empty() || url == "about:blank" {
+        if let Some(requested) = cmd.get("url").and_then(|v| v.as_str()) {
+            url = requested.to_string();
+        }
+    }
+    let host = url::Url::parse(&url)
+        .ok()
+        .and_then(|u| u.host_str().map(String::from))
+        .unwrap_or_default();
+    if host.is_empty() {
+        // A tab still loading in the background reads as about:blank. Leave
+        // the host unknown so the next command looks again.
+        state.site_hint_host = None;
+        return;
+    }
+    if state.site_hint_host.as_deref() == Some(host.as_str()) {
+        return;
+    }
+    state.site_hint_host = Some(host);
+    let hint = with_site_hint(json!({ "url": url }), &url);
+    let Some(adapters) = hint.get("siteAdapters") else {
+        return;
+    };
+    insert_data_field(resp, "siteAdapters", adapters.clone());
+}
+
+/// The other half of the auto-trigger: a site the agent keeps driving that has
+/// NO adapter. Count successful actions per host; once it is clearly a regular
+/// (many actions this session, or several days of use), attach
+/// `siteAdapterSuggestion` so the agent asks the user whether to capture the
+/// repeated steps as an adapter. Once per host per session, and not again for
+/// two weeks after it was offered. `AGENT_BROWSER_SITES_NO_SUGGEST=1` disables.
+fn suggest_site_adapter(resp: &mut Value, state: &mut DaemonState) {
+    let Some(host) = state.site_hint_host.clone() else {
+        return;
+    };
+    if host.is_empty() || state.site_suggested.contains(&host) {
+        return;
+    }
+    let count = state.site_usage.entry(host.clone()).or_insert(0);
+    *count += 1;
+    let count = *count;
+    if count == 1 {
+        // First action on this host this session: stamp today's use. Skip the
+        // adapter-index lookup until there's a reason to decide.
+        let _ = crate::site::record_usage_day(&host);
+        return;
+    }
+    if std::env::var_os("AGENT_BROWSER_SITES_NO_SUGGEST").is_some() {
+        return;
+    }
+    if count < 5 {
+        return;
+    }
+    let days = crate::site::record_usage_day(&host);
+    let now = crate::site::unix_now();
+    if !crate::site::should_suggest_adapter(
+        &host,
+        count,
+        days,
+        crate::site::last_suggested(&host),
+        now,
+    ) {
+        return;
+    }
+    // Sites that already have adapters get `siteAdapters` instead.
+    state.site_suggested.insert(host.clone());
+    if !crate::site::adapters_for_domain(&host).is_empty() {
+        return;
+    }
+    crate::site::mark_suggested(&host);
+    insert_data_field(
+        resp,
+        "siteAdapterSuggestion",
+        crate::site::adapter_suggestion(&host, count, days),
+    );
+}
+
+fn insert_data_field(resp: &mut Value, key: &str, value: Value) {
+    if let Some(obj) = resp.as_object_mut() {
+        let data = obj
+            .entry("data")
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if let Some(d) = data.as_object_mut() {
+            d.insert(key.into(), value);
+        }
+    }
+}
+
 /// After navigation, probe the page for known anti-bot vendor fingerprints
 /// (cookies / script URLs / `window` globals) and set this session's humanize
 /// level accordingly — `Human` when a vendor is detected, else the `Off`
@@ -4463,7 +4673,7 @@ async fn handle_evaluate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
 /// `<iframe>`, or a URL substring matched against the live frame list.
 async fn resolve_frame_spec(
     mgr: &BrowserManager,
-    ref_map: &super::element::RefMap,
+    ref_map: &RefMap,
     iframe_sessions: &HashMap<String, String>,
     spec: &str,
 ) -> Result<String, String> {
@@ -4526,7 +4736,7 @@ async fn resolve_frame_spec(
 /// nothing or a non-frame element, so the caller can fall through to other specs.
 async fn resolve_iframe_selector(
     mgr: &BrowserManager,
-    ref_map: &super::element::RefMap,
+    ref_map: &RefMap,
     session_id: &str,
     selector: &str,
 ) -> Result<Option<String>, String> {
@@ -4616,6 +4826,37 @@ async fn resolve_iframe_selector(
 /// already loaded the adapter and built the `script`; here we just place the page
 /// and evaluate. Never disrupts the user's foreground tab — navigation happens on
 /// the daemon's own tab (same as every other command on the relay).
+/// `site analyze [url]`: scan the current page (after opening `url`, if given)
+/// for what an adapter should read — API calls the page made, state it embeds,
+/// anti-bot vendors — and recommend a data source.
+async fn handle_site_analyze(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    if cmd.get("url").and_then(|v| v.as_str()).is_some() {
+        handle_navigate(cmd, state).await?;
+    }
+    let mgr = state.browser.as_ref().ok_or("site analyze: no browser")?;
+    let raw = mgr.evaluate(crate::site::ANALYZE_JS, None).await?;
+    let strings = |key: &str| -> Vec<String> {
+        raw.get("signals")
+            .and_then(|s| s.get(key))
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let signals = humanize::DetectSignals {
+        cookie_names: strings("cookies"),
+        script_urls: strings("scripts"),
+        window_globals: strings("globals"),
+    };
+    let vendors = humanize::detected_vendors(&signals);
+    let host = raw.get("host").and_then(|v| v.as_str()).unwrap_or("");
+    let adapters = crate::site::adapters_for_domain(host);
+    Ok(crate::site::analyze_report(&raw, &vendors, &adapters))
+}
+
 async fn handle_site(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let domain = cmd
         .get("domain")
@@ -4628,7 +4869,10 @@ async fn handle_site(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         .ok_or("site: missing 'script'")?
         .to_string();
 
-    ensure_site_domain(&domain, state).await?;
+    // `eval --background` sends no domain: run on the page as it is.
+    if !domain.is_empty() {
+        ensure_site_domain(&domain, state).await?;
+    }
 
     // A command from an older CLI carries a plain awaited eval, no run key.
     let Some(run_key) = cmd.get("runKey").and_then(|v| v.as_str()) else {
@@ -4667,7 +4911,7 @@ async fn handle_site(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     let mut backoff = Duration::from_secs(2);
     loop {
         attempt += 1;
-        if attempt > 1 {
+        if attempt > 1 && !domain.is_empty() {
             // A rerun after a navigation may have left the adapter's domain.
             ensure_site_domain(&domain, state).await?;
         }
@@ -5054,10 +5298,16 @@ async fn handle_keep(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     }))
 }
 
-async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
+async fn handle_close(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     // A closed session is no longer a launched one; the next command picks its
     // browser from its own flags again.
     crate::connection::clear_session_launched(&state.session_id);
+    // `close --all` from another session: this session's agent did not ask for
+    // it and is probably mid-task. Leave a marker so its next command says its
+    // tabs were closed, instead of quietly answering from a fresh about:blank.
+    if let Some(reason) = closed_by_other_session_reason(cmd, &state.session_id) {
+        super::daemon::mark_session_closed(&state.session_id, &reason);
+    }
     // A fresh daemon after idle has no manager, but still owns the external tabs
     // recorded by its predecessor. Explicit close must not silently ignore them.
     if state.browser.is_none() {
@@ -5677,6 +5927,7 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     // near-empty and agents get stuck looking for refs that will never exist
     // (dogfood: the Dead Cell game). When the tree is sparse but a canvas
     // dominates the viewport, tell them to switch to the screenshot-driven path.
+    let mut canvas_page = false;
     if ref_count < 3 {
         // One probe, two answers. The second is `document.visibilityState`
         // (issue #215): a tab we drive in the background really is hidden —
@@ -5693,6 +5944,7 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         if let Ok(v) = mgr.evaluate(probe_js, None).await {
             let canvas = v.get("canvas").and_then(|c| c.as_bool()).unwrap_or(false);
             let hidden = v.get("hidden").and_then(|h| h.as_bool()).unwrap_or(false);
+            canvas_page = canvas;
             if let Some(note) = sparse_tree_note(canvas, hidden) {
                 out["note"] = json!(note);
             }
@@ -5714,9 +5966,59 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
                 out["screenshotError"] = json!(e);
             }
         }
+    } else if canvas_page
+        && sparse_screenshot_enabled(
+            // The caller's setting (forwarded by the CLI) wins over the
+            // environment the daemon happened to start with.
+            cmd.get("sparseScreenshot")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .or_else(|| env::var("AGENT_BROWSER_SPARSE_SCREENSHOT").ok())
+                .as_deref(),
+        )
+    {
+        // The tree above is near-empty because the page paints to a canvas, so
+        // the next thing an agent does is ask for a screenshot. Take it now and
+        // save the round trip. Best-effort and time-boxed: the snapshot is the
+        // answer to this command, and a capture that fails or stalls (an
+        // occluded tab's compositor) must never cost the caller that answer.
+        let shot = tokio::time::timeout(
+            Duration::from_millis(SPARSE_SCREENSHOT_TIMEOUT_MS),
+            handle_screenshot(&json!({}), state),
+        )
+        .await;
+        match shot {
+            Ok(Ok(resp)) => {
+                if let Some(p) = resp.get("path").and_then(|v| v.as_str()) {
+                    out["screenshot"] = json!(p);
+                    out["screenshotReason"] = json!("sparse");
+                }
+            }
+            Ok(Err(e)) => {
+                out["sparseScreenshotError"] = json!(e);
+            }
+            Err(_) => {
+                out["sparseScreenshotError"] = json!(format!(
+                    "capture did not finish within {SPARSE_SCREENSHOT_TIMEOUT_MS}ms"
+                ));
+            }
+        }
     }
 
     Ok(out)
+}
+
+/// Upper bound on the automatic screenshot a sparse canvas snapshot attaches.
+const SPARSE_SCREENSHOT_TIMEOUT_MS: u64 = 5_000;
+
+/// Whether a sparse (canvas) snapshot should attach a screenshot on its own.
+/// On by default; `AGENT_BROWSER_SPARSE_SCREENSHOT=0` (or `false`/`off`/`no`)
+/// turns it off for callers that never read images.
+fn sparse_screenshot_enabled(env_value: Option<&str>) -> bool {
+    !matches!(
+        env_value.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+        Some("0" | "false" | "off" | "no")
+    )
 }
 
 /// Why a snapshot came back with almost nothing in it, when the page itself can
@@ -6053,8 +6355,11 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
     // Downscale the saved image so retina/full-page shots fit an agent's image
     // reader and screenshot pixels line up with `click x y` CSS px (issue #42).
     // Explicit --scale / --max-width / --max-height win; otherwise a default cap
-    // (2000px longest edge, AGENT_BROWSER_SCREENSHOT_MAX_EDGE overrides, 0 = off)
-    // applies. Annotated shots are left untouched so ref overlays stay aligned.
+    // (1200px longest edge — width only for --full, so a tall page stays
+    // readable; AGENT_BROWSER_SCREENSHOT_MAX_EDGE overrides, 0 = off; --full-res
+    // skips it) applies. Annotated shots are left untouched so ref overlays stay
+    // aligned. 1200 follows iphone-use: about 1.2k image tokens for a viewport
+    // instead of ~3.3k at 2000, with body text still legible.
     let mut resized: Option<(u32, u32)> = None;
     if !annotate {
         let scale = cmd.get("scale").and_then(|v| v.as_f64());
@@ -6066,16 +6371,28 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
             .get("maxHeight")
             .and_then(|v| v.as_u64())
             .map(|v| v as u32);
-        let default_edge = if scale.is_none() && max_w.is_none() && max_h.is_none() {
+        let full_res = cmd.get("fullRes").and_then(|v| v.as_bool()) == Some(true);
+        let default_edge = if scale.is_none() && max_w.is_none() && max_h.is_none() && !full_res {
             std::env::var("AGENT_BROWSER_SCREENSHOT_MAX_EDGE")
                 .ok()
                 .and_then(|s| s.parse::<u32>().ok())
-                .or(Some(2000))
+                .or(Some(DEFAULT_SCREENSHOT_EDGE))
                 .filter(|&e| e > 0)
         } else {
             None
         };
-        resized = downscale_screenshot(&result.path, scale, max_w, max_h, default_edge);
+        let (default_edge, default_width) = if options.full_page {
+            (None, default_edge)
+        } else {
+            (default_edge, None)
+        };
+        resized = downscale_screenshot(
+            &result.path,
+            scale,
+            max_w.or(default_width),
+            max_h,
+            default_edge,
+        );
     }
 
     // Independent of the URL guard above (issue #184): if the saved image is one
@@ -6151,6 +6468,9 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
 /// `default_edge` cap — whichever yields the smaller image. Only ever shrinks;
 /// no-op (returns None) if the image is already within bounds or can't be read.
 /// Returns the new (width, height) when it actually resized.
+/// Default cap on a screenshot's longest edge (its width for `--full`).
+const DEFAULT_SCREENSHOT_EDGE: u32 = 1200;
+
 fn downscale_screenshot(
     path: &str,
     scale: Option<f64>,
@@ -6463,6 +6783,7 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
                 button,
                 click_count,
                 &state.iframe_sessions,
+                true,
             )
             .await?,
         );
@@ -6833,12 +7154,262 @@ async fn handle_type(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     Ok(out)
 }
 
+/// Shared page-side helpers for `pick`: whitespace normalisation and the
+/// option-candidate collector. Candidates are tagged `data-cu-pick-idx=<i>` so
+/// the Rust side can rank their texts and click one by index.
+const PICK_JS_PRELUDE: &str = r#"
+    const norm = s => String(s ?? '')
+        .replace(/[\u200B\u200C\u200D\u2060\uFEFF]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+    const doc = el.ownerDocument || document;
+    const visible = o => !!(o.offsetParent !== null || (o.getClientRects && o.getClientRects().length));
+    const linked = () => ['aria-controls', 'aria-owns']
+        .flatMap(a => (el.getAttribute(a) || '').split(/\s+/))
+        .filter(Boolean)
+        .map(id => doc.getElementById(id))
+        .filter(Boolean);
+    const collect = () => {
+        let opts = [];
+        for (const scope of linked()) {
+            if (scope.getAttribute('role') === 'option') opts.push(scope);
+            opts.push(...scope.querySelectorAll('[role=option]'));
+        }
+        if (!opts.some(visible)) opts = [...doc.querySelectorAll('[role=option]')];
+        if (!opts.some(visible)) opts = [...doc.querySelectorAll('li[role=option], [class*=option], [class*=item]')];
+        return [...new Set(opts)].filter(o => o !== el && visible(o) && norm(o.textContent)).slice(0, 200);
+    };
+    const hiddenFields = () => {
+        const scope = el.form || el.closest('form, fieldset, [role=group], [role=search]') || doc;
+        const out = {};
+        for (const h of scope.querySelectorAll('input[type=hidden]')) {
+            const k = h.name || h.id;
+            if (k) out[k] = String(h.value).slice(0, 80);
+        }
+        return out;
+    };
+"#;
+
+/// Open (optionally) and poll for option candidates. Resolves once a
+/// candidate containing `want` is visible and the list stopped changing
+/// between two polls (an async suggestion list refines as results land), or
+/// at the deadline. Also reports whether the target is a type-to-search
+/// (autocomplete) field, so the caller knows typing is the way to summon
+/// options.
+fn pick_collect_function() -> String {
+    format!(
+        r#"async function(want, open, waitMs) {{
+            const el = this;
+            {prelude}
+            const lw = norm(want).toLowerCase();
+            const role = (el.getAttribute('role') || '').toLowerCase();
+            const ac = (el.getAttribute('aria-autocomplete') || '').toLowerCase();
+            const textTypes = ['', 'text', 'search', 'email', 'url', 'tel', 'number'];
+            const editable = !el.disabled && !el.readOnly && (
+                (el.tagName === 'INPUT' && textTypes.includes((el.getAttribute('type') || '').toLowerCase()))
+                || el.tagName === 'TEXTAREA' || el.isContentEditable);
+            const ownsListbox = linked().some(t =>
+                t.getAttribute('role') === 'listbox' || t.querySelector('[role=option]'));
+            const typeahead = editable && (ac === 'list' || ac === 'both' || role === 'combobox' || ownsListbox);
+
+            if (open) {{
+                const fire = (n, t) => n.dispatchEvent(new MouseEvent(t, {{ bubbles: true, cancelable: true, view: window }}));
+                (el.focus && el.focus());
+                ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach(t => fire(el, t));
+            }}
+            // An empty type-to-search field rarely lists anything on open, so
+            // don't spend the full wait there before typing.
+            const deadline = Date.now() + (open && typeahead ? Math.min(waitMs, 700) : waitMs);
+            let opts = collect(), prev = null;
+            while (Date.now() < deadline) {{
+                const texts = opts.map(o => norm(o.textContent));
+                if (texts.some(t => t.toLowerCase().includes(lw))) {{
+                    const sig = texts.join('\u0001');
+                    if (sig === prev) break;
+                    prev = sig;
+                }}
+                await new Promise(r => setTimeout(r, 120));
+                opts = collect();
+            }}
+            for (const o of doc.querySelectorAll('[data-cu-pick-idx]')) o.removeAttribute('data-cu-pick-idx');
+            opts.forEach((o, i) => o.setAttribute('data-cu-pick-idx', String(i)));
+            return {{
+                texts: opts.map(o => norm(o.textContent)),
+                typeahead,
+                topFrame: window.top === window,
+                hidden: hiddenFields(),
+            }};
+        }}"#,
+        prelude = PICK_JS_PRELUDE
+    )
+}
+
+/// Click candidate `idx` with a synthetic pointer/mouse sequence — what `pick`
+/// has always done for a portal menu, and the fallback when the option lives in
+/// a frame the trusted coordinate click can't address.
+const PICK_DOM_CLICK_JS: &str = r#"function(idx) {
+    const doc = this.ownerDocument || document;
+    const opt = doc.querySelector('[data-cu-pick-idx="' + idx + '"]');
+    if (!opt) return false;
+    const fire = t => opt.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }));
+    (opt.scrollIntoView && opt.scrollIntoView({ block: 'center' }));
+    ['pointermove', 'pointerover', 'mouseover', 'pointerdown', 'mousedown', 'mouseup', 'click'].forEach(fire);
+    return true;
+}"#;
+
+/// After the click: did the field take the option? Polls briefly for the
+/// field's value to match the option and for the list to close (or the option
+/// to be marked selected, or a hidden companion field to change), then
+/// reports what it saw and removes the candidate tags.
+fn pick_verify_function() -> String {
+    format!(
+        r#"async function(idx, chosen, hiddenBefore) {{
+            const el = this;
+            {prelude}
+            const lc = norm(chosen).toLowerCase();
+            const deadline = Date.now() + 1500;
+            let r;
+            for (;;) {{
+                const value = norm(el.value !== undefined ? el.value : el.textContent);
+                const lv = value.toLowerCase();
+                const opt = doc.querySelector('[data-cu-pick-idx="' + idx + '"]');
+                const closed = !opt || !opt.isConnected || !visible(opt)
+                    || opt.getAttribute('aria-selected') === 'true';
+                const after = hiddenFields();
+                const hiddenChanged = Object.keys(after)
+                    .filter(k => after[k] !== (hiddenBefore || {{}})[k])
+                    .map(k => k + '=' + after[k]);
+                const valueOk = !!lv && (lv === lc || lv.includes(lc) || lc.includes(lv));
+                r = {{ value, closed, hiddenChanged, verified: valueOk && (closed || hiddenChanged.length > 0) }};
+                if (r.verified || Date.now() > deadline) break;
+                await new Promise(res => setTimeout(res, 100));
+            }}
+            for (const o of doc.querySelectorAll('[data-cu-pick-idx]')) o.removeAttribute('data-cu-pick-idx');
+            return r;
+        }}"#,
+        prelude = PICK_JS_PRELUDE
+    )
+}
+
+/// How well an option's visible text matches what `pick` was asked for:
+/// 0 exact, 1 case-insensitive, 2 case-insensitive prefix, 3 substring.
+/// `None` when it doesn't match at all. Whitespace runs are collapsed first.
+fn pick_match_rank(want: &str, text: &str) -> Option<u8> {
+    let collapse = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let (w, t) = (collapse(want), collapse(text));
+    if w.is_empty() {
+        return None;
+    }
+    if t == w {
+        return Some(0);
+    }
+    let (lw, lt) = (w.to_lowercase(), t.to_lowercase());
+    if lt == lw {
+        Some(1)
+    } else if lt.starts_with(&lw) {
+        Some(2)
+    } else if lt.contains(&lw) {
+        Some(3)
+    } else {
+        None
+    }
+}
+
+/// The best candidate for `want`: lowest rank wins, and among equals the
+/// shortest text (the most specific option), then document order.
+fn pick_best_option(want: &str, texts: &[String]) -> Option<usize> {
+    texts
+        .iter()
+        .enumerate()
+        .filter_map(|(i, t)| pick_match_rank(want, t).map(|r| (r, t.chars().count(), i)))
+        .min()
+        .map(|(_, _, i)| i)
+}
+
+fn pick_texts(v: &Value) -> Vec<String> {
+    v.get("texts")
+        .and_then(|t| t.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| s.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The visible options, deduplicated and capped, for an error message.
+fn pick_available(texts: &[String]) -> String {
+    let mut seen: Vec<&str> = Vec::new();
+    for t in texts {
+        if !seen.contains(&t.as_str()) {
+            seen.push(t);
+        }
+    }
+    let more = seen.len().saturating_sub(15);
+    let mut out = seen
+        .iter()
+        .take(15)
+        .map(|t| format!("{t:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if more > 0 {
+        out.push_str(&format!(" (+{more} more)"));
+    }
+    if out.is_empty() {
+        "none".to_string()
+    } else {
+        out
+    }
+}
+
+fn pick_hidden_changed(verify: &Value) -> Option<Value> {
+    verify
+        .get("hiddenChanged")
+        .filter(|h| h.as_array().is_some_and(|a| !a.is_empty()))
+        .cloned()
+}
+
+async fn pick_call(
+    client: &CdpClient,
+    session_id: &str,
+    object_id: &str,
+    func: String,
+    args: Vec<Value>,
+) -> Result<Value, String> {
+    let result: super::cdp::types::EvaluateResult = client
+        .send_command_typed(
+            "Runtime.callFunctionOn",
+            &super::cdp::types::CallFunctionOnParams {
+                function_declaration: func,
+                object_id: Some(object_id.to_string()),
+                arguments: Some(
+                    args.into_iter()
+                        .map(|v| super::cdp::types::CallArgument {
+                            value: Some(v),
+                            object_id: None,
+                        })
+                        .collect(),
+                ),
+                return_by_value: Some(true),
+                await_promise: Some(true),
+            },
+            Some(session_id),
+        )
+        .await?;
+    if let Some(ref ex) = result.exception_details {
+        return Err(format!("pick failed: {}", ex.text));
+    }
+    Ok(result.result.value.unwrap_or(Value::Null))
+}
+
 /// Atomic combobox select: `pick <selector> --option "<text>"`. Opens the control
 /// (so a portal-rendered menu mounts), polls for the option by visible text, then
 /// fires the full pointer/mouse event sequence on it — covering native `<select>`,
 /// ARIA combobox/listbox, and react-select, which a bare `click`+`press Enter`
-/// can't do reliably. Runs as one in-page async routine so the open→render→pick
-/// dance happens without round-trips that let the menu collapse between commands.
+/// can't do reliably. A type-to-search (autocomplete) field shows nothing until
+/// typed into, so when opening it surfaces no match, `pick` types the text the
+/// way `type` does (trusted input, field cleared first), waits for suggestions,
+/// clicks the best one, and verifies the field took it.
 async fn handle_pick(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
@@ -6860,74 +7431,204 @@ async fn handle_pick(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     )
     .await?;
 
-    let func = format!(
-        r#"async function() {{
-            const want = {opt};
+    // Native <select>: set the best-matching option and dispatch input/change.
+    let native = pick_call(
+        &mgr.client,
+        &effective_session_id,
+        &object_id,
+        r#"function(want) {
+            if (this.tagName !== 'SELECT') return null;
             const norm = s => (s || '').replace(/\s+/g, ' ').trim();
-            const matches = el => norm(el.textContent).toLowerCase().includes(want.toLowerCase());
-            const el = this;
-            const fire = (n, t) => n.dispatchEvent(new MouseEvent(t, {{ bubbles: true, cancelable: true, view: window }}));
+            const lw = norm(want).toLowerCase();
+            const opts = [...this.options];
+            const opt = opts.find(o => norm(o.textContent) === norm(want))
+                || opts.find(o => norm(o.textContent).toLowerCase() === lw)
+                || opts.find(o => norm(o.textContent).toLowerCase().startsWith(lw))
+                || opts.find(o => norm(o.textContent).toLowerCase().includes(lw));
+            if (!opt) return { ok: false, available: opts.map(o => norm(o.textContent)) };
+            this.value = opt.value;
+            this.dispatchEvent(new Event('input', { bubbles: true }));
+            this.dispatchEvent(new Event('change', { bubbles: true }));
+            return { ok: true, picked: norm(opt.textContent), value: this.value };
+        }"#
+        .to_string(),
+        vec![json!(option)],
+    )
+    .await?;
+    if native.is_object() {
+        if native.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+            return Ok(json!({
+                "picked": native.get("picked"),
+                "value": native.get("value"),
+                "selector": selector,
+                "kind": "select",
+            }));
+        }
+        return Err(format!(
+            "no <option> matched {option:?}. available options: {}",
+            pick_available(&pick_texts(&json!({ "texts": native.get("available") })))
+        ));
+    }
 
-            // Native <select>: set the matching option and dispatch input/change.
-            if (el.tagName === 'SELECT') {{
-                const opt = [...el.options].find(matches);
-                if (!opt) return {{ ok: false, error: 'no <option> matched ' + JSON.stringify(want) }};
-                el.value = opt.value;
-                el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                return {{ ok: true, picked: norm(opt.textContent), value: el.value, kind: 'select' }};
-            }}
-
-            // Custom widget: open it.
-            (el.focus && el.focus());
-            ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach(t => fire(el, t));
-
-            // Poll for the option to render anywhere in the document (portals
-            // mount the menu outside the trigger), then click it.
-            const sel = '[role=option], [role=listbox] [role=option], li[role=option], [class*=option], [class*=item]';
-            const find = () => [...document.querySelectorAll(sel)].find(o => o.offsetParent !== null && matches(o));
-            const deadline = Date.now() + 2500;
-            let opt = find();
-            while (!opt && Date.now() < deadline) {{
-                await new Promise(r => setTimeout(r, 80));
-                opt = find();
-            }}
-            if (!opt) return {{ ok: false, error: 'option ' + JSON.stringify(want) + ' did not appear after opening the control' }};
-            (opt.scrollIntoView && opt.scrollIntoView({{ block: 'center' }}));
-            ['pointermove', 'pointerover', 'mouseover', 'pointerdown', 'mousedown', 'mouseup', 'click'].forEach(t => fire(opt, t));
-            return {{ ok: true, picked: norm(opt.textContent), kind: 'custom' }};
-        }}"#,
-        opt = serde_json::to_string(option).unwrap_or_default(),
-    );
-
-    let result: super::cdp::types::EvaluateResult = mgr
-        .client
-        .send_command_typed(
-            "Runtime.callFunctionOn",
-            &super::cdp::types::CallFunctionOnParams {
-                function_declaration: func,
-                object_id: Some(object_id),
-                arguments: None,
-                return_by_value: Some(true),
-                await_promise: Some(true),
-            },
-            Some(&effective_session_id),
+    // Custom widget: open it and look for the option.
+    let opened = pick_call(
+        &mgr.client,
+        &effective_session_id,
+        &object_id,
+        pick_collect_function(),
+        vec![json!(option), json!(true), json!(2500)],
+    )
+    .await?;
+    let texts = pick_texts(&opened);
+    let typeahead = opened
+        .get("typeahead")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if let Some(idx) = pick_best_option(option, &texts) {
+        pick_call(
+            &mgr.client,
+            &effective_session_id,
+            &object_id,
+            PICK_DOM_CLICK_JS.to_string(),
+            vec![json!(idx)],
         )
         .await?;
+        let verify = pick_call(
+            &mgr.client,
+            &effective_session_id,
+            &object_id,
+            pick_verify_function(),
+            vec![json!(idx), json!(texts[idx]), opened["hidden"].clone()],
+        )
+        .await
+        .unwrap_or(Value::Null);
+        let mut out = json!({
+            "picked": texts[idx],
+            "selector": selector,
+            "kind": "custom",
+            "via": "open",
+        });
+        if let Some(h) = pick_hidden_changed(&verify) {
+            out["hiddenChanged"] = h;
+        }
+        return Ok(out);
+    }
+    if !typeahead {
+        return Err(format!(
+            "option {option:?} did not appear after opening the control. visible options: {}. \
+             If this field only lists options after you type, `type {selector} \"<text>\"`, \
+             then `snapshot -i` and click the suggestion",
+            pick_available(&texts)
+        ));
+    }
 
-    if let Some(ref ex) = result.exception_details {
-        return Err(format!("pick failed: {}", ex.text));
-    }
-    let val = result.result.value.unwrap_or(Value::Null);
-    if val.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
-        Ok(json!({ "picked": val.get("picked"), "selector": selector }))
+    // Type-to-search: type the text like `type --clear` does (trusted
+    // insertText), then wait for the suggestion list.
+    interaction::type_text(
+        &mgr.client,
+        &session_id,
+        &state.ref_map,
+        selector,
+        option,
+        true,
+        None,
+        &state.iframe_sessions,
+        false,
+    )
+    .await?;
+    let listed = pick_call(
+        &mgr.client,
+        &effective_session_id,
+        &object_id,
+        pick_collect_function(),
+        vec![json!(option), json!(false), json!(5000)],
+    )
+    .await?;
+    let texts = pick_texts(&listed);
+    let Some(idx) = pick_best_option(option, &texts) else {
+        return Err(format!(
+            "typed {option:?} into {selector} (an autocomplete field), but no suggestion matching it \
+             appeared within 5s. suggestions shown: {}. The text is left in the field; the form may \
+             reject it without a chosen suggestion. Try a shorter prefix (`pick {selector} --option \
+             \"<first letters>\"` matches by prefix) or `snapshot -i` to see what the field offers",
+            pick_available(&texts)
+        ));
+    };
+    let chosen = texts[idx].clone();
+
+    // Click the suggestion like a user: a trusted pointer click when the
+    // option is in the top frame (a CSS selector resolves there), otherwise
+    // the in-page event sequence.
+    let top_frame = listed
+        .get("topFrame")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let mut dispatch = "dom";
+    let mut click_warning = None;
+    if top_frame && effective_session_id == session_id {
+        let outcome = interaction::click_reporting(
+            &mgr.client,
+            &session_id,
+            &state.ref_map,
+            &format!("[data-cu-pick-idx=\"{idx}\"]"),
+            "left",
+            1,
+            &state.iframe_sessions,
+            false,
+        )
+        .await?;
+        dispatch = outcome.dispatch;
+        click_warning = outcome.warning;
     } else {
-        Err(val
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or("pick failed")
-            .to_string())
+        pick_call(
+            &mgr.client,
+            &effective_session_id,
+            &object_id,
+            PICK_DOM_CLICK_JS.to_string(),
+            vec![json!(idx)],
+        )
+        .await?;
     }
+
+    let verify = pick_call(
+        &mgr.client,
+        &effective_session_id,
+        &object_id,
+        pick_verify_function(),
+        vec![json!(idx), json!(chosen), listed["hidden"].clone()],
+    )
+    .await?;
+    let verified = verify
+        .get("verified")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let mut out = json!({
+        "picked": chosen,
+        "selector": selector,
+        "kind": "autocomplete",
+        "via": "typed",
+        "typed": option,
+        "value": verify.get("value"),
+        "dispatch": dispatch,
+        "verified": verified,
+    });
+    if let Some(h) = pick_hidden_changed(&verify) {
+        out["hiddenChanged"] = h;
+    }
+    if !verified {
+        let value = verify.get("value").and_then(|v| v.as_str()).unwrap_or("");
+        let mut w = format!(
+            "clicked suggestion {chosen:?}, but the field did not confirm the choice (value now \
+             {value:?}, suggestion list still open). Check with `snapshot -i` / `get value {selector}`"
+        );
+        if let Some(cw) = click_warning {
+            w.push_str(&format!("; {cw}"));
+        }
+        out["warning"] = json!(w);
+    } else if let Some(cw) = click_warning {
+        out["warning"] = json!(cw);
+    }
+    Ok(out)
 }
 
 async fn handle_press(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -7136,6 +7837,10 @@ async fn handle_hover(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 }
 
 async fn handle_scroll(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    if let Some(target) = cmd.get("until").and_then(|v| v.as_str()) {
+        let target = target.to_string();
+        return scroll_until(cmd, state, &target).await;
+    }
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
     let selector = cmd.get("selector").and_then(|v| v.as_str());
@@ -7206,6 +7911,275 @@ async fn handle_scroll(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     )
     .await?;
     Ok(json!({ "scrolled": true, "via": "page" }))
+}
+
+/// Step budget for `scroll --until` when `--max-steps` isn't given.
+const SCROLL_UNTIL_MAX_STEPS: u64 = 30;
+/// Ceiling on the default (no `--timeout`) budget, so a long default timeout
+/// can't outlast the CLI's socket read and lose the "not found" answer.
+const SCROLL_UNTIL_DEFAULT_CAP_MS: u64 = 30_000;
+/// Pause after each step so lazy-loaded rows and smooth scrolling can land
+/// before the target is probed again.
+const SCROLL_UNTIL_SETTLE_MS: u64 = 250;
+/// Steps in a row where the scroll position did not move before the page is
+/// called exhausted. Two, not one: an infinite list may append rows a beat
+/// after the first step hits the bottom.
+const SCROLL_UNTIL_STUCK_STEPS: u32 = 2;
+
+/// Why `scroll --until` gave up without finding its target.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ScrollUntilStop {
+    MaxSteps,
+    Timeout,
+    End,
+}
+
+/// The error `scroll --until` returns when the target never came into view.
+/// Pure so the wording — which has to name how far it went and why it stopped,
+/// or the agent can't tell "not on this page" from "gave up early" — is
+/// testable without a browser.
+fn scroll_until_miss(
+    target: &str,
+    direction: &str,
+    steps: u64,
+    distance_px: f64,
+    stop: ScrollUntilStop,
+    found_offscreen: bool,
+    container: Option<&str>,
+) -> String {
+    let why = match stop {
+        ScrollUntilStop::MaxSteps => format!("hit the {steps}-step limit (raise with --max-steps)"),
+        ScrollUntilStop::Timeout => "ran out of time (raise with --timeout <ms>)".to_string(),
+        ScrollUntilStop::End => {
+            if steps <= SCROLL_UNTIL_STUCK_STEPS as u64 && distance_px == 0.0 {
+                match container {
+                    Some(_) => "the container did not move — check that --selector names the element that actually scrolls".to_string(),
+                    None => "the page did not move — if this list scrolls inside a container, pass --selector <container>".to_string(),
+                }
+            } else {
+                format!(
+                    "reached the end of the {}",
+                    if container.is_some() {
+                        "container"
+                    } else {
+                        "page"
+                    }
+                )
+            }
+        }
+    };
+    let state = if found_offscreen {
+        "exists but never came into the viewport"
+    } else {
+        "was not found"
+    };
+    format!(
+        "scroll --until: {target} {state} after scrolling {direction} {steps} step(s) ({px}px); {why}",
+        px = distance_px.abs().round() as i64,
+    )
+}
+
+/// `scroll [dir] --until <target>`: scroll step by step until `target` (CSS /
+/// XPath / `text=` / bare label / @ref) is in the viewport, or a step / time
+/// budget runs out. One call instead of the agent's scroll → snapshot → look
+/// loop, and it stops where the target is rather than a fixed distance past it.
+async fn scroll_until(cmd: &Value, state: &mut DaemonState, target: &str) -> Result<Value, String> {
+    if cmd.get("at").is_some() || cmd.get("frame").is_some() {
+        return Err(
+            "scroll --until scrolls the page (or a --selector container); it can't be combined \
+             with --at/--frame"
+                .to_string(),
+        );
+    }
+    let direction = cmd
+        .get("direction")
+        .and_then(|v| v.as_str())
+        .unwrap_or("down")
+        .to_string();
+    let container = cmd
+        .get("selector")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let max_steps = cmd
+        .get("maxSteps")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(SCROLL_UNTIL_MAX_STEPS);
+    let timeout_ms = match cmd.get("timeout").and_then(|v| v.as_u64()) {
+        Some(ms) => ms,
+        None => state.default_timeout_ms.min(SCROLL_UNTIL_DEFAULT_CAP_MS),
+    };
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
+
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
+
+    // Step size: an explicit amount wins; otherwise most of a viewport, so each
+    // step shows new content while keeping some overlap with the last one.
+    let amount = match cmd.get("amount").and_then(|v| v.as_f64()) {
+        Some(a) if a > 0.0 => a,
+        _ => {
+            let (cx, cy) = viewport_center(mgr, &session_id).await?;
+            let span = if matches!(direction.as_str(), "left" | "right") {
+                cx * 2.0
+            } else {
+                cy * 2.0
+            };
+            (span * 0.8).round().max(100.0)
+        }
+    };
+    let (dx, dy, vertical) = match direction.as_str() {
+        "up" => (0.0, -amount, true),
+        "down" => (0.0, amount, true),
+        "left" => (-amount, 0.0, false),
+        "right" => (amount, 0.0, false),
+        other => {
+            return Err(format!(
+                "scroll --until: unknown direction `{other}` (use up, down, left or right)"
+            ))
+        }
+    };
+
+    let position = |pos: Option<(f64, f64)>| pos.map(|(x, y)| if vertical { y } else { x });
+    let start = position(
+        scroll_position(
+            mgr,
+            &session_id,
+            &state.ref_map,
+            container.as_deref(),
+            &state.iframe_sessions,
+        )
+        .await,
+    );
+    let mut last = start;
+    let mut steps: u64 = 0;
+    let mut stuck: u32 = 0;
+
+    let (stop, found_offscreen) = loop {
+        let probe = super::element::probe_viewport(
+            &mgr.client,
+            &session_id,
+            &state.ref_map,
+            target,
+            &state.iframe_sessions,
+        )
+        .await?;
+        if probe.in_viewport {
+            let distance = match (start, last) {
+                (Some(s), Some(l)) => l - s,
+                _ => steps as f64 * amount,
+            };
+            return Ok(json!({
+                "scrolled": steps > 0,
+                "found": true,
+                "until": target,
+                "direction": direction,
+                "steps": steps,
+                "distance": distance.abs().round() as i64,
+                "at": [probe.x.round() as i64, probe.y.round() as i64],
+            }));
+        }
+        if stuck >= SCROLL_UNTIL_STUCK_STEPS {
+            break (ScrollUntilStop::End, probe.found);
+        }
+        if steps >= max_steps {
+            break (ScrollUntilStop::MaxSteps, probe.found);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            break (ScrollUntilStop::Timeout, probe.found);
+        }
+        interaction::scroll(
+            &mgr.client,
+            &session_id,
+            &state.ref_map,
+            container.as_deref(),
+            dx,
+            dy,
+            &state.iframe_sessions,
+        )
+        .await?;
+        steps += 1;
+        tokio::time::sleep(tokio::time::Duration::from_millis(SCROLL_UNTIL_SETTLE_MS)).await;
+        let now = position(
+            scroll_position(
+                mgr,
+                &session_id,
+                &state.ref_map,
+                container.as_deref(),
+                &state.iframe_sessions,
+            )
+            .await,
+        );
+        // Unknown position (the read failed) never counts as stuck: better to
+        // spend the step budget than to stop on a guess.
+        if now.is_some() && now == last {
+            stuck += 1;
+        } else {
+            stuck = 0;
+        }
+        last = now;
+    };
+
+    let distance = match (start, last) {
+        (Some(s), Some(l)) => l - s,
+        _ => steps as f64 * amount,
+    };
+    Err(scroll_until_miss(
+        target,
+        &direction,
+        steps,
+        distance,
+        stop,
+        found_offscreen,
+        container.as_deref(),
+    ))
+}
+
+/// Current scroll offset `(x, y)` of the page, or of `container` when given.
+/// `None` when it can't be read; callers treat that as "unknown", never as
+/// "did not move".
+async fn scroll_position(
+    mgr: &BrowserManager,
+    session_id: &str,
+    ref_map: &RefMap,
+    container: Option<&str>,
+    iframe_sessions: &HashMap<String, String>,
+) -> Option<(f64, f64)> {
+    let value = match container {
+        Some(sel) => {
+            let (object_id, effective) = super::element::resolve_element_object_id(
+                &mgr.client,
+                session_id,
+                ref_map,
+                sel,
+                iframe_sessions,
+            )
+            .await
+            .ok()?;
+            mgr.client
+                .send_command_typed::<_, Value>(
+                    "Runtime.callFunctionOn",
+                    &json!({
+                        "functionDeclaration": "function() { return [this.scrollLeft, this.scrollTop]; }",
+                        "objectId": object_id,
+                        "returnByValue": true,
+                    }),
+                    Some(&effective),
+                )
+                .await
+                .ok()?
+        }
+        None => mgr
+            .client
+            .send_command_typed::<_, Value>(
+                "Runtime.evaluate",
+                &json!({ "expression": "[window.scrollX, window.scrollY]", "returnByValue": true }),
+                Some(session_id),
+            )
+            .await
+            .ok()?,
+    };
+    let arr = value.get("result")?.get("value")?.as_array()?;
+    Some((arr.first()?.as_f64()?, arr.get(1)?.as_f64()?))
 }
 
 /// Viewport center in CSS pixels, used as the default wheel landing point for
@@ -7856,7 +8830,51 @@ async fn wait_for_text(
         "(document.body.innerText || '').includes({})",
         serde_json::to_string(text).unwrap_or_default()
     );
-    poll_until_true(client, session_id, &check_fn, timeout_ms).await
+    let result = poll_until_true(client, session_id, &check_fn, timeout_ms).await;
+    let Err(e) = result else {
+        return Ok(());
+    };
+    // A wait on the wrong capitalisation ("Grand Total" for "Grand total")
+    // times out with nothing to show for it, and agents then fall back to
+    // `eval`. Name the page's actual wording when it differs only in case or
+    // spacing.
+    let probe = format!(
+        "(() => {{ const want = {}.toLowerCase().replace(/\\s+/g, ' ').trim(); \
+         const body = (document.body.innerText || '').replace(/\\s+/g, ' '); \
+         const i = body.toLowerCase().indexOf(want); \
+         return want && i >= 0 ? body.slice(i, i + want.length) : null; }})()",
+        serde_json::to_string(text).unwrap_or_default()
+    );
+    let near = tokio::time::timeout(
+        Duration::from_secs(3),
+        client.send_command(
+            "Runtime.evaluate",
+            Some(serde_json::json!({ "expression": probe, "returnByValue": true })),
+            Some(session_id),
+        ),
+    )
+    .await
+    .ok()
+    .and_then(|r| r.ok())
+    .and_then(|v| {
+        v.pointer("/result/value")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    });
+    Err(near_text_hint(e, text, near.as_deref()))
+}
+
+/// Add the page's actual wording to a `wait --text` timeout when it differs
+/// from the requested text only in case or spacing.
+fn near_text_hint(error: String, wanted: &str, near: Option<&str>) -> String {
+    match near {
+        Some(n) if n != wanted => format!(
+            "{error}: the page does show \"{n}\", which differs from \"{wanted}\" only in \
+             case or spacing (`--text` is exact). Use `wait --text \"{n}\"`, or read it now: \
+             the text is already on the page."
+        ),
+        _ => error,
+    }
 }
 
 async fn wait_for_function(
@@ -9606,6 +10624,7 @@ async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value
                 cmd.get("activate")
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
+                force_activate(cmd),
             )
             .await;
         let new_target = mgr.active_target_id().ok().map(ToString::to_string);
@@ -9826,12 +10845,21 @@ async fn handle_tab_adopt(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
-        let warning = state
+        let activation = state
             .browser
             .as_ref()
             .ok_or("Browser not launched")?
-            .activate_active_tab()
-            .await?;
+            .activate_active_tab(force_activate(cmd))
+            .await;
+        // The adopt itself already happened; a refused activation (another
+        // session's tab in front) is reported on it rather than undoing it.
+        let warning = match activation {
+            Ok(warning) => warning,
+            Err(e) if e.starts_with("foreground_in_use:") => {
+                Some(format!("adopted, but left in the background: {e}"))
+            }
+            Err(e) => return Err(e),
+        };
         if let (Some(w), Some(obj)) = (warning, result.as_object_mut()) {
             append_warning(obj, &w);
         }
@@ -11257,6 +12285,61 @@ async fn handle_innerhtml(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     Ok(json!({ "html": html }))
 }
 
+/// `--force` on `tab select|adopt --activate`: bring the tab forward even
+/// though another live session's tab is in front of that window.
+fn force_activate(cmd: &Value) -> bool {
+    cmd.get("forceActivate")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// Why this session's browser was closed by someone else, when the `close`
+/// came from `close --all` run in a different session (`closedBy`). `None`
+/// for the session's own `close`: its agent asked for it and knows.
+fn closed_by_other_session_reason(cmd: &Value, own_session: &str) -> Option<String> {
+    let by = cmd.get("closedBy").and_then(Value::as_str)?.trim();
+    if by.is_empty() || by == own_session {
+        return None;
+    }
+    Some(format!(
+        "`chrome-use close --all` run from session `{by}` closed it at {}",
+        chrono::Local::now().format("%H:%M:%S")
+    ))
+}
+
+/// The warning on the first reply after this session's browser or tabs were
+/// replaced (issue #216). Pure so the wording is testable.
+///
+/// On the extension relay nothing was launched: the session's tabs in the
+/// user's Chrome were closed and this command opened a blank one. That case
+/// matters most, because several agents share that Chrome, and one of them
+/// closing everything otherwise looks exactly like the page resetting itself:
+/// the agent fills the form again and submits it twice.
+fn replaced_browser_note(why: &str, on_relay: bool) -> String {
+    let mut note = if on_relay {
+        format!(
+            "This session's previous tabs are gone ({why}); this command ran in a new blank \
+             tab. Anything open there, including typed input, is not here. If you were partway \
+             through a form or had just submitted one, check whether it already went through \
+             before doing it again."
+        )
+    } else {
+        format!(
+            "This session's previous browser is gone ({why}) and a fresh one was launched \
+             for this command — anything open in the old window, including typed input, is \
+             not here."
+        )
+    };
+    if why.starts_with("the idle timeout") {
+        note.push_str(
+            " A launched browser is reaped after the daemon sits idle \
+             (AGENT_BROWSER_IDLE_TIMEOUT_MS, default 600000ms; set 0 to keep it). While a \
+             human is working in the window, `session handoff` also holds it open.",
+        );
+    }
+    note
+}
+
 /// Run a command, and once more if another extension's frame blocked the tab
 /// (#373). A password manager's inline menu makes Chrome refuse every debugger
 /// command on the tab; `cycle_pinned_tab_visibility` closes it with no debugger
@@ -11266,6 +12349,22 @@ async fn handle_innerhtml(cmd: &Value, state: &mut DaemonState) -> Result<Value,
 /// state machine was enough to overflow a 2 MiB test-thread stack in debug
 /// builds. Here the two runs are sequential, never nested.
 pub async fn execute_command_recovering(cmd: &Value, state: &mut DaemonState) -> Value {
+    // A `@ref` that resolved to a node other than the one its snapshot
+    // recorded is reported on the response (`data.relocated`), never silent.
+    // A guess it refused to act on was offered as a fresh `@ref`; adopt those
+    // into the map so the suggestion works on the next command.
+    let (mut out, effects) = super::ref_hints::collect_ref_effects(Box::pin(
+        execute_command_recovering_scrubbed(cmd, state),
+    ))
+    .await;
+    super::ref_hints::attach_relocations(&mut out, &effects.relocations);
+    for minted in effects.mints {
+        state.ref_map.adopt_minted(minted);
+    }
+    out
+}
+
+async fn execute_command_recovering_scrubbed(cmd: &Value, state: &mut DaemonState) -> Value {
     // `fill --from-env`: the whole command, `--observe` included, runs with
     // every field treated as sensitive, and the response is scrubbed of the
     // value as a last line of defence.
@@ -13066,6 +14165,7 @@ async fn execute_subaction(
                 "left",
                 1,
                 &state.iframe_sessions,
+                true,
             )
             .await?;
             let mut out = json!({ "clicked": selector, "dispatch": outcome.dispatch });
@@ -13972,34 +15072,62 @@ const YIDUN_PROBE: &str = r#"(function(){
   const vis=(sel)=>{let best=null,bw=-1;document.querySelectorAll(sel).forEach(e=>{
     const r=e.getBoundingClientRect(); if(r.width>bw){bw=r.width;best=e;}}); return best;};
   const h=vis('.yidun_slider');
-  const bgEl=vis('img.yidun_bg-img');     // for src + natural width
-  const jig=vis('img.yidun_jigsaw');
+  const root=h?.closest('.yidun');
+  const bgEl=root?.querySelector('img.yidun_bg-img');
+  const jig=root?.querySelector('img.yidun_jigsaw');
   // The puzzle's *displayed* width comes from the container DIV: in popup mode
   // (e.g. Zhihu) the inner <img> is 0-sized while .yidun_bgimg is the real
   // 320px box. Fall back to the img when there's no container.
-  const box=vis('.yidun_bgimg')||bgEl;
+  const box=root?.querySelector('.yidun_bgimg')||bgEl;
   if(!h||!bgEl||!jig||!box) return JSON.stringify({present:false});
   const hb=h.getBoundingClientRect();
   const cb=box.getBoundingClientRect();
   const jb=jig.getBoundingClientRect();
+  const cs=getComputedStyle(jig);
   return JSON.stringify({present:true,
+    rotating:/rotate\(/.test(jig.style.transform),
+    style_left:parseFloat(jig.style.left)||0,
+    angle:parseFloat(jig.style.transform.replace(/^rotate\(/,''))||0,
+    origin:cs.transformOrigin.split(' ').map(parseFloat),
+    track:h.parentElement.getBoundingClientRect().width-hb.width,
     hx:hb.x+hb.width/2, hy:hb.y+hb.height/2,
     bg_src:bgEl.src, jig_src:jig.src,
     bg_natW:bgEl.naturalWidth, bg_dispW:cb.width,
     piece_left: jb.x-cb.x});
 })()"#;
 
-/// Read the yidun result state after a release: success / error / pending.
-const YIDUN_RESULT: &str = r#"(function(){
-  const p=document.querySelector('.yidun');
-  const tip=document.querySelector('.yidun_tips__text');
-  const cls=p?p.className:'';
-  const txt=tip?tip.textContent:'';
-  let status='pending';
-  if(/success/.test(cls)||/成功|通过/.test(txt)) status='success';
-  else if(/error/.test(cls)||/失败|错误|重试|不正确/.test(txt)) status='error';
-  return JSON.stringify({status, txt, cls});
-})()"#;
+/// Pin the result to this challenge, including after its popup becomes hidden.
+/// Another widget's stale success is not evidence for the active challenge.
+pub(super) fn yidun_result_script(src: &str) -> String {
+    format!(
+        r#"(function(){{
+      const img=[...document.querySelectorAll('img.yidun_bg-img')].find(e=>e.src==={});
+      const p=img?.closest('.yidun'),tip=p?.querySelector('.yidun_tips__text');
+      const cls=p?p.className:'',txt=tip?tip.textContent:'';
+      let status=p?'pending':'changed';
+      if(/success/.test(cls)||/成功|通过/.test(txt))status='success';
+      else if(/error/.test(cls)||/失败|错误|重试|不正确/.test(txt))status='error';
+      return JSON.stringify({{status,txt,cls}});
+    }})()"#,
+        serde_json::to_string(src).unwrap()
+    )
+}
+
+async fn poll_yidun_result(
+    mgr: &super::browser::BrowserManager,
+    src: &str,
+) -> Result<Value, String> {
+    let script = yidun_result_script(src);
+    let mut detail = json!({"status":"pending"});
+    for _ in 0..12 {
+        tokio::time::sleep(std::time::Duration::from_millis(180)).await;
+        detail = parse_json_string(mgr.evaluate(&script, None).await?, "yidun result")?;
+        if detail.get("status").and_then(Value::as_str) != Some("pending") {
+            break;
+        }
+    }
+    Ok(detail)
+}
 
 async fn yidun_mouse(
     mgr: &super::browser::BrowserManager,
@@ -14089,12 +15217,115 @@ async fn handle_solve_slider(cmd: &Value, state: &mut DaemonState) -> Result<Val
         if attempt < retries {
             let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
             let _ = mgr
-                .evaluate("document.querySelector('.yidun_refresh')?.click()", None)
+                .evaluate("[...document.querySelectorAll('.yidun_refresh')].find(e=>e.getBoundingClientRect().width>0)?.click()", None)
                 .await;
             tokio::time::sleep(std::time::Duration::from_millis(800)).await;
         }
     }
-    Ok(json!({ "solved": false, "attempts": retries + 1, "detail": last }))
+    // An exhausted solver is a failed action, not a successful dispatch.
+    Err(format!(
+        "Slider verification did not succeed after {} attempt(s): status={}, tip={}. \
+         Inspect the current challenge with core/captcha before another attempt.",
+        retries + 1,
+        last.get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown"),
+        last.get("tip").and_then(Value::as_str).unwrap_or("")
+    ))
+}
+
+/// Challenge-specific failures may use the bounded refresh/retry loop; CDP and
+/// setup faults remain fatal so a broken connection cannot trigger more input.
+fn rotating_attempt_result(result: Result<Value, String>) -> Result<Value, String> {
+    match result {
+        Err(error)
+            if matches!(
+                error.as_str(),
+                "Challenge changed during rotation calibration"
+                    | "Rotating puzzle did not respond to the held drag"
+                    | "No confident rotated silhouette match; inspect a fresh challenge"
+                    | "Rotated target is outside the slider track"
+                    | "Rotating piece did not reach its computed position"
+                    | "Challenge changed during rotating drag"
+            ) =>
+        {
+            Ok(json!({"solved": false, "status": "error", "tip": error}))
+        }
+        other => other,
+    }
+}
+
+/// Measure enhanced motion while held, locate the rotated main silhouette,
+/// then correct the inline CSS position rather than its rotated bounding box.
+async fn solve_rotating_slider(
+    mgr: &super::browser::BrowserManager,
+    session_id: &str,
+    initial: &Value,
+    bg: &image::DynamicImage,
+    jig: &image::DynamicImage,
+) -> Result<Value, String> {
+    let number = |p: &Value, k: &str| p.get(k).and_then(Value::as_f64).unwrap_or(0.);
+    let (hx, hy) = (number(initial, "hx"), number(initial, "hy"));
+    let src = initial
+        .get("bg_src")
+        .and_then(Value::as_str)
+        .ok_or("Missing challenge image")?;
+    let mut handle_x = hx;
+    yidun_mouse(mgr, session_id, "mouseMoved", hx, hy, 0).await?;
+    yidun_mouse(mgr, session_id, "mousePressed", hx, hy, 1).await?;
+    // Always release on a calibration/detection failure as well as success.
+    let moved:Result<Value,String>=async{
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        for dx in [12.,25.]{handle_x=hx+dx;yidun_mouse(mgr,session_id,"mouseMoved",handle_x,hy,1).await?;tokio::time::sleep(std::time::Duration::from_millis(100)).await;}
+        let p1=parse_json_string(mgr.evaluate(YIDUN_PROBE,None).await?,"rotation calibration")?;
+        for dx in [44.,65.]{handle_x=hx+dx;yidun_mouse(mgr,session_id,"mouseMoved",handle_x,hy,1).await?;tokio::time::sleep(std::time::Duration::from_millis(100)).await;}
+        let p2=parse_json_string(mgr.evaluate(YIDUN_PROBE,None).await?,"rotation calibration")?;
+        if p1.get("bg_src")!=initial.get("bg_src")||p2.get("bg_src")!=initial.get("bg_src"){return Err("Challenge changed during rotation calibration".to_string());}
+        let(l1,l2)=(number(&p1,"style_left"),number(&p2,"style_left"));
+        let ratio=(l2-l1)/40.;
+        if !ratio.is_finite()||!(0.05..1.5).contains(&ratio){return Err("Rotating puzzle did not respond to the held drag".to_string());}
+        let rate=(number(&p2,"angle")-number(&p1,"angle"))/(l2-l1);
+        if !rate.is_finite()||!(0.02..5.).contains(&rate.abs()){return Err("Unsupported rotating puzzle motion".to_string());}
+        let scale=number(&p2,"bg_dispW")/number(&p2,"bg_natW");
+        let origins=p2.get("origin").and_then(Value::as_array).ok_or("Missing rotation origin")?;
+        let ox=origins.first().and_then(Value::as_f64).ok_or("Invalid rotation origin")?/scale;
+        let oy=origins.get(1).and_then(Value::as_f64).ok_or("Invalid rotation origin")?/scale;
+        let track=number(&p2,"track");
+        let offset=number(&p1,"angle")-rate*l1;
+        let found=super::rotating_slider::locate(bg,jig,super::rotating_slider::Motion{
+            scale,origin:(ox,oy),degrees_per_css:rate,angle_offset:offset,max_left:l1+(track-25.)*ratio,
+        }).ok_or("No confident rotated silhouette match; inspect a fresh challenge")?;
+        let dx=25.+(found.left-l1)/ratio;
+        if !dx.is_finite()||dx<0.||dx>track{return Err("Rotated target is outside the slider track".to_string());}
+        for step in humanize::move_path((handle_x,hy),(hx+dx,hy),humanize::HumanizeLevel::Human,humanize::next_seed()){
+            handle_x=step.x;yidun_mouse(mgr,session_id,"mouseMoved",step.x,step.y,1).await?;
+            if !step.delay.is_zero(){tokio::time::sleep(step.delay).await;}
+        }
+        handle_x=hx+dx;
+        let mut final_left=0.;
+        for attempt in 0..4{
+            tokio::time::sleep(std::time::Duration::from_millis(110)).await;
+            let p=parse_json_string(mgr.evaluate(YIDUN_PROBE,None).await?,"rotating piece readback")?;
+            if p.get("bg_src")!=initial.get("bg_src"){return Err("Challenge changed during rotating drag".to_string());}
+            final_left=number(&p,"style_left");let error=found.left-final_left;
+            if error.abs()<0.6{break;}
+            if attempt==3{return Err("Rotating piece did not reach its computed position".to_string());}
+            handle_x=(handle_x+error/ratio).clamp(hx,hx+track);
+            yidun_mouse(mgr,session_id,"mouseMoved",handle_x,hy,1).await?;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        Ok(json!({"kind":"rotating","target_left_css":found.left,"final_left_css":final_left,
+            "angle":offset+rate*found.left,"edge_error":found.edge_error,"ratio":ratio,"drag_css":handle_x-hx}))
+    }.await;
+    let release = yidun_mouse(mgr, session_id, "mouseReleased", handle_x, hy, 0).await;
+    release?;
+    let mut detail = moved?;
+    let result = poll_yidun_result(mgr, src).await?;
+    detail["solved"] = json!(result.get("status").and_then(Value::as_str) == Some("success"));
+    detail["status"] = result["status"].clone();
+    detail["tip"] = result["txt"].clone();
+    detail["cls"] = result["cls"].clone();
+    Ok(detail)
 }
 
 async fn solve_slider_once(state: &mut DaemonState) -> Result<Value, String> {
@@ -14181,13 +15412,26 @@ async fn solve_slider_once(state: &mut DaemonState) -> Result<Value, String> {
                 .map_err(|e| format!("read {url}: {e}"))
         }
     };
-    let bg_bytes = fetch(bg_src).await?;
+    let bg_bytes = fetch(bg_src.clone()).await?;
     let jig_bytes = fetch(jig_src).await?;
     // Pluggable detector: AGENT_BROWSER_SLIDER_DETECT_CMD lets an external
     // program (e.g. a cv2 prototype for the enhanced icon-shape variant) supply
     // the gap, reusing the robust Rust drag + closed-loop below. Falls back to
     // the built-in pure-Rust detector. The cmd is run as `sh -c "<cmd> <dir>"`
     // with bg.img + jig.img in <dir>, and must print JSON {drag_nat[,piece_x]}.
+    if probe
+        .get("rotating")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        && std::env::var("AGENT_BROWSER_SLIDER_DETECT_CMD").is_err()
+    {
+        let bg_img = image::load_from_memory(&bg_bytes).map_err(|e| format!("decode bg: {e}"))?;
+        let jig_img =
+            image::load_from_memory(&jig_bytes).map_err(|e| format!("decode piece: {e}"))?;
+        return rotating_attempt_result(
+            solve_rotating_slider(mgr, &session_id, &probe, &bg_img, &jig_img).await,
+        );
+    }
     let gap = if let Ok(cmd) = std::env::var("AGENT_BROWSER_SLIDER_DETECT_CMD") {
         detect_gap_external(&cmd, &bg_bytes, &jig_bytes).await?
     } else {
@@ -14301,7 +15545,10 @@ async fn solve_slider_once(state: &mut DaemonState) -> Result<Value, String> {
     let mut detail = json!({});
     for _ in 0..12 {
         tokio::time::sleep(std::time::Duration::from_millis(180)).await;
-        let res = parse_json_string(mgr.evaluate(YIDUN_RESULT, None).await?, "yidun result")?;
+        let res = parse_json_string(
+            mgr.evaluate(&yidun_result_script(&bg_src), None).await?,
+            "yidun result",
+        )?;
         status = res
             .get("status")
             .and_then(|v| v.as_str())
@@ -15823,48 +17070,56 @@ async fn handle_requests(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     Ok(response)
 }
 
+/// Read a body from its recorded renderer; report unavailable bodies explicitly.
 async fn handle_request_detail(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let request_id = cmd
         .get("requestId")
-        .and_then(|v| v.as_str())
+        .and_then(Value::as_str)
         .ok_or("Missing 'requestId' parameter")?;
-
     let entry = state
         .tracked_requests
         .iter()
+        .rev()
         .find(|r| r.request_id == request_id)
         .ok_or("Request not found")?;
-
     let mut result = serde_json::to_value(entry).unwrap_or(json!({}));
-
-    if let Some(ref mgr) = state.browser {
-        if let Ok(session_id) = mgr.active_session_id() {
-            if let Ok(body_result) = mgr
-                .client
-                .send_command(
-                    "Network.getResponseBody",
-                    Some(json!({ "requestId": request_id })),
-                    Some(session_id),
-                )
-                .await
+    let body_result = match state.browser.as_ref() {
+        Some(mgr) => match entry
+            .session_id
+            .as_deref()
+            .or_else(|| mgr.active_session_id().ok())
+        {
+            Some(session_id) => {
+                mgr.client
+                    .send_command(
+                        "Network.getResponseBody",
+                        Some(json!({ "requestId": request_id })),
+                        Some(session_id),
+                    )
+                    .await
+            }
+            None => Err("Request renderer is unavailable".to_string()),
+        },
+        None => Err("Browser not launched".to_string()),
+    };
+    match body_result {
+        Ok(body_result) => {
+            let body = body_result
+                .get("body")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if body_result
+                .get("base64Encoded")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
             {
-                let base64_encoded = body_result
-                    .get("base64Encoded")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let body = body_result
-                    .get("body")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                if base64_encoded {
-                    result["responseBody"] = json!(format!("[base64, {} chars]", body.len()));
-                } else {
-                    result["responseBody"] = json!(body);
-                }
+                result["responseBody"] = json!(format!("[base64, {} chars]", body.len()));
+            } else {
+                result["responseBody"] = json!(body);
             }
         }
+        Err(error) => result["responseBodyError"] = json!(error),
     }
-
     Ok(result)
 }
 
@@ -17994,6 +19249,57 @@ fn error_response(id: &str, error: &str) -> Value {
 
 #[cfg(test)]
 mod tests {
+    /// `close --all` run by one agent closed every other agent's tab mid-task;
+    /// their next command came back from a fresh about:blank with no warning,
+    /// and they filled and submitted the form again. Only a close that came
+    /// from a different session is recorded: a session's own `close` was asked
+    /// for by its own agent.
+    #[test]
+    fn a_close_from_another_session_is_recorded_and_an_own_close_is_not() {
+        let other = closed_by_other_session_reason(
+            &json!({ "action": "close", "closedBy": "ab-hn1" }),
+            "ab-so2",
+        )
+        .expect("a close from another session is recorded");
+        assert!(other.contains("close --all"), "{other}");
+        assert!(other.contains("`ab-hn1`"), "{other}");
+
+        assert!(closed_by_other_session_reason(
+            &json!({ "action": "close", "closedBy": "ab-so2" }),
+            "ab-so2"
+        )
+        .is_none());
+        assert!(closed_by_other_session_reason(&json!({ "action": "close" }), "ab-so2").is_none());
+        assert!(closed_by_other_session_reason(
+            &json!({ "action": "close", "closedBy": "  " }),
+            "ab-so2"
+        )
+        .is_none());
+    }
+
+    /// On the relay the warning talks about tabs, names who closed them and
+    /// says to check before redoing a submission; the idle-reap advice only
+    /// rides along when the idle timeout was the cause.
+    #[test]
+    fn the_replaced_browser_note_fits_the_cause() {
+        let relay = replaced_browser_note(
+            "`chrome-use close --all` run from session `ab-hn1` closed it at 09:41:15",
+            true,
+        );
+        assert!(relay.contains("previous tabs are gone"), "{relay}");
+        assert!(relay.contains("`ab-hn1`"), "{relay}");
+        assert!(relay.contains("new blank tab"), "{relay}");
+        assert!(relay.contains("already went through"), "{relay}");
+        assert!(!relay.contains("IDLE_TIMEOUT"), "{relay}");
+
+        let idle = replaced_browser_note(
+            "the idle timeout closed it after 600000ms with no commands",
+            false,
+        );
+        assert!(idle.contains("fresh one was launched"), "{idle}");
+        assert!(idle.contains("AGENT_BROWSER_IDLE_TIMEOUT_MS"), "{idle}");
+    }
+
     /// An empty tree has two very different causes, and the output cannot tell
     /// them apart on its own (issues #206 and #215). Canvas wins when both
     /// hold: a canvas app has no tree to render whether or not anyone is
@@ -18014,6 +19320,66 @@ mod tests {
         assert!(sparse_tree_note(true, true).unwrap().contains("<canvas>"));
         // An ordinary page that is simply short gets no note at all.
         assert!(sparse_tree_note(false, false).is_none());
+    }
+
+    #[test]
+    fn sparse_screenshot_is_on_unless_explicitly_disabled() {
+        use super::sparse_screenshot_enabled;
+        assert!(sparse_screenshot_enabled(None));
+        assert!(sparse_screenshot_enabled(Some("1")));
+        assert!(sparse_screenshot_enabled(Some("")));
+        for off in ["0", "false", "OFF", " no "] {
+            assert!(!sparse_screenshot_enabled(Some(off)), "{off}");
+        }
+    }
+
+    #[test]
+    fn scroll_until_miss_names_distance_and_reason() {
+        use super::{scroll_until_miss, ScrollUntilStop};
+        let m = scroll_until_miss(
+            "#target",
+            "down",
+            30,
+            19200.4,
+            ScrollUntilStop::MaxSteps,
+            false,
+            None,
+        );
+        assert!(m.contains("#target was not found"), "{m}");
+        assert!(m.contains("down 30 step(s) (19200px)"), "{m}");
+        assert!(m.contains("--max-steps"), "{m}");
+
+        let t = scroll_until_miss(
+            "@e4",
+            "up",
+            5,
+            -1500.0,
+            ScrollUntilStop::Timeout,
+            true,
+            None,
+        );
+        assert!(t.contains("exists but never came into the viewport"), "{t}");
+        assert!(t.contains("(1500px)"), "{t}");
+        assert!(t.contains("--timeout"), "{t}");
+
+        let end = scroll_until_miss("x", "down", 12, 6000.0, ScrollUntilStop::End, false, None);
+        assert!(end.contains("reached the end of the page"), "{end}");
+
+        // A page that never moved at all is a different problem from one that
+        // ran out — point at --selector instead of claiming the end was reached.
+        let stuck = scroll_until_miss("x", "down", 2, 0.0, ScrollUntilStop::End, false, None);
+        assert!(stuck.contains("did not move"), "{stuck}");
+        assert!(stuck.contains("--selector"), "{stuck}");
+        let stuck_c = scroll_until_miss(
+            "x",
+            "down",
+            2,
+            0.0,
+            ScrollUntilStop::End,
+            false,
+            Some(".list"),
+        );
+        assert!(stuck_c.contains("container did not move"), "{stuck_c}");
     }
 
     use super::is_blank_capture_target;
@@ -18570,8 +19936,60 @@ mod tests {
     }
 
     #[test]
+    fn rotating_failures_retry_only_challenge_outcomes() {
+        let failed = rotating_attempt_result(Err(
+            "No confident rotated silhouette match; inspect a fresh challenge".into(),
+        ))
+        .unwrap();
+        assert_eq!(failed["solved"], false);
+        assert_eq!(failed["status"], "error");
+        assert!(rotating_attempt_result(Err("CDP connection closed".into())).is_err());
+        assert!(rotating_attempt_result(Err("Missing rotation origin".into())).is_err());
+        let solved = rotating_attempt_result(Ok(json!({"solved": true}))).unwrap();
+        assert_eq!(solved["solved"], true);
+    }
+
+    #[test]
+    fn yidun_result_ignores_another_widgets_stale_success() {
+        let mut context = boa_engine::Context::default();
+        context
+            .eval(boa_engine::Source::from_bytes(
+                r#"
+          const stale={className:'yidun--success',querySelector:()=>({textContent:'成功'})};
+          const current={className:'yidun--error',querySelector:()=>({textContent:'失败'})};
+          const document={querySelectorAll:()=>[
+            {src:'https://fixture.test/old',closest:()=>stale},
+            {src:'https://fixture.test/current',closest:()=>current}
+          ]};
+        "#,
+            ))
+            .unwrap();
+        let script = yidun_result_script("https://fixture.test/current");
+        let value = context
+            .eval(boa_engine::Source::from_bytes(&script))
+            .unwrap();
+        let text = value
+            .to_string(&mut context)
+            .unwrap()
+            .to_std_string_escaped();
+        let result: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(result["status"], "error");
+        let script = yidun_result_script("https://fixture.test/replaced");
+        let value = context
+            .eval(boa_engine::Source::from_bytes(&script))
+            .unwrap();
+        let text = value
+            .to_string(&mut context)
+            .unwrap()
+            .to_std_string_escaped();
+        let result: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(result["status"], "changed");
+    }
+
+    #[test]
     fn test_request_matches_parity() {
         let r = TrackedRequest {
+            session_id: None,
             url: "https://x.com/api/save".to_string(),
             method: "POST".to_string(),
             headers: json!({}),
@@ -20064,5 +21482,73 @@ mod tests {
                 "`{action}` mutates the page but does not observe"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod pick_tests {
+    use super::*;
+
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn match_rank_orders_exact_case_prefix_substring() {
+        assert_eq!(pick_match_rank("Kyoto", "Kyoto"), Some(0));
+        assert_eq!(pick_match_rank("kyoto", "Kyoto"), Some(1));
+        assert_eq!(pick_match_rank("Kyo", "Kyoto"), Some(2));
+        assert_eq!(pick_match_rank("Kyoto", "Kyoto Station"), Some(2));
+        assert_eq!(pick_match_rank("Kyoto", "Higashi Kyoto"), Some(3));
+        assert_eq!(pick_match_rank("New  York", " New York "), Some(0));
+        assert_eq!(pick_match_rank("Kyoto", "Osaka"), None);
+        assert_eq!(pick_match_rank("", "Osaka"), None);
+        assert_eq!(pick_match_rank("  ", "Osaka"), None);
+    }
+
+    #[test]
+    fn best_option_prefers_exact_then_case_then_prefix() {
+        // The suggestion list for "Kyoto" often lists longer names first.
+        let texts = s(&["Kyoto Station", "Higashi Kyoto", "kyoto", "Kyoto"]);
+        assert_eq!(pick_best_option("Kyoto", &texts), Some(3));
+        let texts = s(&["Kyoto Station", "Higashi Kyoto", "KYOTO"]);
+        assert_eq!(pick_best_option("Kyoto", &texts), Some(2));
+        let texts = s(&["Higashi Kyoto", "Kyoto Station", "Kyoto Tower"]);
+        // Prefix beats substring; among prefixes the shortest wins.
+        assert_eq!(pick_best_option("kyoto", &texts), Some(2));
+        let texts = s(&["Osaka", "Kobe"]);
+        assert_eq!(pick_best_option("Kyoto", &texts), None);
+        assert_eq!(pick_best_option("Kyoto", &[]), None);
+    }
+
+    #[test]
+    fn available_dedupes_and_caps() {
+        assert_eq!(pick_available(&[]), "none");
+        assert_eq!(pick_available(&s(&["A", "B", "A"])), "\"A\", \"B\"");
+        let many: Vec<String> = (0..20).map(|i| format!("o{i}")).collect();
+        assert!(pick_available(&many).ends_with("(+5 more)"));
+    }
+}
+
+#[cfg(test)]
+mod near_text_hint_tests {
+    use super::near_text_hint;
+
+    #[test]
+    fn names_the_pages_wording_when_only_case_differs() {
+        let e = near_text_hint(
+            "Wait timed out after 25000ms".into(),
+            "Grand Total",
+            Some("Grand total"),
+        );
+        assert!(e.starts_with("Wait timed out after 25000ms"), "{e}");
+        assert!(e.contains("wait --text \"Grand total\""), "{e}");
+    }
+
+    #[test]
+    fn leaves_the_error_alone_without_a_near_match() {
+        let e = "Wait timed out after 5000ms".to_string();
+        assert_eq!(near_text_hint(e.clone(), "Saved", None), e);
+        assert_eq!(near_text_hint(e.clone(), "Saved", Some("Saved")), e);
     }
 }

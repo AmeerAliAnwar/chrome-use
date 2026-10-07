@@ -396,6 +396,8 @@
 <span class="du-prompt">$</span> chrome-use scroll down 700 <span class="du-flag">--at</span> 640,400  <span class="du-cmt"># wheel at a pixel point—reaches cross-origin iframes</span>
                                         <span class="du-cmt"># (Stripe/checkout/KYC) that ordinary page scrolling can't</span>
 <span class="du-prompt">$</span> chrome-use scroll down 700 <span class="du-flag">--frame</span> 2    <span class="du-cmt"># scroll frame #2 from `chrome-use frames`</span>
+<span class="du-prompt">$</span> chrome-use scroll down <span class="du-flag">--until</span> "#comments" <span class="du-cmt"># step until the target is in view (also @ref, text=, --until-text)</span>
+                                        <span class="du-cmt"># not found: exit 1 saying how far it scrolled; cap with --max-steps / --timeout</span>
 <span class="du-prompt">$</span> chrome-use scrollintoview @e1           <span class="du-cmt"># scroll the element into the viewport</span></code></pre>
       </div>
 
@@ -431,10 +433,32 @@
       </div>
 
       <div class="du-callout warn">
-        <div class="du-callout-title">⚠️ CAPTCHAs not yet covered</div>
-        Yidun's <strong>enhanced</strong> slider (icon-shaped puzzle pieces + decoys) and <strong>click-select</strong>
-        (click in order) are harder challenges and aren't handled yet.
+        <div class="du-callout-title">Sliders and ordered clicks</div>
+        <code>solve-slider</code> handles ordinary puzzles and rotating icon-shaped pieces: it measures linear/angular
+        motion, matches the main silhouette, corrects the actual CSS position and verifies the current challenge.
+        Ordered clicks still use the agent's image understanding, coordinate conversion and ordinary clicks.
+        Do not run the slider solver on an ordered-click challenge.
       </div>
+
+      <h3>Attempt the visible challenge first</h3>
+      <p>
+        In an authorized login or browser task, identify the current challenge and try its normal controls.
+        A CAPTCHA label or <code>observed.humanCheck</code> warning does not prove personal presence is required.
+        Use <code>solve-slider 1</code> for an ordinary Yidun puzzle. For ordered icons, view a screenshot,
+        identify the instruction and targets, convert image coordinates to viewport CSS pixels and click in order.
+        Measure screenshot and viewport dimensions; do not simply divide by devicePixelRatio.
+        Activate the intended tab before capturing and measuring: activation can change the layout.
+      </p>
+      <p>
+        Load <code>chrome-use skills get core/captcha</code> for the complete workflow. Use at most three fresh
+        attempts, including solver retries. Reread refreshed challenges and do not resend SMS to retry them.
+        A Done receipt does not establish success: read the site's result, then continue the authorized task.
+        Exhausted <code>solve-slider</code> attempts return an error and a nonzero exit code.
+        Hand off only after failed attempts, ambiguous targets or a step requiring personal presence, and resume
+        after user confirmation. This workflow does not guarantee every provider or challenge can be solved;
+        do not disable checks or fabricate verification results.
+        A frozen countdown or provider success does not establish site acceptance; verify the site response too.
+      </p>
 
       <hr class="du-divider" />
 

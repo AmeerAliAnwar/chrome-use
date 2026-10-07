@@ -227,8 +227,10 @@
       <h2>Auto-triggering — see it, use it</h2>
       <p>
         You don't have to remember which sites have adapters. chrome-use keeps the adapter sources in sync automatically
-        (<strong>on first use + weekly</strong>), and when you <code>open</code> / <code>navigate</code> / <code>snapshot</code> a page whose
-        <strong>domain has adapters</strong>, it proactively hints you:
+        (<strong>on first use + weekly</strong>), and whenever you reach a page whose <strong>domain has adapters</strong> it tells you:
+        on every <code>open</code> / <code>navigate</code> / <code>snapshot</code>, and on any other command that lands you on a different
+        site (<code>tab new</code>, switching tabs, <code>back</code> / <code>forward</code>, a click that navigates, the first command on a tab
+        you didn't open). Staying on one site, you hear about it once. The hint is:
       </p>
 
       <ul>
@@ -252,6 +254,32 @@ site adapters for github.com: github/issues, github/pulls, github/repo …</code
         just use the <code>site &lt;name&gt;/&lt;cmd&gt;</code> it names: cheaper, more reliable, and already installed. You also
         <strong>don't need</strong> to run <code>site update</code> yourself first — just use the command it gives you.
       </div>
+
+      <h3>A site you use a lot has no adapter</h3>
+      <p>
+        When you drive the same site a lot (30+ actions this session, or on 3+ days) and no adapter covers it, chrome-use
+        adds <code>siteAdapterSuggestion: {domain, actionsThisSession, daysUsed, message}</code> to one response (stderr:
+        <code>site adapter suggestion: …</code>), so the AI asks you whether to turn the steps it keeps repeating into an adapter.
+        It comes once per site per session and not again for two weeks; local hosts and IPs are skipped. If you say yes, the
+        AI writes it to <code>~/.chrome-use/my-sites/&lt;name&gt;/&lt;cmd&gt;.js</code>, registers the folder once with
+        <code>chrome-use site add ~/.chrome-use/my-sites</code>, and runs <code>site update</code>.
+        <code>AGENT_BROWSER_SITES_NO_SUGGEST=1</code> turns it off.
+      </p>
+
+      <h3>OpenCLI commands work too</h3>
+      <p>
+        With Node.js 20+ on PATH, <code>site update</code> also installs <a href="https://github.com/jackwener/OpenCLI">OpenCLI</a> (about 180 sites and 1,300 commands; a pinned version, installed with <code>--ignore-scripts</code>).
+        A <code>name/cmd</code> that neither adapter pack has runs through OpenCLI's own runtime, driving your current chrome-use session and its logins, e.g.
+        <code>chrome-use site hackernews/best --limit 5 --json</code>. They show as <code>(opencli)</code> in <code>site list</code>, <code>site info</code> shows their args, and they come last in the site hint.
+        On a shared name ours win; if ours fails and OpenCLI has a read command of the same name, that runs instead (writes never retry). <code>AGENT_BROWSER_SITES_NO_OPENCLI=1</code> turns them off.
+      </p>
+
+      <h3>Writing your own: analyze and verify</h3>
+      <p>
+        Do the action that loads the data on the page first (search, scroll, open the list), then run <code>chrome-use site analyze</code>. It lists the API calls the page made, the state it embeds (<code>__NEXT_DATA__</code>, <code>__INITIAL_STATE__</code>, …) and any anti-bot vendor, and recommends a data source.
+        In order of preference: a public API, the site's own JSON API called from the page with its cookies, embedded page state, then the DOM. Each step down breaks more often.
+        Once it works, <code>chrome-use site verify &lt;name&gt;/&lt;cmd&gt; [args] --write-fixture</code> records the shape of a good result; later, <code>site verify</code> fails (exit 1) when a field disappears, changes type, or a list comes back empty. The fixture keeps the shape only, never values.
+      </p>
 
       <div class="du-callout note">
         <div class="du-callout-title">ℹ️ Exception on a fresh environment</div>

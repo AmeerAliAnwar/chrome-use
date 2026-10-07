@@ -1,5 +1,73 @@
 # Interacting
 
+## Ordinary actions
+
+Choose refs from the live page; the numbers below are examples.
+
+```bash
+chrome-use click @e3 --observe
+chrome-use fill @e2 "hello" --observe       # replace the field value
+chrome-use type @e2 " world"               # append
+chrome-use press Enter --selector @e2      # focus this control before the key
+chrome-use select @e4 "option-value"       # native select
+chrome-use pick @e4 --option "Europe"      # custom combobox
+chrome-use pick @e6 --option "Kyoto"       # autocomplete field: types, clicks the suggestion
+chrome-use check @e5
+chrome-use uncheck @e5
+chrome-use scroll down 500
+chrome-use get value @e2
+chrome-use get text @e6
+chrome-use wait --text "<expected page text>"  # case-sensitive substring
+```
+
+`wait --text` matches an exact, case-sensitive substring of the page's visible
+text. Use the actual expected page wording: `Saved` will not match
+`Delivery saved.` When a receipt or confirmation is already visible, that is
+the answer; waiting for it again only spends the budget. A `Wait timed out`
+says the condition was not observed; on its own it tells you nothing about
+the connection.
+
+Prefer dedicated verbs over handwritten JavaScript: they check ref identity,
+handle frames, and dispatch the events widgets expect.
+
+Autocomplete field (type-to-search combobox: suggestions appear only after
+you type, and the form wants one of them chosen) → `pick @ref --option "<text>"`.
+It clears the field, types the text, waits for the suggestions, clicks the
+best match and reports the field's value and any hidden code it set. `select`
+does not type, so it cannot reach those suggestions. Use `type --key-events`
+(or `--enter` to commit a tag) only when the field reacts to keystrokes alone
+or `pick` reports that no suggestion appeared.
+
+A field showing your text does not prove the page saved it. Heed ⚠
+warnings from `fill`, `click` and `keyboard type`: a Save still disabled after
+a fill, a `dispatch: dom` click, or a refused click on a disabled control all
+mean the edit did not register. A ref marked `toggles=checkbox(...)` is a
+switch, not a link. It can be destructive, so do not click it to navigate.
+
+## Before you write `eval`
+
+In real sessions most `eval` calls re-implemented a command that already
+exists, and lost its verification and hints. Use the command:
+
+| About to eval | Use instead |
+|---|---|
+| `document.body.innerText`, `el.innerText` | `get text <sel>`, or `read` for the main content |
+| `[...].find(b => b.textContent === '查询').click()` | `click "text=查询"` or `find text "查询" click` |
+| `getBoundingClientRect()` | `get box <sel or @ref>` |
+| patching `fetch`/XHR to see an API response | `network requests --filter api`, then `network request <id>` (reads the body from its original renderer; `responseBodyError` explains an unavailable body) |
+| `sleep N` or a polling loop | `wait --text "…"`, `wait <sel>`, `wait --url <pattern>`, `wait --fn "<expr>"` |
+| setting `.value` through a native setter | `fill @eN "…"`: it reads the value back and says when it did not stick |
+| injecting a script before the page runs | `addinitscript <js>`, then `reload` |
+
+Keep `eval` for what no command does: page globals, framework stores, canvas,
+or a diagnostic question the verbs cannot answer, such as hidden form
+validity. Do not dump credential-bearing forms or bypass blockers just because
+an action failed. `eval` targets the main frame unless `--frame` is set.
+`eval` prints a string as text; a `JSON.stringify(...)` result prints as JSON
+you parse once.
+
+## Command list
+
 ```bash
 chrome-use click @e1                   # click
 chrome-use click @e1 --new-tab         # open link in new tab instead of navigating
@@ -20,8 +88,7 @@ chrome-use type @e6 "ChatGPT" --enter  # type (real keystrokes, implies --key-ev
                                           # async-autocomplete / tag widget. Use when typing
                                           # alone shows no dropdown and the field needs a tag
                                           # confirmed (e.g. juejin 「添加标签」). If you'd rather
-                                          # pick from the list, type --key-events first, then
-                                          # snapshot -i and click the candidate.
+                                          # pick from the list, use `pick @e6 --option "…"`.
 chrome-use press Enter                 # press a key at current focus (down+up).
                                           # The output names where it landed
                                           # ("Pressed Enter → textarea[name=q]").
@@ -49,6 +116,11 @@ chrome-use pick @e4 --option "Europe"  # ANY combobox (react-select / ARIA /
                                           # (no silent no-op). Use this for custom
                                           # dropdowns where `select` returns ✓ but
                                           # changes nothing.
+chrome-use pick @e6 --option "Kyoto"   # AUTOCOMPLETE field (role=combobox input,
+                                          # aria-autocomplete=list): types the text,
+                                          # waits for suggestions, clicks the best
+                                          # match (exact > case > prefix), verifies
+                                          # the value; `pick @e6 "Kyoto"` also works
 chrome-use upload @e5 file1.pdf        # upload file(s) — works over the extension relay too:
                                           # chrome.debugger forbids setFileInputFiles, so the
                                           # file's bytes are streamed into the page and rebuilt as
@@ -60,6 +132,11 @@ chrome-use scroll down 700 --at 640,400 # wheel at a pixel — scrolls a cross-o
                                           # iframe (Payments/Stripe/checkout/KYC) that
                                           # plain page scroll can't reach
 chrome-use scroll down 700 --frame 2    # scroll frame 2 from `chrome-use frames`
+chrome-use scroll down --until "#comments"  # step until it is in the viewport (also
+                                          # @ref, text=Label, --until-text "…");
+                                          # exit 1 naming how far it went if not.
+                                          # --max-steps N (30) / --timeout ms;
+                                          # add --selector .feed for a scroll container
 chrome-use scrollintoview @e1          # scroll element into view
 chrome-use drag @e1 @e2                # drag and drop
 chrome-use drag @e1 60                 # drag a handle by +60px (slider/canvas); `+60,-3` for dx,dy
@@ -78,10 +155,28 @@ there is how an agent opens the wrong menu (or submits the wrong form) while the
 CLI prints `Done`. So an error here is the guard working — re-snapshot and
 re-target rather than reaching for `AGENT_BROWSER_VERIFY_REF=0`.
 
+**A relocation is never silent, and never a rename.** When the ref's original
+node is gone, chrome-use acts on a replacement only if it is the *same control*:
+same role and the same accessible name (ignoring case and extra whitespace),
+re-found by role + name, by the replaced node's DOM attributes, or by
+fingerprint. One exception: a text field (textbox / searchbox / combobox /
+spinbutton) re-found by its own `id`, form `name` or test id is the same field
+even when the page rewrote its placeholder ("手机号" → "手机号或邮箱"), so it is
+filled, and the label change shows in the report. The response then says so: `--json` gets `data.relocated: [{ref,
+how: "role-name"|"dom-identity"|"adaptive", score?, role, name, was: {role,
+name}}]` (also on a failed action), and text output prints one `⚠ @e5 relocated
+(…)` line on stderr. **A ref that cannot be resolved is refused with
+suggestions, never guessed.** That includes a confident match whose name
+changed ("Save" → "Save now"): it is not clicked. Instead the error names it
+and gives it a ref of its own (`try @e12 [button] "Save now"`), followed by up
+to three refs from the current snapshot that are closest by role + name and
+still resolve, plus "run `snapshot -i` to refresh". Nothing acts on a
+suggestion: pick one yourself, or re-snapshot.
+
 | Env var | Effect |
 |---|---|
 | `AGENT_BROWSER_VERIFY_REF_TIMEOUT_MS` | Budget for the identity check (default 2s direct CDP, 5s over the extension relay). Raise it on very large pages if you see "identity could not be confirmed". |
-| `AGENT_BROWSER_ADAPTIVE_REF=0` | Disable fingerprint relocation (exact role+name only). |
+| `AGENT_BROWSER_ADAPTIVE_REF=0` | Disable fingerprint relocation (exact role+name only). When on, a fingerprint match is acted on only if its role + name equal the snapshot's; a renamed match is offered as a suggested ref instead. |
 | `AGENT_BROWSER_VERIFY_REF=0` | Last resort — skips the check entirely and accepts that clicks may land on a re-rendered node. |
 
 **Slider-puzzle captchas (网易易盾 / yidun).** Unattended/headless logins can't
@@ -93,9 +188,15 @@ trajectory — the human motion is what passes yidun's behavioural check. Works 
 both float (embedded) and popup (modal, e.g. Zhihu) modes. It auto-detects the
 captcha on the active page; run it right after the submit that triggers the
 slider. The drag forces the humanize trajectory regardless of the global
-`AGENT_BROWSER_HUMANIZE` setting. Note: yidun's *enhanced* slider (icon-shaped
-piece + decoys) and its *点选* (click-in-order) captcha are different, harder
-challenges not yet handled.
+`AGENT_BROWSER_HUMANIZE` setting. The built-in detector also handles Yidun's
+rotating icon-shaped slider: it calibrates angular/linear motion, matches the
+main silhouette while ignoring small decoys, corrects the inline CSS position,
+and verifies the result on the same challenge. Ordered icons use a different
+workflow. For a readable click-in-order challenge, view its screenshot, identify the requested
+order, convert image coordinates to CSS pixels, click, and verify the site's
+result. Do not hand off merely because it is a CAPTCHA. Load `core/captcha`
+for the full workflow and bounded retries. Exhausted solver attempts return
+an error and a nonzero exit code; dispatched input is not verification success.
 
 **Cross-origin iframes (embedded payment / checkout / KYC widgets — Google
 Payments, Stripe, etc.) — drive them by ref, never by screenshot.** `snapshot -i`
@@ -211,12 +312,15 @@ split across nodes (React `{a} - {b}`) or nested in a child never matches; use
 snapshot `@ref`. "Element not found" keeps the selector plus the resolver's
 diagnosis, and an XPath with `text()` that matched nothing explains this.
 
-`click` auto-scrolls into view and, if the coordinate click is occluded, falls
-back to a DOM `.click()`. If a click *reports success but nothing happened* —
+`click` auto-scrolls into view. If something else covers the target (a cookie
+banner, a modal backdrop, a sticky header), the click is **refused** with an
+error naming what covers it, because a click there would hit the cover, not the
+control. Dismiss the cover and click again; `click --allow-dom` clicks the
+covered element through the DOM (`element.click()`, `isTrusted: false`) instead,
+for when you know the page accepts that. If a click *reports success but nothing happened* —
 classic for an autocomplete/menu `<li>` that closes on the input's blur — retry
 that one with `AGENT_BROWSER_CLICK_MODE=dom chrome-use click ...`, or just
-`chrome-use eval "<select the item via JS>"`. A DOM-dispatched click (the relay's
-default for left clicks) moves focus like a real click: the clicked element, its
+`chrome-use eval "<select the item via JS>"`. A DOM-dispatched click moves focus like a real click: the clicked element, its
 nearest focusable ancestor, or a label's control gets focus unless the handler
 already moved it, so `click <input>` then `press Meta+a` lands on that input. A
 plain `<li>` has no focusable target, so the input keeps focus and still selects.
@@ -234,9 +338,18 @@ A bare-number argument is always a coordinate, never a selector.
 
 ### Canvas / WebGL apps (games, map & 3D viewers, drawing tools)
 
+For semantic controls, prefer refs over pixels. Canvas/WebGL targets can lack
+DOM or accessibility nodes: capture their pixels and use coordinates when
+needed. Coordinate input over the relay may hit the foreground tab; use an
+owned isolated test tab for such work. For a ref's coordinates, `box @ref`
+provides CSS-pixel bounds and its center.
+
 These paint everything to a `<canvas>` and expose **almost no accessibility
 tree**, so `snapshot` comes back near-empty and refs are a dead end. `snapshot`
-detects this and prints a one-line hint. Drive them the screenshot way:
+detects this, prints a one-line hint, and also saves a viewport screenshot and
+prints `screenshot: <path>` — view that image instead of calling `screenshot`
+again (JSON: `data.screenshot`, `screenshotReason: "sparse"`; opt out with
+`AGENT_BROWSER_SPARSE_SCREENSHOT=0`). Drive them the screenshot way:
 
 ```bash
 chrome-use canvas list                 # enumerate <canvas> elements (size, type)

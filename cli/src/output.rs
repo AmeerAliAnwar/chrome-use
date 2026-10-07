@@ -300,8 +300,79 @@ fn stderr_is_discarded() -> bool {
     }
 }
 
+fn print_site_analyze(data: &serde_json::Value, strategy: &str, next: &[serde_json::Value]) {
+    let host = data.get("host").and_then(|v| v.as_str()).unwrap_or("");
+    println!("site analyze: {host}");
+    let api = data
+        .get("api")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let seen = data
+        .get("requestsSeen")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    println!("  API candidates ({} of {seen} requests):", api.len());
+    for a in api.iter().take(8) {
+        let url = a.get("url").and_then(|v| v.as_str()).unwrap_or("");
+        let why: Vec<&str> = a
+            .get("reasons")
+            .and_then(|v| v.as_array())
+            .map(|r| r.iter().filter_map(|x| x.as_str()).collect())
+            .unwrap_or_default();
+        println!("    {url}");
+        println!("      {}", color::dim(&why.join(", ")));
+    }
+    let state = data
+        .get("state")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if !state.is_empty() {
+        println!("  Embedded state:");
+        for st in state.iter().take(8) {
+            let name = st.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let size = st.get("size").and_then(|v| v.as_i64()).unwrap_or(0);
+            let keys: Vec<&str> = st
+                .get("keys")
+                .and_then(|v| v.as_array())
+                .map(|r| r.iter().filter_map(|x| x.as_str()).collect())
+                .unwrap_or_default();
+            println!("    {name} ({size} chars) {}", color::dim(&keys.join(", ")));
+        }
+    }
+    if let Some(v) = data
+        .get("antiBot")
+        .and_then(|v| v.as_array())
+        .filter(|a| !a.is_empty())
+    {
+        let names: Vec<&str> = v.iter().filter_map(|x| x.as_str()).collect();
+        println!("  Anti-bot: {}", names.join(", "));
+    }
+    println!("  Strategy: {strategy}");
+    for (i, step) in next.iter().filter_map(|s| s.as_str()).enumerate() {
+        println!("  {}. {step}", i + 1);
+    }
+}
+
 pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &OutputOptions) {
     print_response_body(resp, action, opts);
+    // A @ref that landed on a node other than the one its snapshot recorded:
+    // one stderr line each, so it is never silent — on a failed action too.
+    if !opts.json {
+        for r in resp
+            .data
+            .as_ref()
+            .and_then(|d| d.get("relocated"))
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+        {
+            if let Some(line) = relocation_line(r) {
+                eprintln!("{} {}", color::warning_indicator(), line);
+            }
+        }
+    }
     // Every successful text response gets its observation, including branches
     // such as eval/check that return before the generic Done renderer.
     if !opts.json && resp.success {
@@ -369,12 +440,64 @@ fn print_response_body(resp: &Response, action: Option<&str>, opts: &OutputOptio
                 .unwrap_or_default();
             if !cmds.is_empty() {
                 eprintln!("site adapters for {domain} — prefer these for structured data:");
-                eprintln!("   {}", color::dim(&cmds.join(", ")));
+                // OpenCLI can add dozens per site; the full list is in --json.
+                const SHOWN: usize = 12;
+                let mut line = cmds[..cmds.len().min(SHOWN)].join(", ");
+                if cmds.len() > SHOWN {
+                    line.push_str(&format!(
+                        " … +{} more (`chrome-use site list | grep {}`)",
+                        cmds.len() - SHOWN,
+                        cmds[0].split('/').next().unwrap_or("")
+                    ));
+                }
+                eprintln!("   {}", color::dim(&line));
                 eprintln!(
                     "   {}",
                     color::dim(&format!("e.g. chrome-use site {} --json", cmds[0]))
                 );
+                if let Some(pack) = cmds[0].split('/').next() {
+                    eprintln!(
+                        "   {}",
+                        color::dim(&format!("args: chrome-use site info {pack}"))
+                    );
+                }
             }
+        }
+        // A site driven often that has no adapter: the agent should ask the user
+        // whether to capture the repeated steps as one.
+        if let Some(sugg) = data.get("siteAdapterSuggestion") {
+            if let Some(msg) = sugg.get("message").and_then(|v| v.as_str()) {
+                eprintln!("site adapter suggestion: {msg}");
+            }
+        }
+        // `site verify`: the verdict, to stderr so the result stays parseable.
+        if let Some(v) = data.get("verify") {
+            if v.get("recorded").and_then(|x| x.as_bool()) == Some(true) {
+                let at = v.get("fixture").and_then(|x| x.as_str()).unwrap_or("");
+                eprintln!(
+                    "{} site verify: fixture recorded → {at}",
+                    color::success_indicator()
+                );
+            } else if v.get("ok").and_then(|x| x.as_bool()) == Some(true) {
+                match v.get("next").and_then(|x| x.as_str()) {
+                    Some(next) => eprintln!(
+                        "{} site verify: result non-empty; {next}",
+                        color::success_indicator()
+                    ),
+                    None => eprintln!(
+                        "{} site verify: matches the fixture",
+                        color::success_indicator()
+                    ),
+                }
+            }
+        }
+        // `site analyze`: a report, not a page result.
+        if let (Some(strategy), Some(next)) = (
+            data.get("strategy").and_then(|v| v.as_str()),
+            data.get("next").and_then(|v| v.as_array()),
+        ) {
+            print_site_analyze(data, strategy, next);
+            return;
         }
         // `open` that landed on a page refusing this browser's sign-in (#387).
         if let Some(h) = data.get("humanCheck") {
@@ -810,13 +933,31 @@ fn print_response_body(resp: &Response, action: Option<&str>, opts: &OutputOptio
             // `--with-screenshot`: the image is an output, so its path is
             // reported and nothing more — the tree above is what the agent
             // reads the page from.
+            let sparse_shot =
+                data.get("screenshotReason").and_then(|v| v.as_str()) == Some("sparse");
             if let Some(p) = data.get("screenshot").and_then(|v| v.as_str()) {
-                eprintln!("{} {}", color::dim("screenshot:"), p);
+                if sparse_shot {
+                    // Attached on our own because the tree is near-empty: the
+                    // image is the page's content here, so say to look at it —
+                    // on stdout, next to the tree it stands in for.
+                    println!(
+                        "screenshot: {p} — this page draws to a canvas and the tree above is \
+                         nearly empty; view this image to see what is on screen"
+                    );
+                } else {
+                    eprintln!("{} {}", color::dim("screenshot:"), p);
+                }
             }
             if let Some(e) = data.get("screenshotError").and_then(|v| v.as_str()) {
                 eprintln!(
                     "{} --with-screenshot failed: {e}",
                     color::warning_indicator()
+                );
+            }
+            if let Some(e) = data.get("sparseScreenshotError").and_then(|v| v.as_str()) {
+                eprintln!(
+                    "{}",
+                    color::dim(&format!("(automatic screenshot skipped: {e})"))
                 );
             }
             // The adaptive wait hit its ceiling with the page still moving
@@ -861,6 +1002,37 @@ fn print_response_body(resp: &Response, action: Option<&str>, opts: &OutputOptio
                     eprintln!("{}", color::dim(&format!("read on with: --from {next}")));
                 }
             }
+            return;
+        }
+        // `scroll --until`: say where the target turned up and how far it took.
+        if action == Some("scroll") && data.get("found").and_then(|v| v.as_bool()) == Some(true) {
+            let until = data
+                .get("until")
+                .and_then(|v| v.as_str())
+                .unwrap_or("target");
+            let steps = data.get("steps").and_then(|v| v.as_u64()).unwrap_or(0);
+            let distance = data.get("distance").and_then(|v| v.as_i64()).unwrap_or(0);
+            let dir = data
+                .get("direction")
+                .and_then(|v| v.as_str())
+                .unwrap_or("down");
+            let at = data.get("at").and_then(|v| v.as_array());
+            let xy = |i: usize| {
+                at.and_then(|a| a.get(i))
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0)
+            };
+            let how = if steps == 0 {
+                "is already in view".to_string()
+            } else {
+                format!("is in view after scrolling {dir} {steps} step(s) ({distance}px)")
+            };
+            println!(
+                "{} {until} {how}, at ({},{})",
+                color::success_indicator(),
+                xy(0),
+                xy(1)
+            );
             return;
         }
         // Frame list (`chrome-use frames`)
@@ -909,6 +1081,45 @@ fn print_response_body(resp: &Response, action: Option<&str>, opts: &OutputOptio
         if let Some(html) = data.get("html").and_then(|v| v.as_str()) {
             print_with_boundaries(html, origin, opts);
             return;
+        }
+        // pick: name the option chosen, and for an autocomplete field what was
+        // typed, what the field now holds and which hidden fields it set.
+        if action == Some("pick") {
+            if let Some(picked) = data.get("picked").and_then(|v| v.as_str()) {
+                let warning = data.get("warning").and_then(|v| v.as_str());
+                let indicator = if warning.is_some() {
+                    color::warning_indicator()
+                } else {
+                    color::success_indicator()
+                };
+                let mut detail = Vec::new();
+                if let Some(typed) = data.get("typed").and_then(|v| v.as_str()) {
+                    detail.push(format!("typed {typed:?}, clicked the suggestion"));
+                }
+                if let Some(value) = data.get("value").and_then(|v| v.as_str()) {
+                    detail.push(format!("value {value:?}"));
+                }
+                if let Some(h) = data.get("hiddenChanged").and_then(|v| v.as_array()) {
+                    let set: Vec<&str> = h.iter().filter_map(|x| x.as_str()).collect();
+                    if !set.is_empty() {
+                        detail.push(format!("set {}", set.join(", ")));
+                    }
+                }
+                if detail.is_empty() {
+                    println!("{} Picked {:?}", indicator, picked);
+                } else {
+                    println!(
+                        "{} Picked {:?} {}",
+                        indicator,
+                        picked,
+                        color::dim(&format!("({})", detail.join("; ")))
+                    );
+                }
+                if let Some(w) = warning {
+                    eprintln!("{} {}", color::warning_indicator(), w);
+                }
+                return;
+            }
         }
         // Value
         if let Some(value) = data.get("value").and_then(|v| v.as_str()) {
@@ -2111,6 +2322,30 @@ fn describe_find_target(t: &serde_json::Value) -> String {
     s
 }
 
+/// The stderr line for one `data.relocated` entry.
+fn relocation_line(r: &serde_json::Value) -> Option<String> {
+    let s = |v: Option<&serde_json::Value>| v.and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let ref_id = r.get("ref").and_then(|v| v.as_str())?;
+    let how = match r.get("how").and_then(|v| v.as_str()).unwrap_or("") {
+        "adaptive" => match r.get("score").and_then(|v| v.as_f64()) {
+            Some(score) => format!("adaptive match, score {score:.2}"),
+            None => "adaptive match".to_string(),
+        },
+        "role-name" => "role + name re-query".to_string(),
+        "dom-identity" => "its replacement's DOM attributes".to_string(),
+        other => other.to_string(),
+    };
+    let was = r.get("was");
+    Some(format!(
+        "{ref_id} relocated ({how}): snapshot had [{} \"{}\"], acted on [{} \"{}\"] — its \
+         original node is gone; re-run `snapshot -i` if that is not the control you meant",
+        s(was.and_then(|w| w.get("role"))),
+        s(was.and_then(|w| w.get("name"))),
+        s(r.get("role")),
+        s(r.get("name")),
+    ))
+}
+
 fn print_warning(resp: &Response) {
     if let Some(ref warning) = resp.warning {
         eprintln!("{} {}", color::warning_indicator(), warning);
@@ -2236,7 +2471,7 @@ Examples:
             r##"
 chrome-use click - Click an element or a coordinate
 
-Usage: chrome-use click <selector> [--new-tab]
+Usage: chrome-use click <selector> [--new-tab] [--allow-dom]
        chrome-use click <x> <y> | <x>,<y> | --coords <x>,<y>
 
 Clicks on the specified element. The selector can be a CSS selector,
@@ -2250,7 +2485,9 @@ in a child never matches; use `contains(normalize-space(.), '...')`,
 "Element not found" error keeps the selector and the resolver's diagnosis.
 
 A left click is a trusted pointer click at the element's position. When
-that cannot be placed (the element is covered, or has no box), the click
+something else covers that position the click is refused with an error naming
+the cover; `--allow-dom` clicks the covered element through the DOM instead.
+When the position cannot be placed for another reason (no box), the click
 falls back to `element.click()`, which is `isTrusted: false`; the response
 then says `dispatch: dom` with a ⚠ warning naming why, because a page that
 only honours real input ignores such a click. A DOM-dispatched click still
@@ -2378,6 +2615,8 @@ Options:
   (alias --keys)       Input.insertText. Use for autocomplete / combobox fields
                        that only react to key events — e.g. a postal-code box
                        that auto-fills city/prefecture, or Google Places.
+                       To choose one of an autocomplete field's suggestions,
+                       use `pick <ref> --option "<text>"` instead.
 
 Global Options:
   --json               Output as JSON
@@ -2474,6 +2713,9 @@ controls use platform setters plus input/change events so React and Vue
 controlled forms commit the selection. Custom ARIA/react-select controls
 are opened and matched through their visible option list.
 
+For an autocomplete (type-to-search) field, use `pick <ref> --option "<text>"`
+instead: `select` does not type, so its suggestions never appear.
+
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
@@ -2484,13 +2726,45 @@ Examples:
   chrome-use select "#menu" "opt1" "opt2" "opt3"
 "##
         }
+        "pick" => {
+            r##"
+chrome-use pick - Choose an option in any combobox, including autocomplete fields
+
+Usage: chrome-use pick <selector|@ref> --option "<text>"
+       chrome-use pick <selector|@ref> "<text>"
+
+Native <select>: selects the matching option. Custom combobox (ARIA listbox,
+react-select, portal menus): opens it, waits for the option, clicks it.
+Autocomplete / type-to-search field (an input with role=combobox,
+aria-autocomplete=list|both, or aria-controls pointing at a listbox): if
+opening it lists no match, pick clears the field, types the text (trusted
+input, like `type`), waits up to 5s for the suggestions to appear and settle,
+clicks the best match (exact, then case-insensitive, then prefix, then
+substring), and checks that the field took it. The output names the option,
+the field's value and any hidden form field the choice set (e.g. a city code).
+
+Errors, rather than reporting success, when no option matches; the error
+lists the options that were visible.
+
+Global Options:
+  --json               Output as JSON
+  --session <name>     Use specific session
+
+Examples:
+  chrome-use pick @e4 --option "Europe"        # custom dropdown
+  chrome-use pick @e6 --option "Kyoto"         # autocomplete: types, clicks the suggestion
+  chrome-use pick "#country" "Japan"           # positional form
+"##
+        }
         "drag" => {
             r##"
 chrome-use drag - Drag and drop
 
-Usage: chrome-use drag <source> <target>
+Usage: chrome-use drag <source> <target|dx[,dy]>
 
-Drags an element from source to target location.
+Drags an element to another target, or moves its handle by a CSS-pixel offset.
+For CAPTCHA classification, screenshot scaling and verified continuation,
+load `chrome-use skills get core/captcha`.
 Routing follows this session, not another profile's extension connection.
 
 Global Options:
@@ -2500,6 +2774,30 @@ Global Options:
 Examples:
   chrome-use drag "#draggable" "#drop-zone"
   chrome-use drag @e1 @e2
+  chrome-use drag @e1 +60,-3
+"##
+        }
+        "solve-slider" => {
+            r##"
+chrome-use solve-slider - Attempt a NetEase Yidun slider puzzle
+
+Usage: chrome-use solve-slider [retries]
+
+Detects ordinary puzzle gaps and rotating/icon-shaped Yidun sliders. Rotating
+pieces use measured linear/angular motion, silhouette matching and CSS-position
+readback. Default: 3 retries after an initial attempt. Verified success returns
+solved:true; exhausted attempts return an error and a nonzero exit code.
+Read the site's result before continuing. Ordered image clicks need the agent's
+visual inspection. Load `chrome-use skills get core/captcha` for bounded attempts,
+CSS-pixel coordinate conversion, ordered clicks, and result verification.
+Activate before capturing coordinates. Provider success or a frozen resend
+countdown alone does not establish that the site accepted verification.
+A CAPTCHA or vendor-script warning alone is not a reason to stop an authorized
+task. Follow the host's rules; hand off only if attempts fail or a person is needed.
+
+Examples:
+  chrome-use solve-slider 1
+  chrome-use skills get core/captcha
 "##
         }
         "upload" => {
@@ -2754,10 +3052,11 @@ Usage: chrome-use scroll [direction] [amount] [options]
 
 Scrolls the page or a specific element in the specified direction.
 
-Without --selector, scroll dispatches a real (isTrusted) mouse wheel at a
-viewport coordinate, so it scrolls whatever container is under the pointer —
-including cross-origin iframes (Google Payments, Stripe, embedded checkout/KYC)
-that plain page scroll can't reach.
+Without --selector/--at/--frame it scrolls the page (window.scrollBy). --at and
+--frame dispatch a real (isTrusted) mouse wheel at a viewport coordinate, so
+they scroll whatever container is under the pointer — including cross-origin
+iframes (Google Payments, Stripe, embedded checkout/KYC) that plain page scroll
+can't reach.
 
 Arguments:
   direction            up, down, left, right (default: down)
@@ -2769,8 +3068,17 @@ Options:
                        screenshot) — precise way into a cross-origin iframe
   --frame <n>          Scroll the n-th frame from `chrome-use frames` (wheel at
                        that frame's center)
-
-Without --selector/--at/--frame the wheel lands at the viewport center.
+  --until <target>     Keep scrolling step by step until <target> is in the
+                       viewport: a CSS selector, XPath, @ref, `text=<label>` or
+                       a bare label. Step = [amount] if given, else ~80% of the
+                       viewport. Stops when found (prints where), or fails
+                       (exit 1) after the step/time budget or at the end of the
+                       page, saying how far it scrolled. Works with --selector
+                       to scroll a container instead of the page.
+  --until-text <text>  Same, matching visible text (= --until "text=<text>")
+  --max-steps <n>      Step budget for --until (default: 30)
+  --timeout <ms>       Time budget for --until (default: the action timeout,
+                       capped at 30000)
 
 Global Options:
   --json               Output as JSON
@@ -2784,6 +3092,9 @@ Examples:
   chrome-use scroll down 500 --selector "div.scroll-container"
   chrome-use scroll down 700 --at 640,400      # wheel at a pixel over an iframe
   chrome-use scroll down 700 --frame 2         # scroll frame 2 from `frames`
+  chrome-use scroll down --until "#comments"   # scroll until it is on screen
+  chrome-use scroll --until-text "Load more"
+  chrome-use scroll down --until @e12 --selector .feed --max-steps 50
 "##
         }
         "scrollintoview" | "scrollinto" => {
@@ -3006,8 +3317,9 @@ Options:
   --max-height <px>    Downscale so the image's height ≤ px
   --scale <0..1>       Downscale by a factor, e.g. 0.5 (DPR-1, so screenshot px
                        line up 1:1 with `click x y`)
-                       Default: capped at 2000px longest edge unless overridden
-                       (AGENT_BROWSER_SCREENSHOT_MAX_EDGE; 0 disables). Annotated
+                       Default: capped at 1200px longest edge (width only with
+                       --full) unless overridden (AGENT_BROWSER_SCREENSHOT_MAX_EDGE;
+                       0 disables). --full-res keeps the captured size. Annotated
                        shots are never downscaled, so ref overlays stay aligned.
   --annotate           Overlay numbered labels on interactive elements.
                        Each label [N] corresponds to ref @eN from snapshot.
@@ -3204,6 +3516,13 @@ Options:
                        `source: "dom"` plus a `note`, and roles/names are
                        derived from tags and attributes. Refs work as usual.
 
+Canvas pages: when the tree is nearly empty (fewer than 3 refs) because a
+<canvas> fills most of the viewport (games, WebGL, maps, editors), snapshot
+also saves a viewport screenshot (default 1200px cap) and prints its path -
+JSON: `screenshot` plus `screenshotReason: "sparse"`. Best-effort: a failed
+capture never fails the snapshot. Not taken with --with-screenshot (which
+already saves one) or when AGENT_BROWSER_SPARSE_SCREENSHOT=0.
+
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
@@ -3273,7 +3592,11 @@ Closes the browser instance for the current session.
 Aliases: quit, exit
 
 Options:
-  --all                Close all active sessions
+  --all                Close all active sessions. Refuses, listing them, when
+                       sessions other than yours are live (other agents' or
+                       other Claude sessions' work); add --force to close
+                       them anyway
+  --force, --yes       With --all: close every session, not only yours
 
 Global Options:
   --json               Output as JSON
@@ -3283,6 +3606,7 @@ Examples:
   chrome-use close
   chrome-use close --session mysession
   chrome-use close --all
+  chrome-use close --all --force
 "##
         }
 
@@ -3517,6 +3841,9 @@ Subcommands:
     --method <method>        Filter by HTTP method (GET, POST, etc.)
     --status <code>          Filter by status (200, 2xx, 400-499)
   request <requestId>        View full request/response detail (including body)
+                             Body reads use the originating renderer, including
+                             cross-origin frames; responseBodyError explains
+                             an unavailable body.
   har <start|stop> [path]    Record and export a HAR file
 
 Global Options:
@@ -3677,6 +4004,9 @@ Operations:
   select <ref> [--activate]  Switch tabs (external: created or adopted only)
   adopt <url|targetId> [--activate]
                              Attach an existing tab without navigating it
+  --force                    With --activate: bring the tab forward even though
+                             another session's tab is in front of that window
+                             (refused without it, since that tab would be hidden)
   inspect <ref>              Read browser-level state (relay requires ab-connect 0.5.16+)
   close [ref]                Close a tab (external: session-created only)
   <ref>                      Switch tabs (external: created or adopted only)
@@ -4468,6 +4798,10 @@ Reports the installed CLI version, native host and extension relay state,
 live versus bundled extension version, driving Chrome profile, current session,
 and all running session daemons. Because this command is daemon-free, use it as
 the first check when browser commands are hanging.
+Relay health requires an extension reply within 10 seconds, not merely a saved
+endpoint file. A down result also hides cached profile/version information.
+This browser-level check does not prove that a page renderer is responsive.
+Extensions predating inspectTab cannot confirm health; update them if this check fails.
 
 If a browser command reports that a session endpoint disappeared, rerun the
 command. chrome-use clears the unreachable worker and recreates the endpoint.
@@ -4840,11 +5174,20 @@ Usage:
   chrome-use site list                 List installed adapters (name/command)
   chrome-use site update               Fetch/refresh the adapter packs
   chrome-use site info <name>          Show one pack's adapters and their args
+  chrome-use site analyze [url]        Find a page's API calls, embedded state and
+                                       anti-bot vendors; recommend a data source
+  chrome-use site verify <name>/<command> [args] [--write-fixture]
+                                       Run it and compare the result's shape with a
+                                       recorded fixture (--write-fixture records one)
 
 An adapter extracts structured JSON from a site through its own API/DOM,
 in the site's real logged-in page — so it replaces a snapshot+click scrape
-with one call. Adapters ship in community packs (epiral/bb-sites) and the
-official leeguooooo/chrome-use-sites pack; `update` syncs both.
+with one call. Adapters ship in the official leeguooooo/chrome-use-sites pack
+and the community epiral/bb-sites pack; `update` syncs both. When Node.js 20+
+is on PATH, `update` also installs OpenCLI (jackwener/OpenCLI): a `name/command`
+neither pack has runs through OpenCLI's own runtime over this session, marked
+"(opencli)" in `site list`. Ours win on a shared name.
+AGENT_BROWSER_SITES_NO_OPENCLI=1 turns OpenCLI off.
 
 The spec is always `name/command`. `site` alone, or a wrong spec, prints a
 one-line usage and points you at `site list`.
@@ -4947,7 +5290,8 @@ Start here (for AI agents):
   chrome-use skills get core --full
 
   Skills ship with the CLI (always version-matched) and include workflow
-  patterns, ref/selector usage, and copy-paste examples. Prefer this over
+  patterns, ref/selector usage, and copy-paste examples. For repository builds
+and tests on an SSH host, load core/development. Prefer the usage guide over
   guessing commands from flag docs alone. Specialized skills cover Electron
   apps, Slack, exploratory testing, and cloud browser providers.
 
@@ -4982,7 +5326,10 @@ Core Commands:
   focus <sel>                Focus element
   check <sel>                Check checkbox
   uncheck <sel>              Uncheck checkbox
-  select <sel> <val...>      Select dropdown option
+  select <sel> <val...>      Select dropdown option (native <select>)
+  pick <sel> --option <text> Choose an option in any combobox. Autocomplete
+                             field → `pick <ref> --option "<text>"`: types it,
+                             waits for the suggestions, clicks the match
   paste <text>               Paste content with a MIME type instead of typing it
                              [--format text|md|html] [--selector <sel>]. Never
                              touches the real clipboard, and a newline stays a
@@ -4992,7 +5339,10 @@ Core Commands:
                              disambiguate a repeated phrase (they are context,
                              not part of the selection); --cursor-before /
                              --cursor-after leave a caret instead of a selection
-  drag <src> <dst>           Drag and drop
+  drag <src> <dst|dx[,dy]>   Drag and drop, or move a slider handle by an offset
+  solve-slider [retries]    Attempt a NetEase Yidun puzzle (default: 3 retries)
+                             For ordered icon clicks and verified CAPTCHA
+                             continuation: skills get core/captcha
   upload <sel> <files...>    Upload files
   download <sel> <path>      Download file from an element
   download-url <url> [path]  Start a URL download through ab-connect. A blob:
@@ -5004,6 +5354,7 @@ Core Commands:
                              stays 'hidden' — this is the way to make a page that
                              gates its UI on visibility render for real
   scroll <dir> [px]          Scroll (up/down/left/right)
+  scroll <dir> --until <sel> Scroll step by step until <sel>/@ref/text= is in view
   scrollintoview <sel>       Scroll element into view
   wait <sel|ms>              Wait for element or time
   expect <condition>         Assert (pass/fail + exit code): element visible/gone,
@@ -5014,7 +5365,7 @@ Core Commands:
                              per-field status + inline validation errors
   friction [--json|--clear]  Local log of failed commands (what's painful to
                              drive) — local only, never uploaded
-  screenshot [path]          Take screenshot (auto-downscaled to ≤2000px long edge;
+  screenshot [path]          Take screenshot (auto-downscaled to ≤1200px long edge;
                              --max-width/--max-height/--scale to override; --annotate
                              refreshes labels without invalidating existing refs)
   pdf <path>                 Save as PDF
@@ -5038,7 +5389,8 @@ Core Commands:
   keep                       Leave the active tab for the user — exempt it from
                              auto-close/idle cleanup + remove it from the session
                              tab group (so scratch tabs get cleaned, this one stays)
-  close [--all]              Close browser (--all closes every session)
+  close [--all]              Close browser (--all closes every session; refuses
+                             while other sessions are live unless --force)
 
 Navigation:
   back                       Go back
@@ -5106,11 +5458,13 @@ Tabs:
                              Dead relay tab records are removed on reconnect.
   tab new [url] [--activate]
                              Create a tab; --activate raises it before initialization
-  tab select <ref> [--activate]
+  tab select <ref> [--activate [--force]]
                              Select a tab (external: created or adopted only)
-  tab adopt <url|targetId> [--activate]
+  tab adopt <url|targetId> [--activate [--force]]
                              Attach an existing tab (extension or CDP), no reload
-                             --activate (alias --front) leaves the target in front
+                             --activate (alias --front) leaves the target in front;
+                             refused while another session's tab is in front of
+                             that window (it would be hidden) unless --force
   tab inspect <ref>          Browser metadata without page JS (ab-connect 0.5.16+ on relay)
   tab close [ref]            Close a tab (external: session-created only)
   open <url> --reuse-tab     Reuse an existing tab on that URL instead of spawning
@@ -5435,6 +5789,7 @@ Environment:
   AGENT_BROWSER_DOWNLOAD_PATH    Default download directory for browser downloads
   AGENT_BROWSER_DEFAULT_TIMEOUT  Default action timeout in ms (default: 25000)
   AGENT_BROWSER_SETTLE_MS        Ceiling on the pre-observation wait in ms (default: 1000; 0 disables)
+  AGENT_BROWSER_SPARSE_SCREENSHOT  0 = don't auto-attach a screenshot to a near-empty canvas snapshot
   AGENT_BROWSER_SETTLE_QUIET_MS  DOM-quiet window that ends the wait early in ms (default: 100)
   AGENT_BROWSER_SESSION_NAME     Auto-save/load state persistence name
   AGENT_BROWSER_STATE_EXPIRE_DAYS Auto-delete saved states older than N days (default: 30)
@@ -5777,6 +6132,36 @@ pub fn print_version() {
 mod tests {
     use super::{eval_result_text, format_a11y_text, format_storage_text, print_command_help};
     use serde_json::json;
+
+    #[test]
+    fn a_relocation_prints_what_the_ref_was_and_where_it_landed() {
+        let line = super::relocation_line(&json!({
+            "ref": "@e5", "how": "adaptive", "score": 0.82,
+            "role": "button", "name": "Save now",
+            "was": {"role": "button", "name": "Save"},
+        }))
+        .unwrap();
+        assert!(
+            line.starts_with("@e5 relocated (adaptive match, score 0.82)"),
+            "{line}"
+        );
+        assert!(line.contains("[button \"Save\"]"), "{line}");
+        assert!(line.contains("acted on [button \"Save now\"]"), "{line}");
+        assert!(line.contains("snapshot -i"), "{line}");
+
+        let line = super::relocation_line(&json!({
+            "ref": "@e2", "how": "role-name", "role": "link", "name": "Home",
+            "was": {"role": "link", "name": "Home"},
+        }))
+        .unwrap();
+        assert!(line.contains("(role + name re-query)"), "{line}");
+        assert!(super::relocation_line(&json!({"how": "adaptive"})).is_none());
+    }
+
+    #[test]
+    fn slider_solver_has_its_own_help_topic() {
+        assert!(print_command_help("solve-slider"));
+    }
 
     #[test]
     fn site_has_its_own_help_topic() {

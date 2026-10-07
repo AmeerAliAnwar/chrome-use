@@ -37,6 +37,7 @@ pub mod providers;
 pub mod react;
 #[allow(dead_code)]
 pub mod recording;
+pub mod ref_hints;
 #[allow(dead_code)]
 pub mod relay;
 #[allow(dead_code)]
@@ -45,10 +46,11 @@ pub mod sensitive;
 
 pub mod script;
 
+#[allow(dead_code)]
+pub mod rotating_slider;
 pub mod script_js;
 #[allow(dead_code)]
 pub mod settle;
-#[allow(dead_code)]
 pub mod slider;
 #[allow(dead_code)]
 pub mod snapshot;
@@ -60,6 +62,7 @@ pub mod stealth;
 pub mod storage;
 #[allow(dead_code)]
 pub mod stream;
+pub mod timing;
 #[allow(dead_code)]
 pub mod tracing;
 #[allow(dead_code)]

@@ -47,14 +47,27 @@ fn reaped_marker_path(session: &str) -> std::path::PathBuf {
 /// to land as possible: the socket dir may not exist yet on a machine where no
 /// daemon has ever written a socket.
 pub fn mark_browser_reaped(session: &str, idle_ms: u64) {
+    mark_session_closed(
+        session,
+        &format!("the idle timeout closed it after {idle_ms}ms with no commands"),
+    );
+}
+
+/// Record that something other than this session's own agent closed its
+/// browser or tabs, so the session's next command says so instead of
+/// answering from a fresh `about:blank` as if it were the page.
+///
+/// Concurrent agents share one Chrome. When one of them runs `close --all`,
+/// `session prune` or `session stop <another session>`, every other session
+/// loses its tab mid-task, and its next command silently opened a new blank
+/// tab: the agent saw `tab list` shrink to one `about:blank` tab, assumed the
+/// page had reset, and filled the form again — submitting the order twice.
+pub fn mark_session_closed(session: &str, reason: &str) {
     let path = reaped_marker_path(session);
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    if let Err(e) = fs::write(
-        &path,
-        format!("the idle timeout closed it after {idle_ms}ms with no commands"),
-    ) {
+    if let Err(e) = fs::write(&path, reason) {
         if env::var("AGENT_BROWSER_DEBUG").is_ok() {
             eprintln!(
                 "[daemon] failed to record the reaped-browser marker at {}: {e}",
@@ -543,7 +556,15 @@ async fn handle_connection<S>(
 
                 let response = {
                     let mut s = state.lock().await;
-                    execute_command_recovering(&cmd, &mut s).await
+                    let (mut response, timing) =
+                        super::timing::timed(execute_command_recovering(&cmd, &mut s)).await;
+                    let ok = response.get("success").and_then(|v| v.as_bool()) == Some(true);
+                    let action = cmd.get("action").and_then(|v| v.as_str()).unwrap_or("");
+                    super::timing::log_command(&s.session_id, action, ok, &timing);
+                    if let Some(obj) = response.as_object_mut() {
+                        obj.insert("timing".to_string(), timing);
+                    }
+                    response
                 };
 
                 let mut resp = serde_json::to_string(&response).unwrap_or_default();
@@ -706,6 +727,23 @@ mod idle_tests {
 
         // Read once: the next command must not repeat a warning about a browser
         // it is already using.
+        assert!(take_reaped_marker(&session).is_none());
+    }
+
+    /// Another session's `close --all` leaves the same marker, carrying who
+    /// closed it, for the victim's next command to report.
+    #[test]
+    fn a_close_from_another_session_leaves_a_marker_naming_it() {
+        let session = format!("cu-test-closed-by-{}", std::process::id());
+        let _ = fs::remove_file(reaped_marker_path(&session));
+
+        mark_session_closed(
+            &session,
+            "`chrome-use close --all` run from session `other` closed it",
+        );
+        let reason = take_reaped_marker(&session).expect("a marker was written");
+        assert!(reason.contains("close --all"), "{reason}");
+        assert!(reason.contains("`other`"), "{reason}");
         assert!(take_reaped_marker(&session).is_none());
     }
 }

@@ -16,6 +16,7 @@ mod install;
 mod jev;
 mod mcp;
 mod native;
+mod opencli;
 mod output;
 mod ownership;
 mod read;
@@ -29,7 +30,7 @@ mod test_utils;
 mod upgrade;
 mod validation;
 
-use serde_json::json;
+use serde_json::{json, Value};
 use std::env;
 use std::fs;
 use std::process::exit;
@@ -746,6 +747,21 @@ fn session_stop_forced_note(session: &str, tabs: usize) -> String {
     )
 }
 
+/// Why `target`'s daemon is being stopped, for its own agent to read on its
+/// next command — `None` when the caller is stopping its own session. Another
+/// session's `session stop <name>` or `session prune` closes that session's
+/// tabs while its agent may be mid-task; without this its next command opens
+/// a blank tab and answers as if nothing happened.
+fn stopped_from_outside_reason(target: &str, own: &str, command: &str) -> Option<String> {
+    if target == own {
+        return None;
+    }
+    Some(format!(
+        "`chrome-use {command}` run from session `{own}` stopped it at {}",
+        chrono::Local::now().format("%H:%M:%S")
+    ))
+}
+
 fn run_session_lifecycle(args: &[String], session: &str, json_mode: bool) {
     let subcommand = args.get(1).map(|s| s.as_str());
 
@@ -772,6 +788,9 @@ fn run_session_lifecycle(args: &[String], session: &str, json_mode: bool) {
             }
             let stopped = (|| -> Result<(), String> {
                 let _lock = connection::lock_session_lifecycle(target)?;
+                if let Some(reason) = stopped_from_outside_reason(target, session, "session stop") {
+                    native::daemon::mark_session_closed(target, &reason);
+                }
                 connection::kill_stale_daemon(target);
                 if connection::has_created_targets(target) {
                     let _ = native::browser::DAEMON_SESSION.set(target.to_string());
@@ -843,6 +862,9 @@ fn run_session_lifecycle(args: &[String], session: &str, json_mode: bool) {
                 .map(|s| s.name)
                 .collect();
             for s in &sessions {
+                if let Some(reason) = stopped_from_outside_reason(s, session, "session prune") {
+                    native::daemon::mark_session_closed(s, &reason);
+                }
                 connection::kill_stale_daemon(s);
             }
             if json_mode {
@@ -959,11 +981,11 @@ fn run_status(session: &str, json_mode: bool) {
     let host_report = connect::native_host_report();
     let host_installed = !host_report.manifests.is_empty();
     let host_healthy = host_report.is_healthy();
-    let relay_up = connect::relay_url().is_some();
+    let relay_up = connect::relay_is_responsive();
     // Printed next to the driving profile below, so it must be that profile's
     // version, not the last `hello` writer's (#319).
-    let extension_version = connect::relay_ext_version_driving();
-    let profile = connect::driving_profile();
+    let extension_version = relay_up.then(connect::relay_ext_version_driving).flatten();
+    let profile = relay_up.then(connect::driving_profile).flatten();
     let current = inventory.sessions.iter().find(|item| item.name == session);
 
     if json_mode {
@@ -1241,16 +1263,112 @@ fn run_dashboard_stop(json_mode: bool) {
     }
 }
 
-fn run_close_all(flags: &Flags) {
+/// A live session `close --all` would close, as shown when it refuses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CloseAllTarget {
+    name: String,
+    pid: u32,
+    /// Seconds since the daemon started (its `.pid` file was written).
+    age_secs: Option<u64>,
+}
+
+/// The live sessions that are not the caller's own. `close --all` closes
+/// every session in the user's Chrome — other agents' and other Claude
+/// sessions' work included — so it refuses while any of these exist unless
+/// `--force` is given. An empty result means `close --all` proceeds.
+fn close_all_blockers(sessions: &[CloseAllTarget], own: &str, force: bool) -> Vec<CloseAllTarget> {
+    if force {
+        return Vec::new();
+    }
+    sessions.iter().filter(|s| s.name != own).cloned().collect()
+}
+
+/// `--force` (or `--yes` / `-y`, the confirmation `cookies clear --all` takes)
+/// lets `close --all` close other agents' sessions too.
+fn close_all_forced(args: &[String]) -> bool {
+    args.iter()
+        .any(|a| matches!(a.as_str(), "--force" | "--yes" | "-y"))
+}
+
+fn format_age(secs: u64) -> String {
+    match secs {
+        s if s < 60 => format!("{s}s"),
+        s if s < 3600 => format!("{}m", s / 60),
+        s if s < 86400 => format!("{}h{}m", s / 3600, (s % 3600) / 60),
+        s => format!("{}d{}h", s / 86400, (s % 86400) / 3600),
+    }
+}
+
+fn close_all_refusal_message(own: &str, others: &[CloseAllTarget]) -> String {
+    let (count, verb) = if others.len() == 1 {
+        ("1 other live session".to_string(), "belongs")
+    } else {
+        (format!("{} other live sessions", others.len()), "belong")
+    };
+    let mut msg = format!(
+        "refusing `close --all`: {count} {verb} to other agents or other Claude sessions \
+         and would be closed too:\n"
+    );
+    for s in others {
+        let age = s
+            .age_secs
+            .map(|a| format!(", started {} ago", format_age(a)))
+            .unwrap_or_default();
+        msg.push_str(&format!("  - {} (pid {}{age})\n", s.name, s.pid));
+    }
+    msg.push_str(&format!(
+        "To close only your own session ({own}), run `chrome-use close`.\n\
+         To really close every session, including the ones above, run `chrome-use close --all --force`."
+    ));
+    msg
+}
+
+fn run_close_all(flags: &Flags, force: bool) {
     // walk_daemons auto-cleans stale .pid / .sock / .stream sidecar files and
     // separates out the standalone dashboard. We only want to send `close` to
     // real session daemons; the dashboard has its own `dashboard stop`.
     let inventory = walk_daemons();
-    let sessions: Vec<(String, u32)> = inventory
+    let socket_dir = get_socket_dir();
+    let now = std::time::SystemTime::now();
+    let targets: Vec<CloseAllTarget> = inventory
         .sessions
         .iter()
-        .map(|s| (s.name.clone(), s.pid))
+        .map(|s| CloseAllTarget {
+            name: s.name.clone(),
+            pid: s.pid,
+            age_secs: fs::metadata(socket_dir.join(format!("{}.pid", s.name)))
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| now.duration_since(t).ok())
+                .map(|d| d.as_secs()),
+        })
         .collect();
+
+    let blockers = close_all_blockers(&targets, &flags.session, force);
+    if !blockers.is_empty() {
+        let message = close_all_refusal_message(&flags.session, &blockers);
+        if flags.json {
+            print_json_value(json!({
+                "success": false,
+                "error": message,
+                "type": "close_all_other_sessions",
+                "code": "close_all_other_sessions",
+                "retryable": false,
+                "data": {
+                    "ownSession": flags.session,
+                    "otherSessions": blockers
+                        .iter()
+                        .map(|s| json!({ "name": s.name, "pid": s.pid, "ageSecs": s.age_secs }))
+                        .collect::<Vec<_>>(),
+                },
+            }));
+        } else {
+            eprintln!("{} {}", color::error_indicator(), message);
+        }
+        exit(1);
+    }
+
+    let sessions: Vec<(String, u32)> = targets.into_iter().map(|s| (s.name, s.pid)).collect();
 
     if sessions.is_empty() {
         if flags.json {
@@ -1268,7 +1386,10 @@ fn run_close_all(flags: &Flags) {
     let mut failed: Vec<(String, String)> = Vec::new();
 
     for (session, pid) in &sessions {
-        let cmd = json!({ "id": gen_id(), "action": "close" });
+        // `closedBy` lets every OTHER session's daemon record that its tabs
+        // were closed from outside, so its own agent is told on its next
+        // command instead of silently getting a fresh about:blank.
+        let cmd = json!({ "id": gen_id(), "action": "close", "closedBy": flags.session });
         match send_command(cmd, session) {
             Ok(resp) if resp.success => closed.push(session.clone()),
             Ok(resp) => {
@@ -1611,6 +1732,81 @@ fn main() {
                 ),
             }
         }
+        // A `name/cmd` we have no adapter for but OpenCLI does: run it with
+        // OpenCLI's runtime over this session (opencli.rs). `site verify` too.
+        {
+            let verify = clean.get(1).map(|s| s.as_str()) == Some("verify");
+            let at = if verify { 2 } else { 1 };
+            if let Some(spec) = clean.get(at).filter(|s| opencli::handles(s)) {
+                let entry = opencli::lookup(spec).unwrap_or_default();
+                let write_fixture = verify && clean.iter().any(|a| a == "--write-fixture");
+                let rest: Vec<String> = clean[at + 1..]
+                    .iter()
+                    .filter(|a| !(verify && a.as_str() == "--write-fixture"))
+                    .cloned()
+                    .collect();
+                let mut env = opencli::run(spec, &entry, &rest, &flags.session);
+                let mut ok = env.get("success").and_then(|v| v.as_bool()) == Some(true);
+                let result = env.get("data").cloned().unwrap_or(Value::Null);
+                if ok && verify {
+                    let (vok, report) = site::verify_result(spec, &result, write_fixture);
+                    if !vok {
+                        ok = false;
+                        let issues: Vec<String> = report
+                            .get("issues")
+                            .and_then(|x| x.as_array())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|i| i.as_str().map(String::from))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        env["error"] = json!(format!("site verify {spec}: {}", issues.join("; ")));
+                    }
+                    env["verify"] = report;
+                }
+                if flags.json {
+                    let mut data = json!({ "result": result, "source": opencli::SOURCE_LABEL });
+                    if let Some(v) = env.get("verify") {
+                        data["verify"] = v.clone();
+                    }
+                    println!(
+                        "{}",
+                        json!({ "success": ok, "data": data, "error": if ok { Value::Null } else { env.get("error").cloned().unwrap_or(Value::Null) } })
+                    );
+                } else if ok {
+                    eprintln!("{}", color::dim(&format!("site {spec} (via OpenCLI)")));
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&result).unwrap_or_default()
+                    );
+                    if let Some(v) = env.get("verify") {
+                        if v.get("recorded").and_then(|x| x.as_bool()) == Some(true) {
+                            eprintln!(
+                                "{} site verify: fixture recorded",
+                                color::success_indicator()
+                            );
+                        } else {
+                            eprintln!("{} site verify: ok", color::success_indicator());
+                        }
+                    }
+                } else {
+                    let err = env
+                        .get("error")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("failed");
+                    match env
+                        .get("hint")
+                        .and_then(|v| v.as_str())
+                        .filter(|h| !h.is_empty())
+                    {
+                        Some(h) => eprintln!("{} {err} — {h}", color::error_indicator()),
+                        None => eprintln!("{} {err}", color::error_indicator()),
+                    }
+                }
+                exit(if ok { 0 } else { 1 });
+            }
+        }
         match clean.get(1).map(|s| s.as_str()) {
             Some("update") => {
                 let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
@@ -1631,9 +1827,23 @@ fn main() {
                 return;
             }
             Some("list") => {
+                let theirs: Vec<String> = {
+                    let ours = site::list_adapters().unwrap_or_default();
+                    let mut v: Vec<String> = opencli::manifest()
+                        .iter()
+                        .filter_map(opencli::spec_of)
+                        .filter(|s| !ours.contains(s))
+                        .collect();
+                    v.sort();
+                    v.dedup();
+                    v
+                };
                 match site::list_adapters() {
                     Ok(list) if flags.json => {
-                        println!("{}", json!({ "success": true, "adapters": list }))
+                        println!(
+                            "{}",
+                            json!({ "success": true, "adapters": list, "opencli": theirs })
+                        )
                     }
                     Ok(list) if list.is_empty() => {
                         println!("no site adapters installed — run `chrome-use site update`")
@@ -1641,6 +1851,9 @@ fn main() {
                     Ok(list) => {
                         for a in &list {
                             println!("{a}");
+                        }
+                        for a in &theirs {
+                            println!("{a} {}", color::dim("(opencli)"));
                         }
                         eprintln!(
                             "{}",
@@ -1659,6 +1872,16 @@ fn main() {
             }
             Some("info") => {
                 let spec = clean.get(2).cloned().unwrap_or_default();
+                if opencli::handles(&spec) {
+                    if let Some(entry) = opencli::lookup(&spec) {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&opencli::info(&entry))
+                                .unwrap_or_default()
+                        );
+                        return;
+                    }
+                }
                 match site::load_adapter(&spec) {
                     Ok(a) => println!(
                         "{}",
@@ -1781,6 +2004,9 @@ fn main() {
                 }
                 return;
             }
+            // `site analyze [url]` / `site verify <name>/<cmd> …` → daemon dispatch
+            // (commands.rs builds them).
+            Some("analyze") | Some("verify") => {}
             // `site <name>/<cmd> [args]` → fall through to the daemon dispatch.
             Some(spec) if spec.contains('/') => {
                 // #125: an adapter arg whose name collides with a reserved global
@@ -1815,7 +2041,7 @@ fn main() {
             }
             _ => {
                 eprintln!(
-                    "{} usage: chrome-use site <name>/<cmd> [args] | site update | site list | \
+                    "{} usage: chrome-use site <name>/<cmd> [args] | site analyze [url] | site verify <name>/<cmd> [args] [--write-fixture] | site update | site list | \
                      site info <name>/<cmd> | site sources | site add|remove <source>",
                     color::error_indicator()
                 );
@@ -2273,7 +2499,7 @@ fn main() {
         Some("close") | Some("quit") | Some("exit")
     ) && clean.iter().any(|a| a == "--all")
     {
-        run_close_all(&flags);
+        run_close_all(&flags, close_all_forced(&clean));
         return;
     }
 
@@ -2377,6 +2603,7 @@ fn main() {
                 code: None,
                 retryable: None,
                 warning: None,
+                timing: None,
             },
             Err(e) => {
                 let metadata = error_envelope::classify_error(&e);
@@ -2387,6 +2614,7 @@ fn main() {
                     data: None,
                     error: Some(e),
                     warning: None,
+                    timing: None,
                 }
             }
         };
@@ -3113,7 +3341,8 @@ fn main() {
             // can't tell a rate-limited/failed call from a real empty result.
             // Promote such an adapter error into the top-level envelope so both
             // `--json` (`success:false`, `error`) and the exit code (1) reflect it.
-            if cmd.get("action").and_then(|v| v.as_str()) == Some("site") {
+            let raw_eval = cmd.get("rawEval").and_then(|v| v.as_bool()) == Some(true);
+            if cmd.get("action").and_then(|v| v.as_str()) == Some("site") && !raw_eval {
                 if let Some(result) = resp.data.as_ref().and_then(|d| d.get("result")) {
                     let adapter_err = result
                         .get("error")
@@ -3138,6 +3367,83 @@ fn main() {
                                 None => err,
                             });
                         }
+                    }
+                }
+            }
+            // A failed adapter whose name OpenCLI also has, as a read: run that
+            // instead of failing. Precedence picks ours first, which must not
+            // hide a working command behind a broken one (e.g. a page CSP that
+            // blocks the adapter's API). Writes never retry — they may have
+            // half-run.
+            if cmd.get("action").and_then(|v| v.as_str()) == Some("site") && !resp.success {
+                let spec = cmd.get("spec").and_then(|v| v.as_str()).unwrap_or("");
+                let entry = opencli::lookup(spec)
+                    .filter(|e| e.get("access").and_then(|v| v.as_str()) == Some("read"));
+                if let Some(entry) = entry {
+                    let args =
+                        opencli::fallback_args(&entry, cmd.get("siteArgs").unwrap_or(&Value::Null));
+                    let env = opencli::run(spec, &entry, &args, &flags.session);
+                    if env.get("success").and_then(|v| v.as_bool()) == Some(true) {
+                        let first = resp
+                            .error
+                            .take()
+                            .unwrap_or_default()
+                            .lines()
+                            .next()
+                            .unwrap_or("")
+                            .to_string();
+                        if !flags.json {
+                            eprintln!(
+                                "{}",
+                                color::dim(&format!(
+                                    "site {spec} failed ({first}); used OpenCLI's {spec} instead"
+                                ))
+                            );
+                        }
+                        resp.success = true;
+                        resp.data = Some(json!({
+                            "result": env.get("data").cloned().unwrap_or(Value::Null),
+                            "source": opencli::SOURCE_LABEL,
+                            "fallbackFrom": first,
+                        }));
+                    }
+                }
+            }
+            // `site verify`: compare the result's shape with the stored fixture
+            // (or record it). A mismatch fails the command like an adapter error.
+            if let Some(v) = cmd.get("verify").filter(|v| !v.is_null()) {
+                if resp.success {
+                    let spec = v.get("spec").and_then(|x| x.as_str()).unwrap_or("");
+                    let write = v.get("writeFixture").and_then(|x| x.as_bool()) == Some(true);
+                    let result = resp
+                        .data
+                        .as_ref()
+                        .and_then(|d| d.get("result"))
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    let (ok, report) = site::verify_result(spec, &result, write);
+                    if !ok {
+                        resp.success = false;
+                        let issues: Vec<String> = report
+                            .get("issues")
+                            .and_then(|x| x.as_array())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|i| i.as_str().map(String::from))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        resp.error = Some(format!(
+                            "site verify {spec}: {}",
+                            if issues.is_empty() {
+                                "could not record the fixture".to_string()
+                            } else {
+                                issues.join("; ")
+                            }
+                        ));
+                    }
+                    if let Some(d) = resp.data.as_mut().and_then(|d| d.as_object_mut()) {
+                        d.insert("verify".into(), report);
                     }
                 }
             }
@@ -3566,6 +3872,75 @@ fn run_batch(flags: &Flags, bail: bool, arg_commands: Option<Vec<Vec<String>>>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Stopping another session leaves it a reason naming who stopped it;
+    /// stopping your own does not.
+    #[test]
+    fn stopping_another_session_is_explained_to_it() {
+        let reason = stopped_from_outside_reason("ab-so2", "ab-hn1", "session prune")
+            .expect("another session is told");
+        assert!(reason.contains("`chrome-use session prune`"), "{reason}");
+        assert!(reason.contains("`ab-hn1`"), "{reason}");
+        assert!(stopped_from_outside_reason("ab-hn1", "ab-hn1", "session stop").is_none());
+    }
+
+    fn target(name: &str) -> CloseAllTarget {
+        CloseAllTarget {
+            name: name.to_string(),
+            pid: 100,
+            age_secs: Some(90),
+        }
+    }
+
+    #[test]
+    fn close_all_with_only_own_session_proceeds() {
+        let sessions = vec![target("mine")];
+        assert!(close_all_blockers(&sessions, "mine", false).is_empty());
+        assert!(close_all_blockers(&[], "mine", false).is_empty());
+    }
+
+    #[test]
+    fn close_all_refuses_when_other_sessions_are_live() {
+        let sessions = vec![target("mine"), target("other-a"), target("other-b")];
+        let blockers = close_all_blockers(&sessions, "mine", false);
+        let names: Vec<_> = blockers.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["other-a", "other-b"]);
+        // The caller's own session need not be running for others to block.
+        assert_eq!(close_all_blockers(&sessions[1..], "mine", false).len(), 2);
+    }
+
+    #[test]
+    fn close_all_force_overrides_the_guard() {
+        let sessions = vec![target("mine"), target("other")];
+        assert!(close_all_blockers(&sessions, "mine", true).is_empty());
+    }
+
+    #[test]
+    fn close_all_force_flag_spellings() {
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(!close_all_forced(&args(&["close", "--all"])));
+        assert!(close_all_forced(&args(&["close", "--all", "--force"])));
+        assert!(close_all_forced(&args(&["close", "--yes", "--all"])));
+        assert!(close_all_forced(&args(&["quit", "--all", "-y"])));
+    }
+
+    #[test]
+    fn close_all_refusal_lists_sessions_and_both_ways_out() {
+        let msg = close_all_refusal_message("mine", &[target("other")]);
+        assert!(msg.contains("1 other live session belongs"), "{msg}");
+        assert!(msg.contains("other (pid 100, started 1m ago)"), "{msg}");
+        assert!(msg.contains("`chrome-use close`"), "{msg}");
+        assert!(msg.contains("close --all --force"), "{msg}");
+        assert!(msg.contains("(mine)"), "{msg}");
+    }
+
+    #[test]
+    fn format_age_units() {
+        assert_eq!(format_age(5), "5s");
+        assert_eq!(format_age(125), "2m");
+        assert_eq!(format_age(3_900), "1h5m");
+        assert_eq!(format_age(90_000), "1d1h");
+    }
 
     #[test]
     fn test_parse_proxy_simple() {

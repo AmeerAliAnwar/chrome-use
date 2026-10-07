@@ -123,6 +123,8 @@ chrome-use uncheck @e1         # Uncheck checkbox
 chrome-use select @e1 "value"  # Select by value/label; native setter commits controlled forms
 chrome-use select @e1 "a" "b"  # Select multiple options
 chrome-use scroll down 500     # Scroll page (default: down 300px)
+chrome-use scroll down --until "#footer"  # Step until target (selector/@ref/text=) is in view;
+                                          # --until-text "…", --max-steps 30, --timeout <ms>
 chrome-use scrollintoview @e1  # Scroll element into view (alias: scrollinto)
 chrome-use drag @e1 @e2        # Drag and drop
 chrome-use upload @e1 file.pdf # Upload files; consumed/cleared dropzones warn but succeed
@@ -211,6 +213,18 @@ chrome-use wait --url "**/dashboard"    # Wait for URL pattern (or -u)
 chrome-use wait --load networkidle      # Wait for network idle (or -l)
 chrome-use wait --fn "window.ready"     # Wait for JS condition (or -f)
 ```
+
+## CAPTCHA continuation
+
+```bash
+chrome-use solve-slider 1       # ordinary Yidun puzzle: initial attempt + one retry
+chrome-use skills get core/captcha  # type detection, visual clicks, result verification
+```
+
+A verified slider success returns `solved:true`; exhausted attempts return an
+error and a nonzero exit code. `solve-slider` does not recognize ordered icons.
+For an authorized task, inspect and attempt the visible challenge before
+handoff. See `core/captcha` for coordinate conversion and bounded retries.
 
 ## Mouse Control
 
@@ -346,6 +360,13 @@ set. It records the goal, the page text and field values, which includes
 anything already typed into the form, so treat the file as sensitive. The run report also splits `act_ms` into
 `act_read_ms`, `cmd_click_ms`, `cmd_press_ms` and `cmd_insert_ms`.
 
+## Response body provenance
+
+`network request <id>` reads the body from the renderer that captured it,
+including cross-origin frames. `responseBodyError` explains an unavailable or
+evicted body; it is not an empty response and not proof of server acceptance.
+The internal CDP session identifier is not included in JSON output.
+
 ## Network
 
 ```bash
@@ -437,6 +458,14 @@ or the liveness probe, and leaves it in the foreground. It changes the visible
 tab and may help a background tab respond; activation alone is not evidence
 that page reads work. Read the page again to verify recovery.
 
+A background tab does not need activating to be driven: clicks and typing reach
+it, and a hidden page only runs its timers late (about once a second), so a
+result can land after `--observe` returns "no change". Wait for it
+(`wait --text <expected>`) and re-read before repeating anything. On the relay,
+`tab select|adopt --activate` is refused while another session's tab is in
+front of the same window, because activating yours would hide it and break that
+session's clicks; `--force` overrides that.
+
 If new-tab initialization fails, the error includes the retained target ID. Use
 `tab select <targetId> --activate` with the same session and connection endpoint,
 then `snapshot -i`. Do not repeat `tab new` to recover that target or automatically
@@ -501,6 +530,8 @@ chrome-use dialog status         # Check if a dialog is currently open
 chrome-use eval "document.title"          # Simple expressions only
 chrome-use eval -b "<base64>"             # Any JavaScript (base64 encoded)
 chrome-use eval --stdin                   # Read script from stdin
+chrome-use eval --background "<expr>"     # Start a slow expression in the page and poll for it
+                                          # (past the extension relay's ~8s limit per evaluation)
 ```
 
 Use `-b`/`--base64` or `--stdin` for reliable execution. Shell escaping with nested quotes and special characters is error-prone.
@@ -768,6 +799,7 @@ AGENT_BROWSER_EXTENSIONS="/ext1,/ext2"       # Comma-separated extension paths
 AGENT_BROWSER_INIT_SCRIPTS="/a.js,/b.js"     # Comma-separated init script paths
 AGENT_BROWSER_ENABLE="react-devtools"        # Comma-separated built-in init script features
 AGENT_BROWSER_HIDE_SCROLLBARS="false"        # Keep native scrollbars visible in headless Chromium screenshots
+AGENT_BROWSER_SPARSE_SCREENSHOT="0"          # Don't auto-attach a screenshot to a near-empty canvas snapshot
 AGENT_BROWSER_PROVIDER="browserbase"         # Cloud browser provider
 AGENT_BROWSER_STREAM_PORT="9223"             # Override WebSocket streaming port (default: OS-assigned)
 AGENT_BROWSER_DASHBOARD_ALLOWED_HOSTS="ws.example.com"  # Extra hostnames the dashboard accepts (reverse proxy); only loopback names otherwise
@@ -806,7 +838,10 @@ AGENT_BROWSER_BLOCK_WEBRTC="1"        # --launch only. Hide local IP via WebRTC.
                                       #   through the proxy when one is set; "0" opts out.
 AGENT_BROWSER_HIDE_CANVAS="1"         # --launch only. Session-stable canvas/audio fingerprint noise.
 AGENT_BROWSER_ADAPTIVE_REF="0"        # Disable adaptive @ref relocation (on by default; relocates a
-                                      #   moved element by fingerprint when role/name re-query fails).
+                                      #   moved element by fingerprint when role/name re-query fails,
+                                      #   only onto the same role + name — a renamed match is refused
+                                      #   and offered as `try @eN`; every relocation is reported in
+                                      #   data.relocated + on stderr).
 ```
 
 > **Heads-up for `console` / `errors`:** capture is **off by default** in this stealth

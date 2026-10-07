@@ -20,6 +20,26 @@ Login flows, session persistence, OAuth, 2FA, and authenticated browsing.
 - [Token Refresh Handling](#token-refresh-handling)
 - [Security Best Practices](#security-best-practices)
 
+## Ground rules
+
+Reuse an authorized logged-in session first. Follow the user's authorization
+and the host's safety rules.
+
+On a login page, `auth login --bwu` uses a Bitwarden account; add `--item`
+when several match. In a `--launch` browser, `--passkey` signs in with only
+a vault passkey (bwu 0.9.0+); passkeys are unsupported on the extension relay.
+
+Never print secrets or put passwords in shell arguments/history. Use an
+authorized vault and stdin, and protect saved state files as credentials.
+Do not ask for secrets to be pasted into chat. A successful login requires
+reaching the requested authenticated destination, not merely clicking submit.
+
+For a step that actually requires the human, use `session handoff`, explain
+the step, and stop driving that session. Run `session resume` only after the
+user says they are done. An idle-recovery warning means a launched browser may
+have been replaced; inspect state instead of assuming the previous form/login
+survived.
+
 ## Import Auth from Your Browser
 
 The fastest way to authenticate is to reuse cookies from a Chrome session you are already logged into.
@@ -425,6 +445,10 @@ built to log in *by itself*: pull credentials from the auth vault or Bitwarden
 persist the session (`state save` / `--session-name`) so later runs start already
 logged in. Do NOT hand a login to the human just because it has a password or a
 2FA step — solve it. See the login patterns above and [session-management.md](session-management.md).
+
+For a CAPTCHA, load `core/captcha`: inspect its current type, try an ordinary
+slider solver or screenshot-guided ordered clicks, verify, and continue the
+authorized login. A loaded vendor script is not proof that a person is needed.
 
 **`session handoff` is a rare escape hatch, NOT how you log in.** Reach for it
 *only* when a step is genuinely impossible for the agent — an image/behavioral

@@ -1,8 +1,174 @@
 # Changelog
 
-## 1.5.158
+## 1.5.170
 
 <!-- release:start -->
+### Improvements
+
+- **A `wait --text` timeout names the page's actual wording when only the case or spacing differs.** Waiting for "Grand Total" on a page that says "Grand total" used to time out after 25 seconds with only a general reminder that matching is case-sensitive, and agents then fell back to `eval`. Now the error says the page does show "Grand total" and gives the exact `wait --text` to use. (#432)
+- **The core skill's `extract` example runs as written.** Agents copied the placeholder `extract --schema '{rows,fields}'` literally and got a JSON error. (#432)
+
+### Contributors
+
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.169
+
+### Bug Fixes
+
+- **`close --all` no longer closes other people's sessions by accident.** While another session is live, it closes nothing, lists the other sessions, and says to run `chrome-use close` for your own or add `--force` for all. In an 8-agent test, two agents ran `close --all` when stuck and wiped the other seven sessions mid-task. (#429)
+- **A session closed from outside says so.** Its next command used to run silently in a new blank tab. Agents saw `about:blank`, assumed the form was lost, and submitted twice. Now the next command warns that the tabs were closed by `close --all` (or `session stop`/`prune`) from a named session, and says to check whether a submission already went through before redoing it. (#431)
+- **`tab select --activate` won't hide another session's tab.** While another live session's tab is in front of the window, it is refused; add `--force` to override. The background-tab note now explains that a click there usually did reach the page: wait for the result and re-read, and don't resubmit. (#431)
+- **`pick` handles autocomplete fields.** `pick @e6 --option "Kyoto"` types the text, waits for the suggestions, clicks the best match ("Kyoto" over "Kyoto Station") and checks the field took it. `pick <ref> "<text>"` works too, and `select` on a non-native combobox points to `pick`. Almost every agent in the test fell back to typing and clicking by hand. (#430)
+
+### Improvements
+
+- **The core skill again lists the commands to use instead of `eval`**, in 5 rows: text, click, counting, waiting, and setting values. (#428)
+
+### Contributors
+
+- @leeguooooo
+
+## 1.5.168
+
+### Improvements
+
+- **A ref that no longer matches its snapshot is never acted on as a guess.** When a `@ref`'s element was replaced, chrome-use still re-finds it. If the replacement has the same role and name, the action runs and the reply reports it (`relocated` in `--json`, a `⚠ @eN relocated` line on stderr). If the best match has a different name ("Delete" → "Delete all"), nothing is clicked. The error offers it as a new ref, `try @e7 [button] "Delete all"`, along with up to two other close matches. A text field re-found by its `id`, `name` or `data-testid` is still filled after its label changes, and reported (#356). `Unknown ref` errors now say what the ref was and suggest current refs. Borrowed from callstack/agent-device. (#419)
+- **`scroll down --until <selector|@ref|text=…>`** scrolls step by step until the target is in view, in one call. It stops at `--max-steps` (default 30), the timeout, or the end of the page, and fails with how far it got. `--until-text "…"` and `--selector <container>` work too. (#420)
+- **A snapshot of a canvas page comes with a screenshot.** When the tree is near-empty because a canvas fills the page, the snapshot attaches a 1200px screenshot path (`data.screenshot`). That saves a round trip. `AGENT_BROWSER_SPARSE_SCREENSHOT=0` turns it off. (#420)
+- **The core skill is a third of its size.** `skills get core` is 6 KB of rules and routing instead of 15.7 KB; the detail moved to the `core/<topic>` references. (#416)
+
+### Bug Fixes
+
+- **`--observe` before any snapshot no longer renumbers unchanged elements.** The delta reported unchanged links as removed and re-added under new refs, so a ref the agent held could point at a different control. (#418)
+- **`--observe` no longer lists other extensions' requests**, such as `chrome-extension://…/locales.json`. (#418)
+- **Local pages no longer suggest OpenCLI's desktop-app commands.** Every `localhost` page was offered 19 `antigravity/*` commands meant for a local Electron app. (#418)
+- **Extension tests no longer fail on a busy machine.** The duplicate-tab deadline tests now run on an injected fake clock instead of real 5–20 ms budgets. These tests had made two release preflights fail. (#417)
+
+### Contributors
+
+- @leeguooooo
+
+## 1.5.167
+
+### Bug Fixes
+
+- **`chrome-use status` no longer reports a dead relay as up.** When the native host exits abruptly, its relay address file stays on disk, and `status` used to read that file as a live connection, showing cached extension and profile details as current. It now asks the extension for a reply, waiting up to 10 seconds on a silent connection. If none arrives, it reports the relay as down and the cached details as unknown. (#411, thanks @Sean529)
+
+### Contributors
+
+- @Sean529
+
+## 1.5.166
+
+### Improvements
+
+- **`click` refuses a target that something else covers.** It used to click the element through the DOM (`element.click()`, `isTrusted=false`) and only warn, so agents often believed they had hit the real control. Now it fails with `click refused: #b is covered by <div id="cookie"> "Cookie banner" at its click point…`. `click --allow-dom` clicks it through the DOM anyway. `check`, downloads and sign-in keep the old fallback, because a styled checkbox covering its own hidden input is normal there and they verify the result themselves. (#414)
+- **Every reply says where the time went.** `--json` replies carry `timing: {ms, cdpMs, cdpCalls, slowest}`, the costliest Chrome calls, and the daemon logs one line per command to `~/.chrome-use/timing.jsonl` (no URLs or page content; rotated at 20 MB; `AGENT_BROWSER_TIMING_LOG=0` turns it off). (#414)
+- **Screenshots default to 1200 px on the longest edge, down from 2000.** That is about 1.2k image tokens for a viewport instead of ~3.3k. Full-page shots are capped by width only, so a long page stays readable. `--full-res` keeps the captured size. (#414)
+
+Borrowed from iphone-use.
+
+### Contributors
+
+- @leeguooooo
+
+## 1.5.165
+
+### New Features
+
+- **`eval --background <expr>` runs a slow expression past the relay's 8-second limit.** It starts the expression in the page and polls for its value, the way `site` adapters already run. A value that happens to contain an `error` field still counts as data. (#413)
+
+### Bug Fixes
+
+- **OpenCLI commands that wait inside the page no longer time out.** `jd/search`, for example, waits in the page for results and was cut off after 8 seconds with "relay timeout". Its evaluations now use `eval --background`. (#413)
+- **OpenCLI commands that need no browser run.** Commands like `pubmed/search` failed with `Cannot read properties of null (reading 'query')`, because they were handed a page they do not take. chrome-use now calls them the way OpenCLI does, using OpenCLI's own argument preparation and routing. (#413)
+
+### Contributors
+
+- @leeguooooo
+
+## 1.5.164
+
+### New Features
+
+- **Rotating Yidun sliders.** `solve-slider` measures translation and rotation while dragging, matches the main puzzle silhouette, and checks the current question’s result. Unsupported or ambiguous shapes fail explicitly. (#412)
+
+### Bug Fixes
+
+- **Slider failure is a failed command.** Exhausted attempts now exit nonzero with `success:false`; a hidden widget’s old success cannot approve the current question. (#412)
+- **Cross-origin response bodies come from the frame that made the request.** Network detail uses the recorded renderer session and reports `responseBodyError` when the body is unavailable. (#412)
+
+### Improvements
+
+- **Agents attempt ordinary CAPTCHAs during authorized tasks.** The bundled guide covers sliders and ordered image clicks, bounded retries, foreground coordinate measurement, and site-level acceptance. A provider success or resend label alone does not prove SMS delivery or login. (#412)
+- **Development builds and tests can run over SSH.** Configure a build host for `build:native`, `build:190`, and `test:190`; the runner uploads Git-listed working-tree contents, serializes its Cargo cache, and verifies downloaded binaries against SHA-256 receipts. SSH failure never starts local compilation. (#412)
+
+### Contributors
+
+- @leeguooooo
+
+## 1.5.163
+
+### Improvements
+
+- **A failing adapter no longer hides a working OpenCLI command of the same name.** When one of our adapters fails and OpenCLI has a read command with that name, chrome-use runs OpenCLI's instead. Example: `hackernews/top` from the community pack fetches an API the page's security policy blocks, so it always failed; it now returns data through OpenCLI. Your arguments carry over by name, with common aliases mapped (`count` → `limit`, `q` → `query`). stderr says what happened; `--json` adds `source: "opencli"` and `fallbackFrom`. Write commands never retry. (#409)
+
+### Contributors
+
+- @leeguooooo
+
+## 1.5.162
+
+### Bug Fixes
+
+- **OpenCLI commands install on Windows.** `site update` looked for `npm`, but on Windows it is `npm.cmd`, so OpenCLI was silently skipped there. (#408)
+- **An OpenCLI command can no longer run forever.** It stops after 300 seconds, or after its own `timeout` argument plus 60 seconds when that is longer (login flows wait for you), and says so. `AGENT_BROWSER_OPENCLI_TIMEOUT=<seconds>` changes the limit. (#408)
+
+### Contributors
+
+- @leeguooooo
+
+## 1.5.161
+
+### New Features
+
+- **OpenCLI's commands run as `site` commands.** With Node.js 20+ on PATH, `site update` installs a pinned [OpenCLI](https://github.com/jackwener/OpenCLI) (1.8.8, about 180 sites and 1,300 commands) into `~/.chrome-use/opencli` with `npm install --ignore-scripts`; no token is needed. A `name/cmd` that neither of our packs has runs through OpenCLI's own runtime, but every browser step goes through chrome-use, so it uses your current session and logins: `chrome-use site hackernews/best --limit 5 --json`. They are marked `(opencli)` in `site list`, `site info` shows their args, and the site hint lists them after ours. Our adapters win on a shared name. `AGENT_BROWSER_SITES_NO_OPENCLI=1` turns this off. (#407)
+- **`site analyze [url]` shows where a page's data comes from.** It lists the same-site API calls the page made, the state it embeds (`__NEXT_DATA__`, `__INITIAL_STATE__`, JSON script tags) and any anti-bot vendor. It then recommends reading the site's own API from the page, then embedded state, then the DOM, the order in which they break least, and lists next steps. Do the action that loads the data first, then analyze. (#407)
+- **`site verify <name>/<cmd> [args]` catches a broken adapter.** `--write-fixture` records the shape of a good result in `~/.chrome-use/site-fixtures/` (types only, no values). Later runs fail with exit 1 when a field disappears, changes type, or a list comes back empty. Works for OpenCLI commands too. (#407)
+
+### Contributors
+
+- @leeguooooo
+
+## 1.5.160
+
+### Bug Fixes
+
+- **Switching to a tab that is still loading announces its site adapters.** A tab opened in the background can still read `about:blank` from the page when you switch to it, so 1.5.159 missed that site's `siteAdapters` hint. The hint now uses the url the command reported, taken from Chrome's tab info, and checks again on the next command if the site is still unknown. (#406)
+
+### Contributors
+
+- @leeguooooo
+
+## 1.5.159
+
+### New Features
+
+- **Site adapters are announced whenever you reach their site, not only on `open`/`snapshot`.** `tab new`, switching or closing tabs, `back`/`forward`/`reload`, a click or key press that navigates, `read`, and the first command on a tab the session did not open now attach the same `siteAdapters` hint when the page is on a different site than the last one announced. Staying on one site, you hear about it once. The text hint also names `chrome-use site info <pack>` for the arguments. (#405)
+- **A site you drive a lot without an adapter gets a suggestion to write one.** After 30 actions on a site in one session, or on a third day of use, one response carries `siteAdapterSuggestion` (stderr: `site adapter suggestion: …`). It tells the agent to ask you before writing anything. It comes once per site per session and not again for two weeks; local hosts and IPs are skipped, and `AGENT_BROWSER_SITES_NO_SUGGEST=1` turns it off. Only hosts and dates are kept, in `~/.chrome-use/site-usage.json`. The agent guide explains how to write your own adapter in `~/.chrome-use/my-sites` and register it with `site add`. (#405)
+
+### Improvements
+
+- **The official adapter pack takes precedence over the community pack.** `site update` records which pack each adapter came from. When both packs ship the same `name/cmd` (today `twitter/search` and `twitter/thread`), the official one is used, and for each site the hint lists official and your own adapters before community ones. (#405)
+
+### Contributors
+
+- @leeguooooo
+
+## 1.5.158
+
 ### Bug Fixes
 
 - **Windows: a call no longer hangs after the session daemon starts.** The daemon was spawned with handle inheritance on, so it also held the stdout/stderr pipes of whoever ran chrome-use. The `chrome-use.exe` the caller started exited normally, but a caller reading its output to the end (Rust `Command::output()`, Python `subprocess.run`) kept waiting until the daemon exited, up to its 10-minute idle timeout. A new daemon starts after an idle exit, on `adopt`, or after a version change, so the relay seemed to work and then hang after idle. The standard handles are no longer inheritable when the daemon is spawned. (#399, likely cause of #392)
@@ -10,7 +176,6 @@
 ### Contributors
 
 - @leeguooooo
-<!-- release:end -->
 
 ## 1.5.157
 

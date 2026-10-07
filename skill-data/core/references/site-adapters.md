@@ -20,17 +20,57 @@ chrome-use site github/issues owner/repo --json   # run it → JSON (navigates t
 - It navigates to the adapter's domain (reusing the current tab if you're already on it), so
   login-gated feeds (`bilibili/feed`, `twitter/...`) work because they run as *you*.
 - If no adapter fits, fall back to the normal `snapshot`/`eval` loop. chrome-use fetches and
-  runs two default sources: the [bb-sites](https://github.com/epiral/bb-sites) community pack
-  and the official [chrome-use-sites](https://github.com/leeguooooo/chrome-use-sites) pack.
+  runs two default sources: the official [chrome-use-sites](https://github.com/leeguooooo/chrome-use-sites)
+  pack and the [bb-sites](https://github.com/epiral/bb-sites) community pack. On a shared
+  `name/cmd` the official one wins.
+- **OpenCLI commands work too.** When Node.js 20+ is on PATH, `site update` also installs
+  [OpenCLI](https://github.com/jackwener/OpenCLI) (~1,300 commands over ~180 sites). A
+  `name/cmd` that neither pack has runs through OpenCLI's own runtime, driving this same
+  session. They show as `(opencli)` in `site list`, `site info` shows their args, and they come
+  last in the `siteAdapters` hint. If one of our adapters fails and OpenCLI has a read command
+  of the same name, chrome-use runs that instead (stderr says so; `--json` adds
+  `source: "opencli"` and `fallbackFrom`). Writes never retry. Same command, same JSON: `chrome-use site hackernews/best
+  --limit 5 --json`. `AGENT_BROWSER_SITES_NO_OPENCLI=1` turns them off.
 
 > **Auto-trigger — act on it.** chrome-use keeps both packs synced automatically (first use +
-> weekly), and when you `open`/`navigate`/`snapshot` a page whose domain has adapters it tells
-> you: a `site adapters for <domain>` line on stderr, and a `siteAdapters: {domain, commands}`
-> field in `--json`. **When you see that, prefer the listed `site <name>/<cmd>` over snapshot+click
+> weekly), and whenever you reach a page whose domain has adapters it tells you: on every
+> `open`/`navigate`/`snapshot`, and on any other command that lands you on a different site
+> (`tab new`/`tab <id>`, `back`/`forward`, a click that navigates, the first command on a tab you
+> didn't open). It prints a `site adapters for <domain>` line on stderr and adds a
+> `siteAdapters: {domain, commands}` field in `--json`. A session that stays on one site hears
+> about it once, not on every command. **When you see that, prefer the listed `site <name>/<cmd>` over snapshot+click
 > for reading data** — it's the cheaper, more reliable path and it's already installed. You don't
 > need to run `site update` yourself; just use the command it names. (Only on a brand-new setup
 > where the packs haven't been fetched yet, a named `site <name>/<cmd>` may say it's not installed —
 > run `site update` once, then re-run the command.)
+
+## When a site you keep driving has no adapter
+
+If you work on the same site a lot and no adapter covers it, chrome-use adds
+`siteAdapterSuggestion: {domain, actionsThisSession, daysUsed, message}` to one response (stderr:
+`site adapter suggestion: …`). It comes once per site per session and at most every two weeks.
+**Ask the user** whether to turn the steps you keep repeating there into an adapter. Don't write
+one without a yes. If they agree:
+
+1. First check `chrome-use site list | grep <site>`: OpenCLI may already cover it. Otherwise
+   do the action that loads the data (search, scroll, open the list), then run
+   `chrome-use site analyze`. It lists the API calls the page made, the state it embeds
+   (`__NEXT_DATA__`, `__INITIAL_STATE__`, …) and any anti-bot vendor, and picks a strategy.
+   Prefer, in this order: a public API; the site's own JSON API called from the page
+   (`fetch(url, {credentials: 'include'})`); embedded page state; the DOM. Each step down breaks
+   more often. Write `~/.chrome-use/my-sites/<name>/<cmd>.js` in the format above (`@meta` with
+   `name`, `description`, `domain`, `args`, `readOnly`; then the `async function`).
+2. Register the folder once and sync: `chrome-use site add ~/.chrome-use/my-sites`, then
+   `chrome-use site update`. Keep your own adapters in that folder, not in `~/.chrome-use/sites`,
+   because a sync rewrites `~/.chrome-use/sites`.
+3. Run it: `chrome-use site <name>/<cmd> --json`. When the result looks right, record it:
+   `chrome-use site verify <name>/<cmd> [args] --write-fixture`. Later, `site verify <name>/<cmd>`
+   fails (exit 1) when a field disappears, changes type, or a list comes back empty, so a broken
+   adapter shows up before you trust its output. The fixture keeps the shape only, never values. If it's generally useful, offer to send it to
+   [chrome-use-sites](https://github.com/leeguooooo/chrome-use-sites). That opens a PR from the
+   user's account, so ask before you do it.
+
+`AGENT_BROWSER_SITES_NO_SUGGEST=1` turns the suggestion off.
 
 ## Long text, local files, long runs
 

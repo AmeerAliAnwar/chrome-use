@@ -207,13 +207,17 @@ chrome-use snapshot -i --diff          # only what changed since the last snapsh
 
 The agent operates in your Chrome: you'll see tabs opening, pages loading, clicks happening in real time. You can take over at any point (e.g. solve a CAPTCHA), then let the agent continue.
 
+For an authorized task, the bundled skill tells the agent to inspect and attempt ordinary CAPTCHAs before handing off: `solve-slider` for ordinary and rotating Yidun puzzles, screenshot-guided ordered clicks for readable icon challenges, then verify the site's result and continue. Load `chrome-use skills get core/captcha`. Attempts are bounded; unavailable or ambiguous challenges still need a handoff. This workflow does not guarantee every provider or challenge can be solved. Activate the target before capturing coordinates; a provider success or frozen resend countdown does not establish site acceptance.
+
 | Command | Purpose |
 |---|---|
 | `chrome-use open <url>` | Connect to your Chrome and navigate |
 | `chrome-use snapshot -i` | Read the page; the start of every interaction |
 | `chrome-use click "Post"` · `click @e3` · `click 449 320` | Click by text, by snapshot ref, or on a raw viewport coordinate |
 | `chrome-use fill "Title" "Hello World"` · `type @e3 "text"` | `fill` replaces a whole value and `type` appends, both with trusted input events; a ⚠ warning says when the page did not react (e.g. its Save stayed disabled) |
-| `chrome-use screenshot ./page.png` | Save a screenshot (an output for looking at, never the way an agent reads a page) |
+| `chrome-use network request <id>` | Read the recorded response body from its originating renderer, including cross-origin frames; unavailable bodies carry `responseBodyError` |
+| `chrome-use screenshot ./page.png` | Save visual evidence; use it for image challenges and canvas targets, and refs for ordinary controls |
+| `chrome-use solve-slider 1` · `skills get core/captcha` | Attempt a Yidun puzzle (nonzero exit if unsolved); load ordered clicks and verification |
 | `chrome-use find "edit web service settings button"` | Ranked, non-acting candidates from a natural-language description |
 | `chrome-use actions @e15` · `do @e15 expand` | What this element supports right now, and perform one of exactly those |
 | `chrome-use tab list` · `tab select t2` · `tab adopt <url-substring\|targetId>` | List tabs; select a created or adopted tab; attach an already-open tab through the extension or direct CDP without navigating it |
@@ -225,7 +229,7 @@ The agent operates in your Chrome: you'll see tabs opening, pages loading, click
 | `chrome-use session list` · `session stop [name]` | Manage session workers |
 | `chrome-use auth login --bwu [--item <id\|name>]` | Fill the current login page from Bitwarden; handles TOTP and supported passkey second factors |
 | `chrome-use auth login --bwu --passkey` | Sign in with a vault passkey in `--launch` mode (bwu 0.9.0+) |
-| `chrome-use status` | Relay, profile, extension, and session health |
+| `chrome-use status` | Relay, profile, extension, and session health; verifies an extension reply within 10 seconds |
 
 A field that shows your text is not proof the page saved it. `fill` warns
 when the form's Save/Submit was disabled before the edit and still is,
@@ -383,6 +387,13 @@ to teach your agent, JSON on stdout.
 | [chatgpt-use](https://github.com/leeguooooo/chatgpt-use) | Your ChatGPT subscription as a coding-agent backend, no API key |
 | [computer-use](https://github.com/leeguooooo/computer-use) | The macOS desktop itself |
 | [pixcake-use](https://github.com/leeguooooo/pixcake-use) | Read-only PixCake probing: snapshot / diff / SQLite inspection |
+
+## Remote developer checks
+
+Configure an SSH build host once with `git config --local chromeuse.remoteHost <ssh-alias>`.
+`pnpm build:190` and `pnpm test:190` run Cargo remotely; `pnpm build:native` also builds remotely and retrieves a checksum-verified native binary. These commands do not fall back to compiling on your workstation.
+
+The runner snapshots Git-listed working-tree files, including uncommitted edits. Use `git add -N <path>` for a new source file before running it. Receipts under `cli/target/remote-build-receipts/` record the input hash, remote toolchain, command, exit status and artifact checksum. See [remote build instructions](scripts/REMOTE-BUILD.md).
 
 ## Contributing
 

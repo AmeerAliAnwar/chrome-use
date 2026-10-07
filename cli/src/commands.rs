@@ -30,6 +30,55 @@ pub enum ParseError {
     InvalidSessionName { name: String },
 }
 
+const PICK_USAGE: &str =
+    "pick <selector|@ref> --option \"<text>\"  (or: pick <selector|@ref> \"<text>\")";
+
+/// `pick` arguments: `<target> --option <text…>` or the positional sugar
+/// `<target> <text…>`. A stray word between the target and `--option`, or an
+/// unknown flag in the positional form, is ambiguous and refused rather than
+/// guessed at.
+fn parse_pick_args(rest: &[&str]) -> Result<(String, String), ParseError> {
+    let missing = || ParseError::MissingArguments {
+        context: "pick".to_string(),
+        usage: PICK_USAGE,
+    };
+    let sel = match rest.first() {
+        Some(s) if *s != "--option" && *s != "-o" => *s,
+        _ => return Err(missing()),
+    };
+    let opt_pos = rest.iter().position(|a| *a == "--option" || *a == "-o");
+    let option = match opt_pos {
+        Some(p) => {
+            if p != 1 {
+                return Err(ParseError::InvalidValue {
+                    message: format!(
+                        "pick: unexpected {:?} before --option; give the target, then --option and the option text",
+                        rest[1..p].join(" ")
+                    ),
+                    usage: PICK_USAGE,
+                });
+            }
+            rest[p + 1..].join(" ")
+        }
+        None => {
+            if let Some(flag) = rest[1..].iter().find(|a| a.starts_with("--")) {
+                return Err(ParseError::InvalidValue {
+                    message: format!("pick: unknown flag {flag:?}"),
+                    usage: PICK_USAGE,
+                });
+            }
+            rest[1..].join(" ")
+        }
+    };
+    if option.trim().is_empty() {
+        return Err(missing());
+    }
+    Ok((sel.to_string(), option))
+}
+
+const SCROLL_UNTIL_USAGE: &str = "scroll [direction] [amount] --until <selector|@ref|text=…> \
+     [--until-text <text>] [--max-steps <n>] [--timeout <ms>] [--selector <container>]";
+
 /// Top-level commands an agent is likely to mistype, used for "did you mean"
 /// suggestions on an unknown command (issue #29). Not exhaustive — just the
 /// common verbs plus a few known wrong-guesses mapped to the real command.
@@ -678,7 +727,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 .ok_or_else(|| ParseError::MissingArguments {
                     context: "click".to_string(),
                     usage:
-                        "click <selector> | click <x> <y> | click --coords <x>,<y> [--new-tab] [--follow]",
+                        "click <selector> | click <x> <y> | click --coords <x>,<y> [--new-tab] [--follow] [--allow-dom]",
                 })?;
             // A purely numeric first arg is never a valid CSS selector or @ref,
             // so it is almost certainly a coordinate that failed to parse as a
@@ -702,6 +751,11 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 });
             }
             let mut cmd = json!({ "id": id, "action": "click", "selector": sel });
+            // `--allow-dom`: if the target is covered, click it through the DOM
+            // (isTrusted=false) instead of refusing.
+            if rest.contains(&"--allow-dom") {
+                cmd["allowDom"] = json!(true);
+            }
             if new_tab {
                 cmd["newTab"] = json!(true);
             }
@@ -866,27 +920,9 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             // pick <selector|@ref> --option "<text>"  — atomic combobox select:
             // open the control, wait for options (incl. portal menus), match by
             // text, fire the right event sequence, verify. Covers native <select>,
-            // ARIA combobox/listbox, and react-select.
-            let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
-                context: "pick".to_string(),
-                usage: "pick <selector> --option \"<text>\"",
-            })?;
-            let opt_pos = rest.iter().position(|a| *a == "--option" || *a == "-o");
-            let option = match opt_pos {
-                Some(p) => rest[p + 1..].join(" "),
-                None => {
-                    return Err(ParseError::MissingArguments {
-                        context: "pick".to_string(),
-                        usage: "pick <selector> --option \"<text>\"",
-                    })
-                }
-            };
-            if option.is_empty() {
-                return Err(ParseError::MissingArguments {
-                    context: "pick".to_string(),
-                    usage: "pick <selector> --option \"<text>\"",
-                });
-            }
+            // ARIA combobox/listbox, react-select, and type-to-search
+            // (autocomplete) fields. `pick <ref> "<text>"` is accepted as sugar.
+            let (sel, option) = parse_pick_args(&rest)?;
             Ok(json!({ "id": id, "action": "pick", "selector": sel, "option": option }))
         }
         "hover" => {
@@ -1249,6 +1285,40 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         }
                         i += 1;
                     }
+                    // `--until <selector|@ref|text=…>` / `--until-text "…"`:
+                    // keep scrolling until the target is in the viewport.
+                    flag @ ("--until" | "--until-text") => {
+                        let val = rest.get(i + 1).filter(|v| !v.is_empty()).ok_or(
+                            ParseError::MissingArguments {
+                                context: format!("scroll {flag}"),
+                                usage: SCROLL_UNTIL_USAGE,
+                            },
+                        )?;
+                        let target = if flag == "--until-text" {
+                            format!("text={val}")
+                        } else {
+                            val.to_string()
+                        };
+                        obj.insert("until".to_string(), json!(target));
+                        i += 1;
+                    }
+                    flag @ ("--max-steps" | "--timeout") => {
+                        let val = rest
+                            .get(i + 1)
+                            .and_then(|v| v.parse::<u64>().ok())
+                            .filter(|n| *n > 0)
+                            .ok_or_else(|| ParseError::InvalidValue {
+                                message: format!("scroll {flag} needs a positive number"),
+                                usage: SCROLL_UNTIL_USAGE,
+                            })?;
+                        let key = if flag == "--max-steps" {
+                            "maxSteps"
+                        } else {
+                            "timeout"
+                        };
+                        obj.insert(key.to_string(), json!(val));
+                        i += 1;
+                    }
                     arg if arg.starts_with('-') => {}
                     _ => {
                         match positional_index {
@@ -1270,7 +1340,19 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             if !obj.contains_key("direction") {
                 obj.insert("direction".to_string(), json!("down"));
             }
-            if !obj.contains_key("amount") {
+            if obj.contains_key("until") {
+                // An explicit `--timeout` can outlast the socket read's default
+                // budget; give the read room so the "not found" answer arrives.
+                if let Some(t) = obj.get("timeout").and_then(|v| v.as_u64()) {
+                    obj.insert("timeout_ms".to_string(), json!(t + 10_000));
+                }
+                // No amount: the daemon steps by most of a viewport.
+            } else if obj.contains_key("maxSteps") || obj.contains_key("timeout") {
+                return Err(ParseError::InvalidValue {
+                    message: "scroll --max-steps/--timeout only apply with --until".to_string(),
+                    usage: SCROLL_UNTIL_USAGE,
+                });
+            } else if !obj.contains_key("amount") {
                 obj.insert("amount".to_string(), json!(300));
             }
             Ok(cmd)
@@ -1428,6 +1510,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             let mut max_width: Option<u32> = None;
             let mut max_height: Option<u32> = None;
             let mut scale: Option<f64> = None;
+            let mut full_res = false;
             let mut tab: Option<String> = None;
             let mut positional: Vec<&str> = Vec::new();
             let mut i = 0;
@@ -1446,6 +1529,8 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 match rest[i] {
                     "--full" | "-f" => full_page = true,
                     "--base64" | "-b" => base64 = true,
+                    // Keep the captured size: skip the default 1200px cap.
+                    "--full-res" => full_res = true,
                     // Downscale the saved image so retina/full-page shots fit an
                     // agent's image reader and screenshot px line up with click px (#42).
                     "--max-width" => {
@@ -1548,6 +1633,9 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 "path": path, "selector": selector,
                 "fullPage": full_page, "annotate": flags.annotate
             });
+            if full_res {
+                cmd["fullRes"] = json!(true);
+            }
             if base64 {
                 cmd["base64"] = json!(true);
             }
@@ -1762,6 +1850,11 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         "snapshot" => {
             let mut cmd = json!({ "id": id, "action": "snapshot" });
             let obj = cmd.as_object_mut().unwrap();
+            // The daemon outlives the shell that started it, so an opt-out set
+            // on this invocation has to travel with the command to count.
+            if let Ok(v) = std::env::var("AGENT_BROWSER_SPARSE_SCREENSHOT") {
+                obj.insert("sparseScreenshot".to_string(), json!(v));
+            }
             let mut i = 0;
             while i < rest.len() {
                 match rest[i] {
@@ -1840,6 +1933,11 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             // (no flag) stays the main frame. Leading-only so it never eats a token
             // from the script body.
             let mut frame: Option<String> = None;
+            // Optional leading `--background`: start the expression in the page
+            // and poll for its value, so it may run past the relay's ~8s limit on
+            // one evaluation. Reuses the `site` adapter runner.
+            let background = rest.first() == Some(&"--background");
+            let rest: Vec<&str> = if background { rest[1..].to_vec() } else { rest };
             let rest: Vec<&str> = if rest.first() == Some(&"--frame") {
                 let val = rest.get(1).copied().ok_or(ParseError::InvalidValue {
                     message: "eval --frame requires a value (CSS selector, @ref, url substring, \
@@ -1904,6 +2002,30 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     raw_script
                 }
             };
+            if background {
+                if frame.is_some() {
+                    return Err(ParseError::InvalidValue {
+                        message: "eval --background runs in the main frame; drop --frame"
+                            .to_string(),
+                        usage: "eval --background <js expression>",
+                    });
+                }
+                let run_key = format!("__cu_eval_{}", uuid::Uuid::new_v4().simple());
+                let timeout = crate::site::DEFAULT_RUN_TIMEOUT_MS;
+                return Ok(json!({
+                    "id": id,
+                    "action": "site",
+                    // No domain: run on the page as it is, don't navigate.
+                    "domain": "",
+                    "script": crate::site::build_expr_start(&script, &run_key),
+                    "runKey": run_key,
+                    "files": {},
+                    "runTimeoutMs": timeout,
+                    "timeout_ms": timeout + 10_000,
+                    // A plain evaluation: its value is data, never an adapter error.
+                    "rawEval": true,
+                }));
+            }
             let mut action = json!({ "id": id, "action": "evaluate", "script": script });
             if let Some(f) = frame {
                 action["frame"] = Value::String(f);
@@ -1919,6 +2041,27 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             // `args`, and emit a `site` action: the daemon navigates to the
             // adapter's @meta.domain (reusing the tab if already there) and evals
             // the adapter function in the site's own logged-in page.
+            // `site analyze [url]`: scan the page for an adapter's data source.
+            if rest.first() == Some(&"analyze") {
+                let mut cmd = json!({ "id": id, "action": "site_analyze" });
+                if let Some(url) = rest.get(1) {
+                    cmd["url"] = json!(url);
+                }
+                return Ok(cmd);
+            }
+            // `site verify <name>/<cmd> [args] [--write-fixture]`: a normal run,
+            // then main.rs compares the result's shape with the stored fixture.
+            let (verify, rest): (Option<bool>, Vec<&str>) = if rest.first() == Some(&"verify") {
+                let write = rest.contains(&"--write-fixture");
+                let kept = rest[1..]
+                    .iter()
+                    .filter(|a| **a != "--write-fixture")
+                    .copied()
+                    .collect();
+                (Some(write), kept)
+            } else {
+                (None, rest.to_vec())
+            };
             let spec = rest.first().ok_or(ParseError::InvalidValue {
                 message: "site requires <name>/<command> (run `chrome-use site list`)".to_string(),
                 usage: "site <name>/<command> [args]",
@@ -2000,6 +2143,11 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 // The CLI's socket read waits timeout_ms + a margin, so a long run
                 // is not cut off client-side before the daemon answers.
                 "timeout_ms": run_timeout_ms + 10_000,
+                "verify": verify.map(|write| json!({ "spec": spec, "writeFixture": write })),
+                // For main.rs: a failed read can retry through OpenCLI's
+                // same-named command with the same arguments.
+                "spec": spec,
+                "siteArgs": inv.args.clone(),
             }))
         }
 
@@ -2852,11 +3000,14 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         .find(|arg| !arg.starts_with("--"))
                         .ok_or(ParseError::MissingArguments {
                             context: format!("tab {sub}"),
-                            usage: "tab select <ref> [--activate]",
+                            usage: "tab select <ref> [--activate [--force]]",
                         })?;
                     let mut cmd = json!({ "id": id, "action": "tab_switch", "tabId": tab_ref });
                     if rest.iter().any(|a| *a == "--activate" || *a == "--front") {
                         cmd["activate"] = json!(true);
+                    }
+                    if rest.contains(&"--force") {
+                        cmd["forceActivate"] = json!(true);
                     }
                     Ok(cmd)
                 }
@@ -2871,12 +3022,15 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         .find(|arg| !arg.starts_with("--"))
                         .ok_or(ParseError::MissingArguments {
                             context: "tab adopt".to_string(),
-                            usage: "tab adopt <url-substring|targetId> [--activate]",
+                            usage: "tab adopt <url-substring|targetId> [--activate [--force]]",
                         })?;
                     let mut cmd = json!({ "id": id, "action": "tab_adopt", "spec": spec });
                     // Activation is opt-in and must precede the liveness probe.
                     if rest.iter().any(|a| *a == "--activate" || *a == "--front") {
                         cmd["activate"] = json!(true);
+                    }
+                    if rest.contains(&"--force") {
+                        cmd["forceActivate"] = json!(true);
                     }
                     Ok(cmd)
                 }
@@ -2909,6 +3063,9 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     let mut cmd = json!({ "id": id, "action": "tab_switch", "tabId": tab_ref });
                     if rest.iter().any(|a| *a == "--activate" || *a == "--front") {
                         cmd["activate"] = json!(true);
+                    }
+                    if rest.contains(&"--force") {
+                        cmd["forceActivate"] = json!(true);
                     }
                     Ok(cmd)
                 }
@@ -5374,6 +5531,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pick_accepts_option_flag_and_positional_sugar() {
+        let parse = |a: &[&str]| {
+            let a: Vec<String> = a.iter().map(|s| s.to_string()).collect();
+            parse_command(&a, &default_flags())
+        };
+        let flag = parse(&["pick", "@e6", "--option", "Kyoto"]).unwrap();
+        assert_eq!(flag["action"], "pick");
+        assert_eq!(flag["selector"], "@e6");
+        assert_eq!(flag["option"], "Kyoto");
+        let short = parse(&["pick", "@e6", "-o", "New", "York"]).unwrap();
+        assert_eq!(short["option"], "New York");
+        // The positional form agents reach for first.
+        let sugar = parse(&["pick", "@e6", "Kyoto"]).unwrap();
+        assert_eq!(sugar["selector"], "@e6");
+        assert_eq!(sugar["option"], "Kyoto");
+        let multi = parse(&["pick", "#city", "San Francisco"]).unwrap();
+        assert_eq!(multi["option"], "San Francisco");
+
+        // Ambiguous or incomplete forms are refused, not guessed.
+        assert!(parse(&["pick", "@e6"]).is_err());
+        assert!(parse(&["pick"]).is_err());
+        assert!(parse(&["pick", "--option", "Kyoto"]).is_err());
+        assert!(parse(&["pick", "@e6", "--option"]).is_err());
+        assert!(parse(&["pick", "@e6", "--option", " "]).is_err());
+        assert!(parse(&["pick", "@e6", "stray", "--option", "Kyoto"]).is_err());
+        assert!(parse(&["pick", "@e6", "Kyoto", "--force"]).is_err());
+    }
+
+    #[test]
     fn keep_defaults_to_deliverable_and_validates_its_reason() {
         let flags = default_flags();
         let parse = |args: &[&str]| {
@@ -7029,6 +7215,21 @@ mod tests {
             parse_command(&args("tab switch --activate t2"), &default_flags()).unwrap();
         assert_eq!(switch_front["tabId"], "t2");
         assert_eq!(switch_front["activate"], true);
+        assert!(switch_front.get("forceActivate").is_none());
+
+        // `--force` overrides the refusal to hide another session's front tab.
+        let forced =
+            parse_command(&args("tab select t2 --activate --force"), &default_flags()).unwrap();
+        assert_eq!(forced["tabId"], "t2");
+        assert_eq!(forced["activate"], true);
+        assert_eq!(forced["forceActivate"], true);
+        let adopt_forced = parse_command(
+            &args("tab adopt drama/videos --activate --force"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(adopt_forced["spec"], "drama/videos");
+        assert_eq!(adopt_forced["forceActivate"], true);
     }
 
     #[test]
@@ -9125,6 +9326,49 @@ mod tests {
         assert_eq!(cmd["direction"], "down");
         assert_eq!(cmd["amount"], 400);
         assert_eq!(cmd["selector"], ".panel");
+    }
+
+    #[test]
+    fn test_scroll_until_selector() {
+        let cmd = parse_command(&args("scroll down --until #target"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "scroll");
+        assert_eq!(cmd["direction"], "down");
+        assert_eq!(cmd["until"], "#target");
+        // No amount: the daemon steps by most of a viewport.
+        assert!(cmd.get("amount").is_none());
+        assert!(cmd.get("timeout_ms").is_none());
+    }
+
+    #[test]
+    fn test_scroll_until_defaults_direction_and_takes_limits() {
+        let cmd = parse_command(
+            &args("scroll --until @e12 --max-steps 10 --timeout 40000"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["direction"], "down");
+        assert_eq!(cmd["until"], "@e12");
+        assert_eq!(cmd["maxSteps"], 10);
+        assert_eq!(cmd["timeout"], 40000);
+        assert_eq!(cmd["timeout_ms"], 50000);
+    }
+
+    #[test]
+    fn test_scroll_until_text_maps_to_text_prefix() {
+        let cmd =
+            parse_command(&args("scroll up 500 --until-text Footer"), &default_flags()).unwrap();
+        assert_eq!(cmd["direction"], "up");
+        assert_eq!(cmd["amount"], 500);
+        assert_eq!(cmd["until"], "text=Footer");
+    }
+
+    #[test]
+    fn test_scroll_until_rejects_bad_input() {
+        assert!(parse_command(&args("scroll down --until"), &default_flags()).is_err());
+        assert!(parse_command(&args("scroll --until x --max-steps 0"), &default_flags()).is_err());
+        assert!(parse_command(&args("scroll --until x --timeout soon"), &default_flags()).is_err());
+        // The limits mean nothing without a target.
+        assert!(parse_command(&args("scroll down --max-steps 5"), &default_flags()).is_err());
     }
 
     #[test]
