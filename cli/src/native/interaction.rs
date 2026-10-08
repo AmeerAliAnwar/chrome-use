@@ -1009,7 +1009,66 @@ pub async fn fill_reporting(
         iframe_sessions,
     )
     .await?;
-    fill_object(client, &effective_session_id, &object_id, value).await
+    let first = fill_object(client, &effective_session_id, &object_id, value).await;
+    let err = match first {
+        Err(e) if is_stale_object_error(&e) => e,
+        other => return other,
+    };
+
+    // The remote object the fill was working on stopped existing part-way
+    // through (observed on the relay as "Could not find object with given id"
+    // after the trusted insert had already landed). The fill may or may not
+    // have written the value, so a blind replay could type it twice. Re-resolve
+    // the element once and READ it first: if the value is already there,
+    // report that instead of touching the field again; only a field that does
+    // not hold it gets one more fill, on the fresh handle.
+    let (fresh_id, fresh_session) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await
+    .map_err(|e2| {
+        format!("{err} (the element handle went stale mid-fill; re-resolving it failed: {e2})")
+    })?;
+    let note = "the element handle went stale mid-fill (the page's remote object was \
+                discarded); the element was re-resolved";
+    match read_value_of(client, &fresh_session, &fresh_id).await {
+        Some(current) if current == value => Ok(FillOutcome {
+            // Nothing was written on this pass; the value was read back.
+            engine: "reread".to_string(),
+            warning: Some(format!(
+                "{note} and already holds the requested value, so it was not re-typed. \
+                 Confirm any page state that depends on the input events before relying on it"
+            )),
+        }),
+        // Unknown is not "different": a field that cannot be read back may
+        // already hold the value, and writing again could type it twice.
+        None => Err(format!(
+            "{err} (the element handle went stale mid-fill; the field's value is unknown: it \
+             could not be read back after the element was re-resolved, so nothing was written \
+             again. Check it with `get value {selector_or_ref}` before repeating the fill)"
+        )),
+        Some(_) => {
+            let mut outcome = fill_object(client, &fresh_session, &fresh_id, value)
+                .await
+                .map_err(|e2| format!("{err} (re-resolved once and filled again: {e2})"))?;
+            outcome.warning = Some(join_warnings(
+                format!("{note}, did not hold the value, and was filled once more"),
+                outcome.warning.take(),
+            ));
+            Ok(outcome)
+        }
+    }
+}
+
+/// A CDP error meaning a remote object id we hold is no longer valid: the
+/// inspector session or execution context that minted it is gone. The element
+/// itself may well still be there under a fresh handle.
+pub fn is_stale_object_error(e: &str) -> bool {
+    e.contains("Could not find object with given id") || e.contains("Invalid remote object id")
 }
 
 /// [`fill_reporting`] for an element already resolved to a remote object on
@@ -4942,6 +5001,20 @@ mod select_all_chord_tests {
 
 #[cfg(test)]
 mod tests {
+    /// The error the comparison run hit on a batch `fill`, verbatim, must take
+    /// the re-resolve-and-verify path; ordinary failures must not.
+    #[test]
+    fn stale_object_errors_are_recognised() {
+        assert!(super::is_stale_object_error(
+            r#"CDP error (Runtime.callFunctionOn): {"code":-32000,"message":"Could not find object with given id"}"#
+        ));
+        assert!(super::is_stale_object_error("Invalid remote object id"));
+        assert!(!super::is_stale_object_error("Element not found: #x"));
+        assert!(!super::is_stale_object_error(
+            "Debugger is not attached to the tab with id: 1"
+        ));
+    }
+
     /// Focus stops at a frame boundary, so a key dispatched after focusing an
     /// `<iframe>` reaches the container and nothing inside it — a success by
     /// every check the command had, and the wrong target every time (#218).
@@ -5463,5 +5536,220 @@ mod hidden_page_tests {
         let seen = seen.lock().unwrap().clone();
         let methods: Vec<&str> = seen.iter().map(|(m, _)| m.as_str()).collect();
         assert_eq!(methods, ["Runtime.evaluate"]);
+    }
+}
+
+#[cfg(test)]
+mod stale_fill_tests {
+    use super::fill_reporting;
+    use crate::native::cdp::client::CdpClient;
+    use crate::native::element::RefMap;
+    use futures_util::{SinkExt, StreamExt};
+    use serde_json::{json, Value};
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::tungstenite::Message;
+
+    /// When the first element handle (`obj-1`) stops resolving.
+    #[derive(Clone, Copy)]
+    enum Stale {
+        /// After the trusted insert landed: the case the comparison run hit.
+        AfterInsert,
+        /// Before anything was written.
+        FromTheStart,
+    }
+
+    /// How reads on the re-resolved handle (`obj-2`) answer.
+    #[derive(Clone, Copy, Debug)]
+    enum FreshRead {
+        Works,
+        /// The read itself fails at the CDP level.
+        CdpError,
+        /// The page-side read reports it could not read the field.
+        NotOk,
+        /// The read answers without a value.
+        Missing,
+    }
+
+    #[derive(Default)]
+    struct Page {
+        value: String,
+        inserts: usize,
+        resolves: usize,
+        /// Calls of the page-side fill function on any handle.
+        fills: usize,
+    }
+
+    /// A fake page with one text field. Each selector lookup mints a fresh
+    /// handle (`obj-1`, `obj-2`, ...); `obj-1` goes stale as `stale` says,
+    /// answering the way Chrome does: "Could not find object with given id".
+    async fn fake_page(stale: Stale) -> (CdpClient, Arc<Mutex<Page>>) {
+        fake_page_reading(stale, FreshRead::Works).await
+    }
+
+    async fn fake_page_reading(
+        stale: Stale,
+        fresh_read: FreshRead,
+    ) -> (CdpClient, Arc<Mutex<Page>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let page = Arc::new(Mutex::new(Page::default()));
+        let state = page.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(msg)) = ws.next().await {
+                let Message::Text(text) = msg else { continue };
+                let cmd: Value = serde_json::from_str(&text).unwrap();
+                let method = cmd["method"].as_str().unwrap_or("");
+                let p = &cmd["params"];
+                let reply: Result<Value, &str> = {
+                    let mut s = state.lock().unwrap();
+                    match method {
+                        "Runtime.evaluate" if p["returnByValue"] == json!(false) => {
+                            s.resolves += 1;
+                            Ok(json!({ "result": { "type": "object",
+                            "objectId": format!("obj-{}", s.resolves) } }))
+                        }
+                        "Runtime.evaluate" => {
+                            Ok(json!({ "result": { "type": "boolean", "value": true } }))
+                        }
+                        "Input.insertText" => {
+                            s.value = p["text"].as_str().unwrap_or("").to_string();
+                            s.inserts += 1;
+                            Ok(json!({}))
+                        }
+                        "Runtime.callFunctionOn" => {
+                            let stale_now = p["objectId"] == json!("obj-1")
+                                && match stale {
+                                    Stale::AfterInsert => s.inserts > 0,
+                                    Stale::FromTheStart => true,
+                                };
+                            let f = p["functionDeclaration"].as_str().unwrap_or("");
+                            if stale_now {
+                                Err("Could not find object with given id")
+                            } else if f.contains("const v = ") {
+                                // The page-side half of fill: focused + selected.
+                                s.fills += 1;
+                                Ok(
+                                    json!({ "result": { "type": "string", "value": "input-trusted" } }),
+                                )
+                            } else if p["objectId"] == json!("obj-2") {
+                                match fresh_read {
+                                    FreshRead::Works => Ok(json!({ "result": { "type": "object",
+                                        "value": { "ok": true, "value": s.value } } })),
+                                    FreshRead::CdpError => Err("Execution context was destroyed."),
+                                    FreshRead::NotOk => Ok(json!({ "result": { "type": "object",
+                                        "value": { "ok": false } } })),
+                                    FreshRead::Missing => Ok(json!({ "result": { "type": "object",
+                                        "value": { "ok": true } } })),
+                                }
+                            } else {
+                                // Reads (and the blur tail, whose answer is ignored).
+                                Ok(json!({ "result": { "type": "object",
+                                "value": { "ok": true, "value": s.value } } }))
+                            }
+                        }
+                        _ => Ok(json!({})),
+                    }
+                };
+                let msg = match reply {
+                    Ok(result) => {
+                        json!({ "id": cmd["id"], "result": result, "sessionId": cmd["sessionId"] })
+                    }
+                    Err(e) => json!({ "id": cmd["id"], "error": { "code": -32000, "message": e },
+                        "sessionId": cmd["sessionId"] }),
+                };
+                ws.send(Message::Text(msg.to_string().into()))
+                    .await
+                    .unwrap();
+            }
+        });
+        let client = CdpClient::connect(&format!("ws://127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        (client, page)
+    }
+
+    /// The handle died after the text went in: the field already holds the
+    /// value, so it is reported, not typed a second time.
+    #[tokio::test]
+    async fn a_handle_lost_after_the_insert_is_not_typed_twice() {
+        let (client, page) = fake_page(Stale::AfterInsert).await;
+        let out = fill_reporting(
+            &client,
+            "S1",
+            &RefMap::new(),
+            "#email",
+            "alex@example.invalid",
+            &HashMap::new(),
+        )
+        .await
+        .expect("a field that holds the value is a success");
+        let p = page.lock().unwrap();
+        assert_eq!(p.inserts, 1, "must not re-type");
+        assert_eq!(p.value, "alex@example.invalid");
+        assert_eq!(p.resolves, 2, "re-resolved exactly once");
+        assert_eq!(out.engine, "reread");
+        let w = out.warning.expect("the stale handle must be reported");
+        assert!(w.contains("not re-typed"), "{w}");
+    }
+
+    /// The handle died before anything was written: re-resolve, see the field
+    /// does not hold the value, and fill exactly once.
+    #[tokio::test]
+    async fn a_handle_lost_before_the_insert_is_filled_once() {
+        let (client, page) = fake_page(Stale::FromTheStart).await;
+        let out = fill_reporting(
+            &client,
+            "S1",
+            &RefMap::new(),
+            "#email",
+            "alex@example.invalid",
+            &HashMap::new(),
+        )
+        .await
+        .expect("the second handle works");
+        let p = page.lock().unwrap();
+        assert_eq!(p.inserts, 1);
+        assert_eq!(p.value, "alex@example.invalid");
+        assert_eq!(p.resolves, 2);
+        let w = out.warning.expect("the retry must be reported");
+        assert!(w.contains("filled once more"), "{w}");
+    }
+
+    /// A re-resolved field whose value cannot be read is unknown, not
+    /// different: nothing is written again and the command fails, saying how
+    /// to check. Covers a CDP error on the read, `ok:false`, and a missing value,
+    /// whether or not the first attempt had already inserted the text.
+    #[tokio::test]
+    async fn an_unreadable_field_after_a_stale_handle_is_never_written_again() {
+        for stale in [Stale::AfterInsert, Stale::FromTheStart] {
+            for read in [FreshRead::CdpError, FreshRead::NotOk, FreshRead::Missing] {
+                let (client, page) = fake_page_reading(stale, read).await;
+                let err = fill_reporting(
+                    &client,
+                    "S1",
+                    &RefMap::new(),
+                    "#email",
+                    "alex@example.invalid",
+                    &HashMap::new(),
+                )
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("{read:?}: an unknown value must fail"));
+                let p = page.lock().unwrap();
+                let (inserts, fills) = match stale {
+                    Stale::AfterInsert => (1, 1),
+                    Stale::FromTheStart => (0, 0),
+                };
+                assert_eq!(p.inserts, inserts, "{read:?}: no second insert");
+                assert_eq!(p.fills, fills, "{read:?}: no fill on the fresh handle");
+                assert_eq!(p.resolves, 2, "{read:?}: re-resolved exactly once");
+                assert!(err.contains("value is unknown"), "{read:?}: {err}");
+                assert!(err.contains("get value #email"), "{read:?}: {err}");
+            }
+        }
     }
 }
