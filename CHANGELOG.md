@@ -1,8 +1,27 @@
 # Changelog
 
-## 1.5.176
+## 1.5.177
 
 <!-- release:start -->
+### Improvements
+
+- **An observed click no longer waits half a second for nothing.** The page-change watcher used by `--observe` was attached after the click, so it missed the page's immediate re-render and always sat out the 500 ms first-reaction window. It is now attached just before the action. The settle rules are unchanged: 100 ms of DOM quiet, no running animation, no request in flight, a 1 s ceiling. On a three-page catalog task, each `click --observe` went from about 740 ms to about 220 ms, and the whole task from about 3.5 s to about 1.4 s (median of 6 alternating rounds against 1.5.176, same timing boundary; form and delayed-load tasks unchanged). With `--follow`, the opened tab is settled on its own, never reported quiet from the opener. (#455)
+
+### Bug Fixes
+
+- **`pick … --observe` returns an observation**, as the core skill says. It used to be ignored with a warning. (#455)
+- **Flags inside a `batch` step apply to that step.** `--observe` in a step used to be dropped. An explicit `false` (`--if-present false`) overrides the batch-level flag, and a step's `--tab` never overrides a tab the command names itself. (#455)
+- **`screenshot <path> --selector <sel>` works in any order.** Unknown options are refused instead of being read as a selector or path, and XPath selectors such as `//main` keep the selector-then-path order. (#455)
+- **A `fill` whose element handle was lost mid-batch is not typed twice.** On "Could not find object with given id", chrome-use finds the field again and reads it before writing. A matching value reports success with a warning; a different value is filled once; a value it cannot read fails as unknown, and nothing is written. (#455)
+- **A `click` that opens a tab reports `openedTab` again without `--follow`.** (#455)
+
+### Contributors
+
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.176
+
 ### Bug Fixes
 
 - **`auth login --bwu` on an already signed-in page returns at once.** It used to wait 25 seconds for a login field and then fail with "no login field appeared", which agents read as a failed login. Now a page that isn't a sign-in URL and shows no login field after a short look returns `alreadySignedIn: true` in about 3 seconds, with nothing typed. Sign-in pages keep the full wait. (#453)
@@ -11,7 +30,6 @@
 ### Contributors
 
 - @leeguooooo
-<!-- release:end -->
 
 ## 1.5.175
 
