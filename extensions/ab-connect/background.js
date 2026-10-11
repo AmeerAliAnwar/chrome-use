@@ -17,6 +17,8 @@
 // native messaging.
 
 import { getRelayHealth, observeDebuggerCommand } from './relay-health.js';
+import { AgentPanelBridge, isAgentPanelSender } from './agent-panel-bridge.js';
+import { configureAgentPanel } from './sidepanel-entry.js';
 import { extensionInstallIdentity } from './relay-identity.js';
 import { duplicateTab as runDuplicateTab } from './tab-duplicate.js';
 import {
@@ -84,6 +86,14 @@ import {
 } from './tab-replacement.js';
 
 const HOST_NAME = 'com.agent_browser.connect';
+let agentPanelEntry = { ready: false, error: 'Side panel entry is being configured.' };
+void configureAgentPanel(chrome).then(result => { agentPanelEntry = result; });
+const agentPanelBridge = new AgentPanelBridge({
+  send(message) {
+    if (!port) throw new Error('Native host is not connected');
+    port.postMessage(message);
+  },
+});
 const SKIP_URL = /^(chrome|chrome-extension|devtools|chrome-untrusted|edge|about):/i;
 
 /** @type {chrome.runtime.Port|null} */
@@ -659,6 +669,7 @@ function connectHost() {
   const connectedPort = port;
   connectedPort.onMessage.addListener((msg) => {
     if (port !== connectedPort) return;
+    if (agentPanelBridge.receive(msg)) return;
     if (hostConnection.receive(connectedPort, msg)) {
       notifyConnChange(true);
       publishHostStatus();
@@ -672,6 +683,7 @@ function connectHost() {
     if (port !== connectedPort) return;
     const wasConnected = hostConnection.snapshot().connected;
     hostConnection.end(connectedPort, error);
+    agentPanelBridge.disconnect(error);
     port = null;
     nextHostAttemptAt = Date.now() + 1000;
     publishHostStatus();
@@ -2410,13 +2422,24 @@ try {
 // Popup status page asks for the live pairing state. Attempt a (re)connect on
 // demand so opening the popup also nudges the link awake, then report.
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg?.type === 'ab-agent-request') {
+    if (!isAgentPanelSender(_sender, chrome.runtime)) {
+      sendResponse({ success: false, error: 'Agent services require the packaged extension panel' });
+      return false;
+    }
+    agentPanelBridge.request(msg.operation, msg.params ?? {}).then(
+      result => sendResponse({ success: true, result }),
+      error => sendResponse({ success: false, error: String(error.message || error) }),
+    );
+    return true;
+  }
   if (msg && msg.type === 'ab-status') {
     if (!port) {
       try {
         connectHost();
       } catch (e) {}
     }
-    sendResponse({ ...hostConnection.snapshot(), tabCount: tabs.size, host: HOST_NAME });
+    sendResponse({ ...hostConnection.snapshot(), tabCount: tabs.size, host: HOST_NAME, agentPanelEntry });
   }
   return false;
 });

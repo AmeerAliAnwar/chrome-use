@@ -46,6 +46,7 @@ manifest_dir.mkdir()
 extensions = ','.join(str(Path(path).resolve()) for path in args.extension)
 log = (profile / 'chrome.log').open('w')
 process = subprocess.Popen([args.chrome, '--no-first-run', '--no-default-browser-check',
+    '--disable-features=MacAppCodeSignClone', '--password-store=basic', '--use-mock-keychain',
     '--user-data-dir=' + str(profile), '--load-extension=' + extensions,
     '--disable-extensions-except=' + extensions, 'about:blank'], stdout=log, stderr=log)
 state = {'pid': process.pid, 'profile': str(profile), 'registry': str(registry),

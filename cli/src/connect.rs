@@ -4061,6 +4061,9 @@ async fn nm_host_main() {
     let clients: ClientMap = Arc::new(Mutex::new(HashMap::new()));
     let next_client_id = Arc::new(AtomicU64::new(1));
     let (to_ext, mut to_ext_rx) = mpsc::channel::<Vec<u8>>(4096);
+    // Panel filesystem work must not block relay replies or accept unbounded
+    // work. This gate is separate from CDP and never prepares a browser.
+    let panel_jobs = Arc::new(tokio::sync::Semaphore::new(4));
 
     // Single writer to Chrome (extension) over stdout, native-messaging framed.
     tokio::spawn(async move {
@@ -4122,6 +4125,48 @@ async fn nm_host_main() {
             Ok(v) => v,
             Err(_) => continue,
         };
+        if v.get("method").and_then(|m| m.as_str()) == Some("agentPanel") {
+            let Some(request_id) = v
+                .get("requestId")
+                .and_then(|x| x.as_str())
+                .filter(|s| !s.is_empty() && s.len() <= 80)
+                .map(ToString::to_string)
+            else {
+                continue;
+            };
+            let operation = v
+                .get("operation")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            let params = v.get("params").cloned().unwrap_or(serde_json::Value::Null);
+            let panel_profile = bound_profile_id.clone();
+            let tx = to_ext.clone();
+            let permit = panel_jobs.clone().try_acquire_owned();
+            tokio::spawn(async move {
+                let result = match permit {
+                    Ok(permit) => tokio::task::spawn_blocking(move || {
+                        let _permit = permit;
+                        crate::agent_panel::handle_for_profile(
+                            &operation,
+                            &params,
+                            panel_profile.as_deref(),
+                        )
+                    })
+                    .await
+                    .unwrap_or_else(|_| Err("Agent panel service failed".into())),
+                    Err(_) => Err("Too many native agent panel requests".into()),
+                };
+                let mut reply =
+                    serde_json::json!({"method": "agentPanelReply", "requestId": request_id});
+                match result {
+                    Ok(result) => reply["result"] = result,
+                    Err(error) => reply["error"] = error.into(),
+                }
+                let _ = tx.send(reply.to_string().into_bytes()).await;
+            });
+            continue;
+        }
         // Extension version handshake: record it next to the relay URL so
         // `doctor` can report which extension build is live (and whether it's
         // behind). Best-effort; the message carries no CDP payload.
@@ -4177,6 +4222,10 @@ async fn nm_host_main() {
                 bound_profile_id = Some(id.to_string());
                 bound_profile_email = email.map(ToString::to_string);
             }
+            // Explicit panel capabilities distinguish new hosts from a legacy
+            // relay that answers pings but cannot execute panel operations.
+            let reply = serde_json::json!({"method":"pong","params":{"agentPanel":crate::agent_panel::capabilities()}});
+            let _ = to_ext.send(reply.to_string().into_bytes()).await;
             continue;
         }
         // The extension pings `focus` when a real window of this profile gains

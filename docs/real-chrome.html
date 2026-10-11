@@ -69,6 +69,7 @@
         每一站说什么协议、状态放在谁手上，见 <a href="/how-it-works.html">它怎么工作</a>。
       </p>
 
+      <p>扩展 0.5.36 的工具栏图标会打开原生 agent 侧栏，Settings 打开连接设置。macOS/Linux 可在 Conversations 中使用本机 Codex 或 Claude Code 的已有登录，在 Agents &amp; models 中发现程序和预览配置改动。浏览器工具授权显示参数，只允许当前调用一次。Windows 暂时只支持发现和配置读取。每个会话使用独立浏览器 session。侧栏没有新增网页 content script；打开侧栏仍会改变页面视口。</p>
       <h2>一次性安装</h2>
       <p>
         扩展连接只需配置一次。先注册原生消息宿主（native-messaging host），再装上 <strong>chrome-use</strong> 扩展。
@@ -494,7 +495,8 @@
         </a>
       </div>
 
-    </main>
+    <section><h2>原生会话服务</h2><p>原生服务独立于扩展连接，保留 Codex 或 Claude 的 CLI 会话。断线后只读取新增事件，不重发旧消息；失败或停止后暂停消息队列。浏览器工具绑定 profile 和会话，沿用现有 chrome-use 链路，不为显示进度启用另一条浏览器控制通道。恢复中的任务结果未确认时需先检查。合成协议测试不代表真实账号、页面和隐身检测已通过。</p></section>
+</main>
     <!-- ========================== /PAGE CONTENT =========================== -->
 
     <!-- injected: right on-this-page TOC -->

@@ -10,6 +10,37 @@ Read and act on Chrome's live accessibility state through short `@eN` refs.
 This page holds the rules and the routing; load one reference from the table
 at the end only when the task or a symptom needs it.
 
+Native agent-panel configuration planning, apply and restore are separate from
+browser actions. Saved configuration proves file readback, not a model change
+in an existing session. Inspect current values after an unconfirmed write;
+never replay it automatically. Isolation and journal details: [connection](references/connection.md).
+
+Native conversations persist message IDs and event cursors. Reconnect reads
+events without resending a turn; failure or interruption pauses the queue.
+A CLI's completed response is not proof that the whole browser task succeeded.
+Browser-tool approvals show arguments and grant one call.
+The extension toolbar opens a packaged side panel with chat history, agent
+requests, queue controls and configuration previews. It adds no page content
+script. Unsupported/unconfirmed Chrome behavior retains the connection popup.
+New chats use independent browser sessions; do not assume they target the
+currently visible page. The panel's Settings button opens connection options.
+
+Queued messages can be edited or removed only while still queued and matching
+the original text. Edits use a new ID; superseded IDs stay deduplicated. Long
+previews need a full-message read before changes. Queue operations preserve
+the running turn. Stop & send or Ctrl/Cmd+Enter is a separate direct-send
+operation: it waits for terminal/owned-process-exit confirmation and leaves
+ordinary queued messages paused. Unconfirmed or recovered turns cannot release
+a pending direct message automatically.
+Read CLI models is an explicit metadata probe, separate from installation
+discovery. It returns CLI-reported model suggestions and account state without
+identity or credentials, sends no prompt and does not verify model access.
+Missing or partial catalogs are explicit; typed model IDs remain available.
+A connected legacy relay does not imply panel support: the native host must
+advertise schema capabilities. Windows panel operations are read-only discovery
+and configuration reads; conversational processes and configuration persistence
+remain disabled there. Browser CLI automation is unaffected.
+
 ## Start with the cheapest useful evidence
 
 | Task | First choice |

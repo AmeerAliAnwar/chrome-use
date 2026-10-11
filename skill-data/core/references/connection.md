@@ -189,3 +189,102 @@ For isolated development, set `CHROME_USE_RELAY_DIR` to the same absolute
 directory in the native-host launcher and the CLI. This scopes relay discovery
 without changing HOME; combine it with unique session names and an explicit
 `--browser` ID. Relative paths are rejected before discovery. Omit it for ordinary shared-profile discovery.
+
+Native agent-panel configuration journals are also scoped by this directory,
+under `agent-panel/profiles/<profile-id>/configuration`. Without an override they
+live under `~/.chrome-use/agent-panel`. This isolates journals, not the installed
+agents' own settings. Fixture validation must also point each tested agent's
+config-root variable at synthetic settings. Discovery does not read credentials.
+Config planning reports a field diff without applying it; apply verifies source
+identity and bytes, writes atomically and reads back. Restore preserves later
+user edits and reports conflicts. A saved config does not prove a running session
+changed model. If apply/restore loses its reply, inspect current values before
+retrying; the native request is not automatically replayed.
+
+Native conversation services also live under the profile's agent-panel data
+directory. A service holds an OS ownership lock and uses a capability kept in a
+private endpoint file; neither the endpoint nor its capability belongs in page
+scripts. The native host confirms service health and the exact executable hash
+before reusing it. An active service from another build is not silently replaced.
+
+Codex uses its app-server protocol; Claude uses its stream-json control protocol.
+Their processes stay open between turns. Browser tools use the same chrome-use
+binary with explicit `AGENT_BROWSER_BROWSER` and `AGENT_BROWSER_SESSION`, plus
+the relay registry override when present. No separate browser transport is
+introduced for displaying progress. Reconnect retrieves journal events by cursor
+without sending an old message again. A repeated message ID is idempotent, and
+reusing it with different text fails. Failure/interruption pauses queued messages
+until explicitly resumed. A stop remains pending until backend terminal output
+or owned-process exit is confirmed. An unconfirmed process or recovered active
+turn requires inspection; it is not marked successful or automatically replayed.
+
+Synthetic protocol fixtures verify lifecycle behavior without using an account
+or Chrome. They do not establish real CLI login, model access, browser acceptance,
+Windows process-tree behavior or unchanged detector results.
+
+The toolbar side panel requires Chrome's native sidePanel API. The worker reads
+back open-on-action behavior before removing the connection popup; failure keeps
+that popup available. Settings in the panel opens the existing options page.
+Conversation text and tool data render as text, not HTML. Reconnect reads the
+journal cursor; an uncertain send queries conversationMessageStatus for the
+original message ID and does not interpret absence as rejection or resend it.
+Selection changes discard old read/control replies, and drafts remain scoped to
+each conversation while the panel stays open. Tool rows say Returned or Error
+returned, not that the requested browser effect was verified. Queue resume is
+explicit. Agents & models offers allow-listed field previews and native verified
+apply/restore; installation evidence is separate from authentication/model access.
+
+
+conversationRead returns bounded queued-message previews. A truncated preview
+is not editable text: conversationQueueMessageRead reads one full message while
+confirming it is still queued. conversationQueueEdit and conversationQueueRemove
+compare expectedText with the stored original under the service lock. Edit
+assigns a fresh immutable replacement ID; both original and removed IDs remain
+in the acceptance map so delayed sends cannot restore old queue entries.
+A changed/dequeued message is refused. Queue events keep transcript audit notes;
+they do not claim the message ran. Editing keeps the composer draft intact.
+Lost mutation replies are unconfirmed and never automatically retried.
+
+conversationSendDirect accepts a durable message ID and records pending direct
+intent before requesting interruption. Its ACK confirms acceptance, not stopping
+or execution. The old turn must complete/interrupt or the owned process must
+exit before begin_next can select that message ahead of the ordinary queue.
+Ordinary messages stay paused after the direct turn. A failed terminal result
+requires explicit resume; processUnconfirmed or recovered busy state refuses
+resume entirely. Repeated IDs are deduplicated and a second pending direct ID
+is refused. Queue edit/remove can replace or cancel the pending intent before
+execution. The native service can restart the CLI after confirmed exit, retaining
+its backend session identity; startup failure reports recoveryRequired rather
+than dropping the selected message or pretending it ran.
+
+agentInspect runs the selected Codex/Claude executable in private scratch
+directories, separately from installation-only discover. It checks version
+output, then uses initialize and Codex model/list/account/read (refreshToken
+false) or Claude initialize metadata. Codex cursor pages are bounded and a
+remaining cursor marks the list partial. No thread or prompt is sent. Claude
+receives empty tools/MCP configuration, no-session-persistence and a
+disableAllHooks setting, with user settings retained for agent configuration.
+The response allow-lists model identifiers, labels and reasoning efforts.
+Codex returns reportedSignedIn/reportedSignedOut/unverified; Claude reports
+account metadata presence, not verified authentication. Email, organization and
+credential fields are never transported. modelAccessVerified remains false.
+Version output from a nonzero exit is not reported as a verified version.
+Two concurrent probes, bounded output, deadlines and owned process-group exit
+checks apply; unknown cleanup fails rather than returning successful metadata.
+The current adapter requires Unix ownership support. Windows ownership,
+persistent caches and additional adapters remain separate
+acceptance work. The panel discards results after agent/program selection changes
+and never overwrites a typed model ID or substitutes static aliases on failure.
+
+The native hello reply advertises agentPanel schemaVersion/mode/modelInspection
+capabilities. Port liveness alone does not enable the panel; an older host without
+a compatible advertisement requires upgrade. Capabilities reset on reconnection
+and stale ports cannot change them. Opening while connecting automatically loads
+agent/history metadata after host confirmation. Windows mode is readOnly: only
+discover/configRead pass the native gate; no panel service, process or private
+configuration journal is created through its API. Existing browser commands are
+unchanged. Conversation support and write support are macOS/Linux in this release.
+
+Browser-tool approvals show the requested arguments and allow only a single call. Claude permission requests remain pending until a matching tool result arrives; writing a reply alone does not confirm resolution.
+Codex chrome_use MCP approvals accept only the known empty-form call schema;
+unknown forms can be declined or cancelled. Claude uses stdio permission prompts.

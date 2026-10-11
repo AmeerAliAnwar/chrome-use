@@ -1,6 +1,6 @@
 [package]
 name = "chrome-use"
-version = "1.5.188"
+version = "1.5.189"
 edition = "2021"
 description = "Fast browser automation CLI for AI agents"
 license = "Apache-2.0"
@@ -57,6 +57,9 @@ chrono = "0.4"
 urlencoding = "2"
 rust-embed = "8"
 serde_yaml = "0.9"
+jsonc-parser = { version = "=0.34.0", features = ["cst", "serde"] }
+toml_edit = "=0.25.12"
+yaml-edit = { version = "=0.3.2", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

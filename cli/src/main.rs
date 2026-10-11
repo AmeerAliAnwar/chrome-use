@@ -2,6 +2,7 @@
 // reqwest) that proving it `Send` passes the default limit of 128.
 #![recursion_limit = "256"]
 mod account;
+mod agent_panel;
 mod autologin;
 mod bwu_login;
 mod chat;
@@ -1702,6 +1703,13 @@ fn main() {
     }
     if native_host {
         connect::run_nm_host();
+        return;
+    }
+    if nm_arg1.as_deref() == Some("__panel-service") {
+        if let Err(error) = agent_panel::run_service(&env::args().skip(2).collect::<Vec<_>>()) {
+            eprintln!("{error}");
+            exit(1);
+        }
         return;
     }
 

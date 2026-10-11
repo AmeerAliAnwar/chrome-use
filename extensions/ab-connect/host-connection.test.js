@@ -6,7 +6,7 @@ test('creating a Port never claims the native host is connected', () => {
   const state = new HostConnectionState()
   state.begin({})
   assert.deepEqual(state.snapshot(), {
-    connected: false, connectionState: 'connecting', connectionError: null,
+    connected: false, connectionState: 'connecting', connectionError: null, agentPanel:null,
   })
 })
 
@@ -17,7 +17,7 @@ test('missing native host preserves its concrete error and never confirms', () =
   state.end(port, 'Specified native messaging host not found.')
   assert.deepEqual(state.snapshot(), {
     connected: false, connectionState: 'disconnected',
-    connectionError: 'Specified native messaging host not found.',
+    connectionError: 'Specified native messaging host not found.', agentPanel:null,
   })
 })
 
@@ -54,3 +54,11 @@ test('legacy host commands confirm the connection, malformed messages do not', (
   assert.equal(state.snapshot().connected, false)
   assert.equal(state.receive(port, { method: 'forwardCDPCommand', params: { method: 'Page.getFrameTree' } }), true)
 })
+
+
+test('a legacy relay is connected without falsely advertising panel capabilities', () => {
+ const state=new HostConnectionState(),port={};state.begin(port);state.receive(port,{method:'pong'});
+ assert.equal(state.snapshot().connected,true);assert.equal(state.snapshot().agentPanel,null);
+ assert.equal(state.receive(port,{method:'pong',params:{agentPanel:{schemaVersion:1,mode:'readOnly',modelInspection:false}}}),true);
+ assert.equal(state.snapshot().agentPanel.mode,'readOnly');state.end(port);assert.equal(state.snapshot().agentPanel,null);
+});
