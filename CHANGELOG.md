@@ -1,8 +1,21 @@
 # Changelog
 
-## 1.5.187
+## 1.5.188
 
 <!-- release:start -->
+Requires extension ab-connect 0.5.35 (published on the Chrome Web Store; Chrome updates it automatically).
+
+### Fixes
+
+- **A tab or pop-up an agent click opens no longer leaves Chrome in front of the user's app (macOS).** Chrome activates itself when a page opens a tab (`target=_blank`, `window.open`, pop-up windows), before any extension or CDP event, so this can't be prevented; chrome-use now puts the previous app back. Before a `click` it notes the frontmost app; if Chrome comes to the front within 1.5 s with a new tab credited to that click (its opener or group is the session's), the previous app is brought back, front window only, without launching or opening anything and with no permission prompt. Measured with Finder in front: Chrome was frontmost for 41–72 ms instead of staying there. Nothing happens if Chrome was already in front, if another app came forward, or if Chrome came forward with no new tab (you clicked into it). The click reports `focusRestored`, `focusRestoredApp` and `focusRestoredAfterMs`, or `focusNote` with the reason. `AGENT_BROWSER_RESTORE_FOCUS=0` turns it off. Windows and Linux are unchanged. (#536, fixes #468)
+
+### Contributors
+
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.187
+
 Requires extension ab-connect 0.5.35 (published on the Chrome Web Store; Chrome updates it automatically).
 
 ### Changes
@@ -13,7 +26,6 @@ Requires extension ab-connect 0.5.35 (published on the Chrome Web Store; Chrome 
 ### Contributors
 
 - @leeguooooo
-<!-- release:end -->
 
 ## 1.5.186
 
