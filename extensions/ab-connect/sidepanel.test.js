@@ -215,3 +215,45 @@ test('model metadata does not overwrite the typed model or claim execution acces
   assert.equal(f.nodes.get('model').value,'manual-model');assert.equal(f.nodes.get('modelList').children[0].value,'suggestion');
   assert.match(f.nodes.get('modelStatus').textContent,/partial catalog/);assert.match(f.nodes.get('modelStatus').textContent,/execution access is unverified/);f.panel.close();
 });
+
+
+test('uncertain sends can be retried explicitly with the same ID and text', async () => {
+  let attempts=0;
+  const f=await fixture({conversationSend:({conversationId})=>{
+    if(++attempts===1) throw new Error('lost acknowledgement');
+    return {success:true,result:{conversation:chat(conversationId)}};
+  }});
+  f.panel.select('b');await settle();f.nodes.get('message').value='retry text';
+  await assert.rejects(f.panel.send(),/lost acknowledgement/);
+  await f.panel.refresh();await settle();
+  assert.equal(f.nodes.get('pendingRecovery').hidden,false);
+  assert.equal(f.nodes.get('retryPending').disabled,false);
+  f.nodes.get('retryPending').fire('click');await settle();await settle();
+  const sends=f.calls.filter(c=>c.operation==='conversationSend');
+  assert.equal(sends.length,2);assert.deepEqual(sends[0].params,sends[1].params);
+  assert.equal(f.nodes.get('send').disabled,false);f.panel.close();
+});
+
+test('restored uncertain IDs can be cleared without resending or claiming cancellation', async () => {
+  const f=await fixture({}, {ab_panel_conversation:'b',ab_panel_pending:{b:'stored-id'}});
+  assert.equal(f.nodes.get('pendingRecovery').hidden,false);
+  assert.equal(f.nodes.get('retryPending').disabled,true);
+  f.nodes.get('clearPending').fire('click');await settle();await settle();
+  assert.equal(f.calls.some(c=>c.operation==='conversationSend'),false);
+  assert.equal(f.nodes.get('send').disabled,false);
+  assert.deepEqual(f.writes.at(-1).ab_panel_pending,{});f.panel.close();
+});
+
+test('explicit recovery preserves a lost direct-send intent', async () => {
+  let attempts=0;
+  const f=await fixture({conversationSendDirect:({conversationId})=>{
+    if(++attempts===1)throw new Error('lost direct acknowledgement');
+    return {success:true,result:{conversation:chat(conversationId)}};
+  }});
+  f.panel.select('a');await settle();f.nodes.get('message').value='priority text';
+  await assert.rejects(f.panel.send(true),/lost direct acknowledgement/);
+  await f.panel.refresh();await settle();f.nodes.get('retryPending').fire('click');await settle();await settle();
+  const sends=f.calls.filter(c=>c.operation==='conversationSendDirect');
+  assert.equal(sends.length,2);assert.deepEqual(sends[0].params,sends[1].params);
+  assert.equal(f.calls.some(c=>c.operation==='conversationSend'),false);f.panel.close();
+});

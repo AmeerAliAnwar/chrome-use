@@ -288,3 +288,13 @@ unchanged. Conversation support and write support are macOS/Linux in this releas
 Browser-tool approvals show the requested arguments and allow only a single call. Claude permission requests remain pending until a matching tool result arrives; writing a reply alone does not confirm resolution.
 Codex chrome_use MCP approvals accept only the known empty-form call schema;
 unknown forms can be declined or cancelled. Claude uses stdio permission prompts.
+
+An unconfirmed message has explicit Retry same message and Clear send warning
+controls. Retry keeps the exact ID/text and direct-send intent; reopen preserves
+only the ID, so retry is disabled when the text is unavailable. Clearing the
+warning does not cancel a possibly delivered task. No automatic resend occurs.
+Idle older services are replaced only after endpoint removal and OS-lock release.
+Read/stop operations remain available against the old service; busy services are
+never automatically killed. Custom metadata executables must be absolute paths.
+Journal loading validates the last sequence in one pass; replay uses bounded
+byte-cursor caches, invalidated when an external file change is observed.

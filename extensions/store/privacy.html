@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Privacy Policy — chrome-use</title>
-<meta name="description" content="Privacy policy for the chrome-use Chrome extension: no analytics, no trackers, no remote transmission — a local bridge between the user's Chrome and their own chrome-use CLI.">
+<meta name="description" content="Privacy policy for chrome-use: local browser automation, local conversation storage and user-selected agent/model data handling.">
 <style>
   :root{
     --fg:#1a1a1a; --muted:#5c5c5c; --accent:#2563eb; --border:#e2e2e2; --bg:#fff; --code:#f5f5f5;
@@ -33,34 +33,21 @@
 <body>
 <header>
   <h1>Privacy Policy — chrome-use</h1>
-  <div class="sub">Chrome extension (id <code>knfcmbamhjmaonkfnjhldjedeobeafmk</code>) · Last updated 2026-07-06</div>
+  <div class="sub">Chrome extension (id <code>knfcmbamhjmaonkfnjhldjedeobeafmk</code>) · Last updated 2026-10-12</div>
 </header>
 
-<p><strong>Summary: this extension contains no analytics or trackers and sends nothing to any
-remote server.</strong> It is a local bridge that lets the user's own <code>chrome-use</code>
-command-line tool, running on the same computer, drive the user's logged-in Chrome. The only data
-it ever reads leaves the browser exclusively over a local native-messaging channel to that CLI on
-the same machine — never to us, and never to a third party.</p>
-
-<h2>What the extension does</h2>
-<p>chrome-use pairs Chrome with the locally-installed <code>chrome-use</code> CLI over Chrome
-<em>native messaging</em> (a local inter-process channel; no network socket, no token). When the
-user issues an automation command in the CLI, the extension relays Chrome DevTools Protocol
-operations to the tab the user targets. Everything happens on the user's machine, initiated by the
-user. The extension makes no outbound network requests of its own.</p>
-
-<h2>Data collection &amp; use</h2>
-<div class="scroll">
+<p><strong>The extension has no analytics or tracking backend.</strong> It communicates with the locally installed chrome-use CLI through Chrome native messaging. It handles browser observations and automation commands requested by the user. In the agent side panel, the selected local Codex or Claude Code CLI may send the user's task and requested browser context to its configured model service. That service's terms and privacy policy apply.</p>
+<h2>Local agent conversations</h2>
+<p>The side panel sends tasks to a local agent service through the native host. Conversation messages, replies and tool results are saved in a profile-scoped journal on the user's computer. The native service uses authenticated loopback IPC; the extension itself does not contact a model server. Chrome local storage keeps selection and message identifiers, not the conversation text. The panel does not request or store an agent API key. Existing CLI authentication and provider configuration remain with the chosen CLI.</p>
+<h2>Data handling</h2>
 <table>
-  <tr><th>Category</th><th>Handled?</th><th>Detail</th></tr>
-  <tr><td class="key">Profile account email</td><td>Read locally only</td><td>With the <code>identity</code> permission the extension reads the email of the Google account signed into the current Chrome profile (via <code>chrome.identity.getProfileUserInfo</code>). It is included <strong>only</strong> in the local handshake sent to the paired <code>chrome-use</code> CLI over native messaging, so the user can tell which profile/account a connection belongs to and avoid automating the wrong account. It is never stored off-device, never transmitted to any remote server, and never shared. See the permission table below.</td></tr>
-  <tr><td class="key">Browsing history</td><td>No</td><td>Not collected. Page content is acted on transiently only while the user is running an automation command, and is never stored or sent off-device.</td></tr>
-  <tr><td class="key">Authentication / cookies / credentials</td><td>Only on the user's explicit command, locally</td><td>The extension never reads or exports cookies on its own. When the user runs a cookie command in their own CLI (e.g. <code>cookies get</code> or <code>cookies set --curl</code>), the extension relays that read/write between the targeted tab and the local <code>chrome-use</code> CLI over the same native-messaging channel as everything else. Cookies are <strong>never stored off-device, never transmitted to any remote server, and never shared</strong> with a third party. This mirrors the profile-email framing above.</td></tr>
-  <tr><td class="key">Analytics / telemetry</td><td>No</td><td>The extension contains no analytics, tracking, or crash-reporting code.</td></tr>
-  <tr><td class="key">Remote transmission</td><td>No</td><td>The extension's only message peer is the local <code>chrome-use</code> CLI via native messaging. It makes no outbound network requests of its own.</td></tr>
+<tr><th>Data</th><th>Purpose and destination</th></tr>
+<tr><td>Profile email</td><td>Read locally to label the connected Chrome profile and sent to the local native host. It is not used for advertising or analytics.</td></tr>
+<tr><td>Task messages, replies and requested webpage content</td><td>Used to perform the user's browser task. The local agent may transmit task context to its configured model service. Messages and tool returns may be retained in the local conversation journal.</td></tr>
+<tr><td>Target URLs and automation actions</td><td>Used to identify the intended page, execute requested actions and report their effects. Task-related URLs and tool returns may appear in local history or agent context. The extension does not harvest general browsing history or monitor unrelated user activity.</td></tr>
+<tr><td>Cookies and authentication information</td><td>Cookie commands read or write the targeted site's cookies only when requested through the local CLI. The extension does not export cookies on its own or send them to a developer-operated server. The user's downstream CLI or agent controls any further handling.</td></tr>
+<tr><td>Configuration and credentials</td><td>Discovery reads installation/configuration evidence. Panel edits are limited to supported model/provider fields. Credential values are not returned by configuration discovery or stored in the panel. The chosen CLI manages its own login.</td></tr>
 </table>
-</div>
-
 <h2>Permissions &amp; why they are needed</h2>
 <div class="scroll">
 <table>
@@ -71,6 +58,7 @@ user. The extension makes no outbound network requests of its own.</p>
   <tr><td class="key">downloads</td><td>Start a user-requested URL download, report its completion and local filename to the paired CLI, and list or clear Chrome download history. Clearing history never deletes files. Download metadata stays on-device and is sent only to the local CLI over native messaging.</td></tr>
   <tr><td class="key">nativeMessaging</td><td>The local transport to the paired <code>chrome-use</code> CLI — the extension's sole communication channel.</td></tr>
   <tr><td class="key">identity, identity.email</td><td>Read the email of the Google account signed into the current profile (<code>chrome.identity.getProfileUserInfo</code>) purely to label which profile/account a local connection belongs to, so a user with several logged-in Chrome profiles can confirm they are automating the intended account. The email is sent only to the local CLI over native messaging; it is never stored off-device or transmitted to any server. No OAuth token is requested (<code>getAuthToken</code> is not used).</td></tr>
+  <tr><td class="key">sidePanel</td><td>Display packaged conversation, approval and local-agent configuration UI outside webpage DOM, available across tab navigation.</td></tr>
   <tr><td class="key">storage</td><td>Persist a per-profile random identifier and small local pairing/state values in <code>chrome.storage.local</code>.</td></tr>
   <tr><td class="key">alarms, idle</td><td>Keep the MV3 service worker alive during an active automation session and detect idle state so idle sessions can be cleaned up.</td></tr>
   <tr><td class="key">webNavigation</td><td>Detect when a driven tab finishes navigating so automation can wait for the right moment before reading or acting.</td></tr>
@@ -78,10 +66,8 @@ user. The extension makes no outbound network requests of its own.</p>
 </table>
 </div>
 
-<h2>Data sharing</h2>
-<p>None. No data is sold, shared, or transferred to third parties. There are no third parties — the
-extension talks only to a program the user installed on the same computer.</p>
-
+<h2>Data sharing and limited use</h2>
+<p>We do not receive task contents through an extension-operated server and do not sell data or use it for advertising, credit decisions or unrelated purposes. Data accessed through the extension is used only for its browser-automation features requested by the user. A model service selected through the local CLI may receive the task context needed to perform that feature. Our use of information received from Google APIs adheres to the Chrome Web Store User Data Policy, including its Limited Use requirements.</p>
 <h2>Contact</h2>
 <p>Source code, issues, and contact: <a href="https://github.com/leeguooooo/chrome-use">github.com/leeguooooo/chrome-use</a></p>
 

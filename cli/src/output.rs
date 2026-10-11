@@ -6385,6 +6385,10 @@ Setup:
                              Read CLI models fetches bounded CLI metadata without
                              a prompt; account reports do not verify model access.
                              This metadata adapter currently requires Unix ownership.
+                             Unconfirmed sends offer explicit same-ID retry or warning
+                             reset; reset does not cancel possible delivery. Idle old
+                             agent services exit before replacement; active work can
+                             still be read/stopped. Custom programs use absolute paths.
                              Browser-tool approvals preview arguments and allow one
                              call. Replies remain pending until backend confirmation.
                              Agent panel conversations/configuration writes support

@@ -5,10 +5,11 @@ use super::config_transaction::{atomic_write, private_tree};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 const MAX_STATE: u64 = 8 * 1024 * 1024;
 const MAX_HISTORY: u64 = 128 * 1024 * 1024;
@@ -305,6 +306,15 @@ impl Conversation {
 pub(super) struct Store {
     pub directory: PathBuf,
     index: BTreeMap<String, Value>,
+    cursors: Mutex<HashMap<String, JournalCursor>>,
+}
+
+struct JournalCursor {
+    sequence: u64,
+    offset: u64,
+    length: u64,
+    modified: Option<std::time::SystemTime>,
+    identity: (u64, u64),
 }
 impl Store {
     pub(super) fn open(directory: PathBuf) -> Result<Self, String> {
@@ -327,7 +337,11 @@ impl Store {
                     "The previous service exited; active turn outcome is unconfirmed".into();
             }
         }
-        Ok(Self { directory, index })
+        Ok(Self {
+            directory,
+            index,
+            cursors: Mutex::new(HashMap::new()),
+        })
     }
     fn folder(&self, id: &str) -> Result<PathBuf, String> {
         uuid::Uuid::parse_str(id).map_err(|_| "Invalid conversation id")?;
@@ -361,14 +375,7 @@ impl Store {
         if chat.schema_version != 1 || chat.id != id {
             return Err("Conversation identity does not match its state".into());
         }
-        let mut cursor = 0;
-        loop {
-            let page = self.events(id, cursor)?;
-            cursor = page["cursor"].as_u64().ok_or("Invalid event cursor")?;
-            if page["more"] != true {
-                break;
-            }
-        }
+        let cursor = self.last_sequence(id)?;
         if chat.next_sequence > cursor + 1 {
             return Err(
                 "Conversation state is ahead of its journal; history cannot be assumed complete"
@@ -435,8 +442,33 @@ impl Store {
         let mut file = options
             .open(path)
             .map_err(|_| "Cannot open conversation journal")?;
+        let before = file
+            .metadata()
+            .map_err(|_| "Cannot inspect journal before append")?;
         file.write_all(&raw)
             .map_err(|_| "Cannot append conversation event")?;
+        // Only our append can advance a cached prefix's file stamp. External
+        // changes invalidate it and will be validated from the beginning.
+        let after = file
+            .metadata()
+            .map_err(|_| "Cannot inspect journal after append")?;
+        let mut cache = self
+            .cursors
+            .lock()
+            .map_err(|_| "Journal cursor cache unavailable")?;
+        if let Some(cursor) = cache.get_mut(&chat.id) {
+            if cursor.length == before.len()
+                && cursor.modified.is_some()
+                && cursor.modified == before.modified().ok()
+                && cursor.identity == journal_identity(&before)
+            {
+                cursor.length = after.len();
+                cursor.modified = after.modified().ok();
+            } else {
+                cache.remove(&chat.id);
+            }
+        }
+        drop(cache);
         if kind != "textDelta" {
             file.sync_data()
                 .map_err(|_| "Cannot flush conversation event")?;
@@ -453,16 +485,52 @@ impl Store {
         if !path.exists() {
             return Ok(json!({"events":[],"cursor":after,"more":false}));
         }
-        let raw = read_private(&path, MAX_HISTORY)?;
+        let mut file = open_journal(&path)?;
+        let meta = file.metadata().map_err(|_| "Cannot inspect journal")?;
+        let cached = self
+            .cursors
+            .lock()
+            .map_err(|_| "Journal cursor cache unavailable")?;
+        let offset = cached
+            .get(id)
+            .filter(|c| {
+                c.sequence == after
+                    && c.length == meta.len()
+                    && c.modified.is_some()
+                    && c.modified == meta.modified().ok()
+                    && c.identity == journal_identity(&meta)
+            })
+            .map(|c| c.offset)
+            .unwrap_or(0);
+        drop(cached);
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|_| "Cannot seek journal")?;
         let mut rows = Vec::new();
         let mut bytes = 0;
         let mut cursor = after;
         let mut more = false;
-        let mut previous = 0;
-        for line in BufReader::new(raw.as_slice()).split(b'\n') {
-            let line = line.map_err(|_| "Cannot read conversation history")?;
-            if line.is_empty() {
+        let mut previous = if offset == 0 { 0 } else { after };
+        let mut reader = BufReader::new(file);
+        let mut position = offset;
+        let mut accepted_offset = offset;
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            let read = reader
+                .read_until(b'\n', &mut line)
+                .map_err(|_| "Cannot read conversation history")?;
+            if read == 0 {
+                break;
+            }
+            position += read as u64;
+            if position > MAX_HISTORY {
+                return Err("Conversation history exceeds its size limit".into());
+            }
+            if line == b"\n" {
                 continue;
+            }
+            if line.len() > MAX_EVENT + 1 || !line.ends_with(b"\n") {
+                return Err("Conversation journal line is incomplete or oversized".into());
             }
             let event:Event=serde_json::from_slice(&line).map_err(|_|"Conversation journal is incomplete or corrupt; do not assume missing events succeeded")?;
             if event.sequence != previous + 1 {
@@ -478,10 +546,99 @@ impl Store {
             }
             bytes += line.len();
             cursor = event.sequence;
+            accepted_offset = position;
             rows.push(event);
         }
+        let mut cache = self
+            .cursors
+            .lock()
+            .map_err(|_| "Journal cursor cache unavailable")?;
+        if cache.len() >= 64 {
+            cache.clear();
+        }
+        cache.insert(
+            id.into(),
+            JournalCursor {
+                sequence: cursor,
+                offset: accepted_offset,
+                length: meta.len(),
+                modified: meta.modified().ok(),
+                identity: journal_identity(&meta),
+            },
+        );
         Ok(json!({"events":rows,"cursor":cursor,"more":more}))
     }
+
+    fn last_sequence(&self, id: &str) -> Result<u64, String> {
+        let path = self.folder(id)?.join("events.jsonl");
+        if !path.exists() {
+            return Ok(0);
+        }
+        let file = open_journal(&path)?;
+        let mut previous = 0;
+        let mut consumed = 0;
+        let mut reader = BufReader::new(file);
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            let read = reader
+                .read_until(b'\n', &mut line)
+                .map_err(|_| "Cannot read conversation history")?;
+            consumed += read as u64;
+            if consumed > MAX_HISTORY {
+                return Err("Conversation history exceeds its size limit".into());
+            }
+            if read == 0 {
+                break;
+            }
+            if line == b"\n" {
+                continue;
+            }
+            if line.len() > MAX_EVENT + 1 || !line.ends_with(b"\n") {
+                return Err("Conversation journal line is incomplete or oversized".into());
+            }
+            let event: Event = serde_json::from_slice(&line)
+                .map_err(|_| "Conversation journal is incomplete or corrupt")?;
+            if event.sequence != previous + 1 {
+                return Err("Conversation event sequence has a gap or duplicate".into());
+            }
+            previous = event.sequence;
+        }
+        Ok(previous)
+    }
+}
+
+fn journal_identity(meta: &fs::Metadata) -> (u64, u64) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        (meta.dev(), meta.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        (0, 0)
+    }
+}
+
+fn open_journal(path: &Path) -> Result<fs::File, String> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options
+        .open(path)
+        .map_err(|_| "Cannot open conversation journal")?;
+    let meta = file
+        .metadata()
+        .map_err(|_| "Cannot inspect conversation journal")?;
+    if !meta.is_file() || meta.len() > MAX_HISTORY {
+        return Err("Conversation journal is not a bounded regular file".into());
+    }
+    Ok(file)
 }
 
 fn read_private(path: &Path, max: u64) -> Result<Vec<u8>, String> {
@@ -518,6 +675,49 @@ mod tests {
             id: uuid::Uuid::new_v4().to_string(),
             text: text.into(),
         }
+    }
+    #[test]
+    fn journal_pages_seek_forward_after_our_appends_and_reject_external_corruption() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = Store::open(root.path().join("chats")).unwrap();
+        let mut chat = Conversation::new("codex", None, None).unwrap();
+        store.create(&chat).unwrap();
+        for _ in 0..300 {
+            store
+                .event(&mut chat, "textDelta", json!({"text":"chunk"}))
+                .unwrap();
+        }
+        store.save(&chat).unwrap();
+        assert_eq!(store.load(&chat.id).unwrap().next_sequence, 301);
+        assert_eq!(store.events(&chat.id, 0).unwrap()["cursor"], 128);
+        let offset = store.cursors.lock().unwrap()[&chat.id].offset;
+        assert!(offset > 0);
+        store
+            .event(&mut chat, "textDelta", json!({"text":"tail"}))
+            .unwrap();
+        assert_eq!(store.cursors.lock().unwrap()[&chat.id].offset, offset);
+        assert_eq!(
+            store.events(&chat.id, 128).unwrap()["events"][0]["sequence"],
+            129
+        );
+        assert_eq!(store.events(&chat.id, 256).unwrap()["cursor"], 301);
+        let path = store.folder(&chat.id).unwrap().join("events.jsonl");
+        #[cfg(unix)]
+        {
+            let stamp = std::fs::metadata(&path).unwrap().modified().unwrap();
+            let mut raw = std::fs::read(&path).unwrap();
+            raw[0] = b'!';
+            let replacement = path.with_extension("replacement");
+            std::fs::write(&replacement, &raw).unwrap();
+            std::fs::File::open(&replacement)
+                .unwrap()
+                .set_times(std::fs::FileTimes::new().set_modified(stamp))
+                .unwrap();
+            std::fs::rename(replacement, &path).unwrap();
+            assert!(store.events(&chat.id, 301).is_err());
+        }
+        std::fs::write(path, b"corrupt\n").unwrap();
+        assert!(store.events(&chat.id, 301).is_err());
     }
     #[test]
     fn duplicate_send_is_idempotent_but_reusing_an_id_for_other_text_is_refused() {

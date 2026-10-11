@@ -176,15 +176,15 @@ fn exchange(endpoint: &Endpoint, operation: &str, params: Value) -> Result<Value
 }
 
 /// Reuse only a health-confirmed service of the exact binary. A different
-/// build's active conversations are never killed or silently rebound.
+/// build's active conversations are never killed or silently rebound. Idle
+/// builds are replaced only after endpoint removal and OS lock release.
 fn ensure(directory: &Path, root: &Path, profile: &str) -> Result<Endpoint, String> {
     let binary_hash = BINARY_HASH.as_ref().map_err(Clone::clone)?;
-    if let Ok(endpoint) = endpoint(directory, profile) {
-        if let Ok(health) = exchange(&endpoint, "health", json!({})) {
-            if health["binaryHash"] != *binary_hash {
-                return Err("Another agent-panel build is running for this profile; stop its conversations before updating".into());
+    if let Ok(existing) = endpoint(directory, profile) {
+        if let Ok(health) = exchange(&existing, "health", json!({})) {
+            if health["binaryHash"] == *binary_hash {
+                return Ok(existing);
             }
-            return Ok(endpoint);
         }
     }
     let bootstrap = private_open(&directory.join("bootstrap.lock"), true)?;
@@ -195,12 +195,27 @@ fn ensure(directory: &Path, root: &Path, profile: &str) -> Result<Endpoint, Stri
         }
         std::thread::sleep(Duration::from_millis(30));
     }
-    if let Ok(endpoint) = endpoint(directory, profile) {
-        if exchange(&endpoint, "health", json!({})).is_ok() {
-            if endpoint.binary_hash != *binary_hash {
-                return Err("A different agent-panel build owns this profile".into());
+    if let Ok(existing) = endpoint(directory, profile) {
+        if let Ok(health) = exchange(&existing, "health", json!({})) {
+            if health["binaryHash"] == *binary_hash {
+                return Ok(existing);
             }
-            return Ok(endpoint);
+            if health["active"].as_u64() != Some(0) {
+                return Err("Another agent-panel build is running for this profile; stop its conversations before updating".into());
+            }
+            // The old service rechecks busy state under its own lock. Wait for
+            // both endpoint removal and OS ownership release, never a PID.
+            exchange(&existing, "serviceStop", json!({}))?;
+            loop {
+                let ownership = private_open(&directory.join("service.lock"), true)?;
+                if !directory.join("service.json").exists() && ownership.try_lock().is_ok() {
+                    break;
+                }
+                if Instant::now() > deadline {
+                    return Err("Previous agent service shutdown is unconfirmed; no replacement was started".into());
+                }
+                std::thread::sleep(Duration::from_millis(30));
+            }
         }
     }
     // Probe the real OS ownership lock, without trusting a stale PID file.
@@ -267,9 +282,17 @@ pub(super) fn call(
     let context = DiscoveryContext::current()?;
     let root = data_root(&context)?;
     let directory = profile_directory(&root, profile)?;
-    // Explicit shutdown can reach an older build, but its own idle check still
-    // refuses to kill any active conversation. Normal requests never rebind.
-    if operation == "serviceStop" {
+    // Explicit stop and read operations may reach an older schema-1 service.
+    // This lets the user stop its work without dispatching a new turn.
+    if [
+        "serviceStop",
+        "conversationList",
+        "conversationRead",
+        "conversationMessageStatus",
+        "conversationStop",
+    ]
+    .contains(&operation)
+    {
         if let Ok(existing) = endpoint(&directory, profile) {
             if exchange(&existing, "health", json!({})).is_ok() {
                 return exchange(&existing, operation, params.clone());

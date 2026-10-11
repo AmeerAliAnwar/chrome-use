@@ -27,11 +27,11 @@ rejection. The fixtures invoke synthetic protocol programs, not real models or
 Chrome. Real account, page, startup/version compatibility, Windows ownership and
 rendered side-panel acceptance remain below. Full completion is still unproven.
 
-- [ ] Profile-scoped persistent agent service, ownership lock and authenticated local transport.
-- [ ] Event journal/cursors, bounded replay and reconnection without duplicate turns.
-- [ ] Codex initialize/start/resume/turn lifecycle with correlated requests and strict terminal statuses.
-- [ ] Claude stream/control protocol with partial text, tools, approvals, questions and interruption.
-- [ ] Backend process-tree cleanup, write failures, startup/exit deadlines and late-event generation checks.
+- [x] Profile-scoped persistent agent service, ownership lock and authenticated local transport.
+- [x] Event journal/cursors, bounded replay and reconnection without duplicate turns.
+- [x] Codex initialize/start/resume/turn lifecycle with correlated requests and strict terminal statuses.
+- [x] Claude stream/control protocol with partial text, tools, approvals, questions and interruption.
+- [x] Backend process-tree cleanup, write failures, startup/exit deadlines and late-event generation checks.
 - [ ] Effective executable/version/model/settings readback and model-catalog caching/refresh.
 - [ ] Additional runtime adapters with their real capabilities, and custom adapter registration.
 - [ ] Browser MCP integration through the existing chrome-use binary, pinned profile/session/tab identity.
@@ -186,3 +186,15 @@ panel-stealth-matrix.json, stealth-relay-three.log, stealth-panel-open.log,
 stealth-panel-executing.log, stealth-panel-finished.log and real-result.json.
 The original full specification remains unfinished: attachments, skills,
 schedules, binding the visible tab and Windows write/process support are deferred.
+
+
+## Pre-tag review repairs
+
+Review after merge identified idle-service upgrade blocking, unconfirmed-send
+recovery, relative metadata executable paths and repeated history scans. These
+were verified against source and repaired before tagging. The native integration
+fixture checks refusal while an old service is busy, authenticated shutdown when
+idle, OS-lock release and startup of the new binary. A journal fixture checks
+forward cursors across appends and rejects observed external corruption. Panel
+fixtures prove explicit same-ID/text retry and warning reset without resending.
+Extension 0.5.37 carries the recovery controls; 0.5.36 upload succeeded, but Google refused submission because the sidePanel permission justification was missing. This field was then supplied in the Developer Dashboard.

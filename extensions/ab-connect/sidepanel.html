@@ -32,7 +32,7 @@
       <button id="inspectAgent" class="quiet" type="button">Read CLI models</button>
       <p id="modelStatus" class="hint">CLI model access has not been checked.</p>
       <details><summary>Custom program</summary><label>Executable path<input id="executable" placeholder="Use the discovered program" autocomplete="off"></label></details>
-      <p class="hint">Uses the local CLI's login. Each conversation works in its own browser session.</p>
+      <p class="hint">Uses the local CLI's login and an independent browser session. Your CLI may send tasks and page observations to its configured model service. Conversation history stays on this computer.</p>
     </section>
     <div class="conversation-status"><span id="phase">Ready</span><span id="effectiveModel"></span></div>
     <div id="transcript" class="transcript" tabindex="0" aria-label="Conversation transcript">
@@ -41,6 +41,11 @@
     <button id="latest" class="latest" type="button" hidden>Latest response</button>
     <section id="requests" class="requests" aria-label="Agent requests"></section>
     <section id="queuedMessages" class="queued-messages" aria-label="Queued messages" hidden></section>
+    <section id="pendingRecovery" class="requests" hidden>
+      <p class="hint">Delivery is unconfirmed. Retry uses the same message ID. Clearing this warning does not cancel a task that may have reached the agent.</p>
+      <button id="retryPending" class="quiet" type="button">Retry same message</button>
+      <button id="clearPending" class="quiet" type="button">Clear send warning</button>
+    </section>
     <form id="composer" class="composer">
       <label class="sr-only" for="message">Message</label>
       <textarea id="message" rows="3" placeholder="Describe a browser task…" maxlength="32768"></textarea>
