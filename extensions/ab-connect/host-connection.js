@@ -6,12 +6,14 @@ export class HostConnectionState {
     this.port = null
     this.confirmed = false
     this.error = null
+    this.agentPanel = null
   }
 
   begin(port) {
     this.port = port
     this.confirmed = false
     this.error = null
+    this.agentPanel = null
   }
 
   receive(port, message) {
@@ -19,7 +21,10 @@ export class HostConnectionState {
     const recognized = ['pong', 'ping', 'attachAll'].includes(message.method) ||
       (message.method === 'forwardCDPCommand' && typeof message.params?.method === 'string')
     if (!recognized) return false
-    const changed = !this.confirmed
+    const reported = message.params?.agentPanel
+    const valid = reported?.schemaVersion === 1 && ['full','readOnly'].includes(reported.mode) && typeof reported.modelInspection === 'boolean'
+    const changed = !this.confirmed || (valid && (reported.mode !== this.agentPanel?.mode || reported.modelInspection !== this.agentPanel?.modelInspection))
+    if (valid) this.agentPanel = {schemaVersion:1,mode:reported.mode,modelInspection:reported.modelInspection}
     this.confirmed = true
     this.error = null
     return changed
@@ -30,6 +35,7 @@ export class HostConnectionState {
     this.port = null
     this.confirmed = false
     this.error = error || null
+    this.agentPanel = null
     return true
   }
 
@@ -38,6 +44,7 @@ export class HostConnectionState {
       connected: this.confirmed,
       connectionState: this.port ? (this.confirmed ? 'connected' : 'connecting') : 'disconnected',
       connectionError: this.error,
+      agentPanel: this.agentPanel,
     }
   }
 }

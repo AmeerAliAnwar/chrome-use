@@ -23,15 +23,17 @@ class Node {
 }
 const deferred = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; };
 const settle = () => new Promise(resolve => setImmediate(resolve));
+const fullSupport = {schemaVersion:1,mode:'full',modelInspection:true};
 const chat = (id, phase = 'idle') => ({ id, title: id, phase, queued: 0, queuePaused: false, model: '' });
 
 async function fixture(overrides = {}, saved = {}) {
   const nodes = new Map(), calls = [], writes = [];
+  let hostState;
   const chats = [chat('a', 'running'), chat('b')];
   const runtime = {
-    onMessage: { addListener() {} },
+    onMessage: { addListener(listener) { hostState = listener; } },
     async sendMessage(request) {
-      if (request.type === 'ab-status') return { connected: true };
+      if (request.type === 'ab-status') return overrides.status ? {agentPanel:fullSupport,...overrides.status()} : { connected: true,agentPanel:fullSupport };
       calls.push(request);
       if (overrides[request.operation]) return overrides[request.operation](request.params);
       let result;
@@ -48,7 +50,7 @@ async function fixture(overrides = {}, saved = {}) {
   const document = { createElement: tag => new Node(tag), getElementById(id) { if (!nodes.has(id)) nodes.set(id, new Node()); return nodes.get(id); } };
   const panel = createPanel({ document, runtime, storage: { local: { async get() { return saved; }, async set(values) { writes.push(structuredClone(values)); } } }, schedule() {}, cancel() {} });
   await panel.start(); await settle();
-  return { panel, nodes, calls, chats, writes };
+  return { panel, nodes, calls, chats, writes, hostUpdate(state) { hostState({type:'ab-host-state',agentPanel:fullSupport,...state}); } };
 }
 
 test('a late stop acknowledgement cannot replace the selected conversation', async () => {
@@ -60,6 +62,27 @@ test('a late stop acknowledgement cannot replace the selected conversation', asy
   assert.equal(f.nodes.get('phase').textContent, 'Ready');
   assert.equal(f.nodes.get('conversation').value, 'b');
   f.panel.close();
+});
+
+test('an initially disconnected panel loads discovery and restores its saved chat after host confirmation', async () => {
+  let connected = false;
+  const f = await fixture({status:()=>({connected})}, {ab_panel_conversation:'b'});
+  assert.equal(f.calls.length,0);
+  connected = true; f.hostUpdate({connected:true}); await settle(); await settle();
+  assert.ok(f.calls.some(call=>call.operation==='discover'));
+  assert.equal(f.nodes.get('conversation').value,'b');
+  assert.equal(f.nodes.get('send').disabled,false);f.panel.close();
+});
+
+test('legacy and read-only hosts never enable conversations or persistence operations', async () => {
+  for (const support of [null,{schemaVersion:1,mode:'readOnly',modelInspection:false}]) {
+    const f=await fixture({status:()=>({connected:true,agentPanel:support})});
+    assert.equal(f.nodes.get('send').disabled,true);
+    assert.equal(f.nodes.get('inspectAgent').disabled,true);
+    assert.equal(f.calls.some(call=>call.operation.startsWith('conversation')),false);
+    assert.equal(f.calls.some(call=>call.operation==='discover'),Boolean(support));
+    f.nodes.get('message').value='not sent';await assert.rejects(f.panel.send(),/supported current CLI/);f.panel.close();
+  }
 });
 
 test('sending locks selection until the acknowledgement and keeps the message identity on failure', async () => {

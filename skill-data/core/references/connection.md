@@ -275,3 +275,12 @@ The current adapter requires Unix ownership support. Windows ownership,
 persistent caches, additional adapters and real-model execution remain separate
 acceptance work. The panel discards results after agent/program selection changes
 and never overwrites a typed model ID or substitutes static aliases on failure.
+
+The native hello reply advertises agentPanel schemaVersion/mode/modelInspection
+capabilities. Port liveness alone does not enable the panel; an older host without
+a compatible advertisement requires upgrade. Capabilities reset on reconnection
+and stale ports cannot change them. Opening while connecting automatically loads
+agent/history metadata after host confirmation. Windows mode is readOnly: only
+discover/configRead pass the native gate; no panel service, process or private
+configuration journal is created through its API. Existing browser commands are
+unchanged. Conversation support and write support are macOS/Linux in this release.

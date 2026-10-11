@@ -6,7 +6,7 @@ const fieldLabels = { model: 'Model', provider: 'Provider', effort: 'Reasoning e
 export function createPanel({ document, runtime, storage, schedule = setTimeout, cancel = clearTimeout }) {
   const ids = ['connection', 'notice', 'refresh', 'settings', 'chatTab', 'agentsTab', 'chatView', 'agentsView', 'conversation', 'newChat', 'newOptions', 'agent', 'model', 'modelList', 'modelStatus', 'inspectAgent', 'executable', 'phase', 'effectiveModel', 'transcript', 'empty', 'latest', 'requests', 'composer', 'message', 'queue', 'queuedMessages', 'resume', 'stop', 'sendDirect', 'send', 'discover', 'agentList', 'configuration', 'configTitle', 'configPath', 'configWarnings', 'configForm', 'configFields', 'configPreview', 'configDiff', 'applyConfig', 'discardConfig', 'restoreConfig', 'configResult'];
   const nodes = Object.fromEntries(ids.map(id => [id, document.getElementById(id)]));
-  let selected = '', selectionEpoch = 0, connectionEpoch = 0, connected = false, closed = false;
+  let selected = '', selectionEpoch = 0, connectionEpoch = 0, connected = false, closed = false, panelSupport = null;
   let timeline = new PanelTimeline(), conversations = [], conversation = null, timer = null, polling = false;
   const pendingMessages = new Map(), drafts = new Map();
   let modelEpoch = 0;
@@ -36,8 +36,11 @@ export function createPanel({ document, runtime, storage, schedule = setTimeout,
   }
   function renderConnection(state) {
     connected = state?.connected === true;
+    panelSupport = state?.agentPanel?.schemaVersion === 1 ? state.agentPanel : null;
     nodes.connection.classList.toggle('disconnected', !connected);
     nodes.connection.textContent = connected ? 'Local bridge connected' : state?.connectionState === 'connecting' ? 'Waiting for local bridge…' : state?.connectionError || 'Local bridge unavailable. Run chrome-use extension install, then refresh.';
+    if (connected && !panelSupport) nodes.connection.textContent = 'Bridge connected. Update the chrome-use CLI, then refresh to enable the agent panel.';
+    if (connected && panelSupport?.mode === 'readOnly') nodes.connection.textContent = 'Connected. This Windows panel is read-only; browser CLI automation remains available.';
     controls();
   }
   async function connectionStatus() {
@@ -48,15 +51,18 @@ export function createPanel({ document, runtime, storage, schedule = setTimeout,
   }
   function controls() {
     const pending = pendingMessages.get(selected);
-    nodes.conversation.disabled = sending; nodes.newChat.disabled = sending;
+    const writable = panelSupport?.mode === 'full';
+    nodes.conversation.disabled = sending || !writable; nodes.newChat.disabled = sending || !writable;
+    nodes.message.disabled = !writable; nodes.inspectAgent.disabled = !connected || !writable || !panelSupport?.modelInspection;
+    nodes.agent.disabled = !writable; nodes.model.disabled = !writable; nodes.executable.disabled = !writable;
     nodes.newOptions.hidden = Boolean(selected);
-    nodes.phase.textContent = conversation ? phaseLabels[conversation.phase] || 'Unknown response state' : 'Ready';
+    nodes.phase.textContent = panelSupport?.mode === 'readOnly' ? 'Read-only discovery' : conversation ? phaseLabels[conversation.phase] || 'Unknown response state' : 'Ready';
     nodes.effectiveModel.textContent = conversation?.model || '';
     nodes.queue.textContent = pending ? 'Send unconfirmed; checking stored message' : conversation?.queued ? `${conversation.queued} queued${conversation.queuePaused ? ', paused' : ''}` : '';
     nodes.resume.hidden = !conversation?.queuePaused || !conversation?.queued;
-    nodes.resume.disabled = !connected || conversation?.phase === 'recoveryRequired';
-    nodes.stop.disabled = !connected || !busyPhases.has(conversation?.phase) || conversation?.phase === 'stopping';
-    nodes.send.disabled = !connected || sending || Boolean(pending) || conversation?.phase === 'recoveryRequired';
+    nodes.resume.disabled = !connected || !writable || conversation?.phase === 'recoveryRequired';
+    nodes.stop.disabled = !connected || !writable || !busyPhases.has(conversation?.phase) || conversation?.phase === 'stopping';
+    nodes.send.disabled = !connected || !writable || sending || Boolean(pending) || conversation?.phase === 'recoveryRequired';
     nodes.sendDirect.hidden = !busyPhases.has(conversation?.phase) && !conversation?.queuePaused;
     nodes.sendDirect.disabled = nodes.send.disabled || Boolean(conversation?.directMessageId);
     nodes.sendDirect.textContent = busyPhases.has(conversation?.phase) ? 'Stop & send' : 'Send now';
@@ -208,7 +214,7 @@ export function createPanel({ document, runtime, storage, schedule = setTimeout,
     }
   }
   async function poll() {
-    if (closed || polling || !connected || !selected) return;
+    if (closed || polling || !connected || panelSupport?.mode !== 'full' || !selected) return;
     polling = true; const id = selected, epoch = selectionEpoch;
     try {
       let more = true;
@@ -238,6 +244,7 @@ export function createPanel({ document, runtime, storage, schedule = setTimeout,
     }, busyPhases.has(conversation?.phase) || pendingMessages.has(selected) ? 600 : 1800);
   }
   async function send(direct = false) {
+    if (panelSupport?.mode !== 'full') throw new Error('Local agent conversations require a supported current CLI.');
     if (!connected || sending || pendingMessages.has(selected) || conversation?.phase === 'recoveryRequired' || !nodes.message.value.trim()) return;
     if (direct && conversation?.directMessageId) throw new Error('A direct message is already waiting for stop confirmation.');
     sending = true; clearError(); controls(); const text = nodes.message.value;
@@ -256,8 +263,9 @@ export function createPanel({ document, runtime, storage, schedule = setTimeout,
     } finally { sending = false; controls(); }
   }
   function view(agents) { nodes.chatView.hidden = agents; nodes.agentsView.hidden = !agents; nodes.chatTab.classList.toggle('selected', !agents); nodes.agentsTab.classList.toggle('selected', agents); nodes.chatTab.setAttribute('aria-pressed', String(!agents)); nodes.agentsTab.setAttribute('aria-pressed', String(agents)); }
-  function clearModels() { modelEpoch++; nodes.modelList.replaceChildren(); nodes.modelStatus.textContent = 'CLI model access has not been checked.'; nodes.inspectAgent.disabled = false; }
+  function clearModels() { modelEpoch++; nodes.modelList.replaceChildren(); nodes.modelStatus.textContent = 'CLI model access has not been checked.'; nodes.inspectAgent.disabled = !connected || panelSupport?.mode !== 'full' || !panelSupport?.modelInspection; }
   async function inspectModels() {
+    if (panelSupport?.mode !== 'full' || !panelSupport?.modelInspection) throw new Error('CLI model inspection is unavailable for this host.');
     const epoch = ++modelEpoch, agentId = nodes.agent.value, executable = nodes.executable.value.trim();
     nodes.inspectAgent.disabled = true; nodes.modelList.replaceChildren(); nodes.modelStatus.textContent = 'Reading CLI model metadata…';
     try {
@@ -283,14 +291,16 @@ export function createPanel({ document, runtime, storage, schedule = setTimeout,
     configuration = result.configuration; configuration.name = name; preview = null; applied = null;
     nodes.configuration.hidden = false; nodes.configTitle.textContent = `${name} configuration`; nodes.configPath.textContent = configuration.path;
     nodes.configWarnings.textContent = (configuration.warnings || []).join('\n'); nodes.configFields.replaceChildren(); nodes.configPreview.hidden = true; nodes.restoreConfig.hidden = true; nodes.configResult.textContent = '';
+    for (const button of nodes.configForm.querySelectorAll('button')) button.disabled = panelSupport?.mode !== 'full';
     for (const field of configuration.fields) {
-      const label = element('label', fieldLabels[field.id] || field.id); const input = element('input'); input.value = field.value || ''; input.placeholder = 'CLI default'; input.dataset.field = field.id;
+      const label = element('label', fieldLabels[field.id] || field.id); const input = element('input'); input.disabled = panelSupport?.mode !== 'full'; input.value = field.value || ''; input.placeholder = 'CLI default'; input.dataset.field = field.id;
       input.addEventListener('input', () => { input.dataset.changed = 'true'; preview = null; nodes.configPreview.hidden = true; });
       label.append(input); if (field.validType === false) label.append(element('span', 'Stored value has an unsupported type; enter a replacement to repair it.', 'hint')); nodes.configFields.append(label);
     }
   }
   function diffValue(value) { return value?.redacted ? 'Hidden structured or sensitive value' : value?.state === 'absent' ? 'CLI default' : typeof value?.value === 'string' ? value.value : JSON.stringify(value?.value); }
   async function previewConfig() {
+    if (panelSupport?.mode !== 'full') throw new Error('Configuration changes are unavailable for this host.');
     if (!configuration) return; const agentId = configuration.agentId, epoch = configEpoch; const changes = {};
     for (const input of nodes.configFields.querySelectorAll('input')) if (input.dataset.changed) changes[input.dataset.field] = input.value.trim() || null;
     if (!Object.keys(changes).length) throw new Error('Change a field before previewing.');
@@ -313,7 +323,13 @@ export function createPanel({ document, runtime, storage, schedule = setTimeout,
   async function refresh() {
     clearError(); await connectionStatus(); if (!connected) return;
     queuedNodes.clear(); nodes.queuedMessages.replaceChildren();
+    if (!panelSupport) return;
+    if (panelSupport.mode === 'readOnly') { await discover(); return; }
     const results = await Promise.allSettled([list(), discover()]); for (const result of results) if (result.status === 'rejected') error(result.reason);
+    if (results[0].status === 'fulfilled' && selected) {
+      if (!conversations.some(chat => chat.id === selected)) select('');
+      else if (!conversation || conversation.id !== selected) select(selected);
+    }
     await poll(); loop();
   }
   nodes.composer.addEventListener('submit', event => { event.preventDefault(); void send().catch(error); });
@@ -340,7 +356,13 @@ export function createPanel({ document, runtime, storage, schedule = setTimeout,
   nodes.applyConfig.addEventListener('click', () => void applyConfig().catch(error));
   nodes.restoreConfig.addEventListener('click', () => void restoreConfig().catch(error));
   nodes.discardConfig.addEventListener('click', () => { preview = null; nodes.configPreview.hidden = true; });
-  if (runtime?.onMessage) runtime.onMessage.addListener(message => { if (message?.type === 'ab-host-state') { connectionEpoch++; renderConnection(message); if (connected) void poll().catch(error); } });
+  if (runtime?.onMessage) runtime.onMessage.addListener(message => {
+    if (message?.type === 'ab-host-state') {
+      const wasUsable = connected && Boolean(panelSupport); connectionEpoch++; renderConnection(message);
+      if (connected && panelSupport && !wasUsable) void refresh().catch(error);
+      else if (connected) void poll().catch(error);
+    }
+  });
   controls();
   return { async start() {
     try {
@@ -350,7 +372,6 @@ export function createPanel({ document, runtime, storage, schedule = setTimeout,
         if (typeof messageId === 'string' && messageId.length <= 80) pendingMessages.set(id, { id: messageId });
       }
       await refresh();
-      if (selected && conversations.some(c => c.id === selected)) select(selected); else select('');
     } catch (failure) { error(failure); }
   }, refresh, select, send, timeline: () => timeline, close() { closed = true; modelEpoch++; cancel(timer); selectionEpoch++; configEpoch++; connectionEpoch++; } };
 }

@@ -4222,6 +4222,10 @@ async fn nm_host_main() {
                 bound_profile_id = Some(id.to_string());
                 bound_profile_email = email.map(ToString::to_string);
             }
+            // Explicit panel capabilities distinguish new hosts from a legacy
+            // relay that answers pings but cannot execute panel operations.
+            let reply = serde_json::json!({"method":"pong","params":{"agentPanel":crate::agent_panel::capabilities()}});
+            let _ = to_ext.send(reply.to_string().into_bytes()).await;
             continue;
         }
         // The extension pings `focus` when a real window of this profile gains

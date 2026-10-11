@@ -142,3 +142,22 @@ Do not install the development extension into the maintainer's Chrome for
 fixture acceptance. Do not replace the installed CLI or mutate live agent
 configuration merely to test the implementation. Keep test sources, source
 hashes and remote receipts tied to the exact revision under examination.
+
+## Release scope and packaged Chrome fixture
+
+The maintainer authorized release closure for existing functionality, with advanced
+features deferred. Windows panel writes/processes are gated until private ACL/job
+ownership acceptance; discovery/config reads remain available. Native hello
+advertises panel capabilities so old relays cannot falsely enable conversations.
+
+Chrome for Testing 155.0.8059.39 on the SSH host loaded the actual extension in an
+isolated profile/native-host registry. A trusted extension-page click opened the
+native side panel; toolbar behavior readback confirms openPanelOnActionClick and
+an empty popup. Real sender metadata reports the panel URL with no sender.tab.
+Discovery (14 agents), synthetic model metadata and a complete synthetic Codex
+conversation passed through Chrome/native transport. Width/height were 360/870
+with no horizontal overflow. This uncovered and repaired late-connect metadata
+loading and browser timer receiver defects. This fixture uses a remote-debugging
+port and is not stealth evidence, a physical-toolbar-click test, a real model
+browser task or final post-main-sync acceptance. Evidence is in the task-owned
+SSH fixture directory and bench/panel-extension-check.mjs describes the check.

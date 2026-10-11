@@ -2,6 +2,19 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { AgentPanelBridge, isAgentPanelSender } from './agent-panel-bridge.js';
 
+test('default browser timers retain the global receiver rather than the bridge instance', async () => {
+  const originalSet = globalThis.setTimeout, originalClear = globalThis.clearTimeout;
+  const messages = [];
+  try {
+    globalThis.setTimeout = function () { assert.equal(this,globalThis); return 42; };
+    globalThis.clearTimeout = function (timer) { assert.equal(this,globalThis); assert.equal(timer,42); };
+    const bridge = new AgentPanelBridge({send:message=>messages.push(message)});
+    const pending = bridge.request('discover');
+    bridge.receive({method:'agentPanelReply',requestId:messages[0].requestId,result:{schemaVersion:1,agents:[]}});
+    assert.deepEqual((await pending).agents,[]);
+  } finally { globalThis.setTimeout = originalSet; globalThis.clearTimeout = originalClear; }
+});
+
 test('queue mutation replies must prove the requested original and replacement identities', async () => {
   for (const operation of ['conversationQueueEdit','conversationQueueRemove']) {
     const {bridge,messages}=setup();

@@ -408,11 +408,22 @@ pub fn handle(operation: &str, params: &Value) -> Result<Value, String> {
 
 /// Profile identity is supplied by the native host's extension handshake,
 /// never by a panel request. Public reads need no persisted profile store.
+pub fn capabilities() -> Value {
+    json!({"schemaVersion":1,"mode":if cfg!(windows) {"readOnly"} else {"full"},"modelInspection":cfg!(unix)})
+}
+
+fn operation_allowed(operation: &str, read_only: bool) -> bool {
+    !read_only || ["discover", "configRead"].contains(&operation)
+}
+
 pub fn handle_for_profile(
     operation: &str,
     params: &Value,
     profile: Option<&str>,
 ) -> Result<Value, String> {
+    if !operation_allowed(operation, cfg!(windows)) {
+        return Err("The local agent panel is read-only on Windows in this release; browser CLI automation remains available".into());
+    }
     match operation {
         "discover" => {
             if !params.is_object() || params.as_object().is_some_and(|p| !p.is_empty()) {
@@ -447,6 +458,28 @@ pub fn handle_for_profile(
 mod tests {
     use super::*;
     use tempfile::TempDir;
+    #[test]
+    fn windows_read_only_mode_refuses_all_persistence_and_process_operations() {
+        assert!(operation_allowed("discover", true));
+        assert!(operation_allowed("configRead", true));
+        for operation in [
+            "configPlan",
+            "configApply",
+            "configRestore",
+            "agentInspect",
+            "conversationCreate",
+            "conversationList",
+            "conversationSend",
+            "serviceHealth",
+            "serviceStop",
+            "futureOperation",
+        ] {
+            assert!(
+                !operation_allowed(operation, true),
+                "{operation} bypassed the read-only gate"
+            );
+        }
+    }
 
     fn context(home: &TempDir) -> DiscoveryContext {
         DiscoveryContext {

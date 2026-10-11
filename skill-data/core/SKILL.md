@@ -35,6 +35,10 @@ Read CLI models is an explicit metadata probe, separate from installation
 discovery. It returns CLI-reported model suggestions and account state without
 identity or credentials, sends no prompt and does not verify model access.
 Missing or partial catalogs are explicit; typed model IDs remain available.
+A connected legacy relay does not imply panel support: the native host must
+advertise schema capabilities. Windows panel operations are read-only discovery
+and configuration reads; conversational processes and configuration persistence
+remain disabled there. Browser CLI automation is unaffected.
 
 ## Start with the cheapest useful evidence
 

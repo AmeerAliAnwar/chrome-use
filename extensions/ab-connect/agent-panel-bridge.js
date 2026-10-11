@@ -2,7 +2,7 @@
 // The bridge neither attaches tabs nor executes page JavaScript. Native-host
 // replies must match the request's connection generation; no request is replayed.
 export class AgentPanelBridge {
-  constructor({ send, schedule = setTimeout, cancel = clearTimeout, timeoutMs = 15000, maxPending = 16 }) {
+  constructor({ send, schedule = (callback, delay) => globalThis.setTimeout(callback, delay), cancel = timer => globalThis.clearTimeout(timer), timeoutMs = 15000, maxPending = 16 }) {
     this.send = send;
     this.schedule = schedule;
     this.cancel = cancel;
