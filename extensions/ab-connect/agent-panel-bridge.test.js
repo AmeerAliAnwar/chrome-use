@@ -144,3 +144,26 @@ test('a reply for a different agent or plan cannot confirm a configuration effec
     await assert.rejects(result, /Malformed/);
   }
 });
+
+test('conversation timeout and disconnect never cause message resubmission', async () => {
+  const { bridge, messages, timers } = setup();
+  const result = bridge.request('conversationSend', { conversationId: 'chat', messageId: 'stable', text: 'fixture' });
+  [...timers.values()][0]();
+  await assert.rejects(result, /no message was replayed/);
+  assert.equal(messages.length, 1);
+  const stopping = bridge.request('conversationStop', { conversationId: 'chat' });
+  bridge.disconnect();
+  await assert.rejects(stopping, /without resending/);
+});
+
+test('conversation replies must match both chat and message identities', async () => {
+  for (const result of [
+    { schemaVersion: 1, conversation: { id: 'other', phase: 'running' }, message: { id: 'message', accepted: true, replayed: false } },
+    { schemaVersion: 1, conversation: { id: 'chat', phase: 'running' }, message: { id: 'other', accepted: true, replayed: false } },
+  ]) {
+    const { bridge, messages } = setup();
+    const pending = bridge.request('conversationSend', { conversationId: 'chat', messageId: 'message', text: 'fixture' });
+    bridge.receive({ method: 'agentPanelReply', requestId: messages[0].requestId, result });
+    await assert.rejects(pending, /Malformed/);
+  }
+});

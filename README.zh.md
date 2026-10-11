@@ -141,6 +141,8 @@ npx skills add leeguooooo/chrome-use -g
 
 原生 agent 面板的配置记录按 Chrome profile 保存在 `~/.chrome-use/agent-panel`。开发验收时，原生主机和 CLI 使用相同的绝对路径 `CHROME_USE_RELAY_DIR`，也会隔离这些记录。这个目录不会改变已安装 agent 的配置路径，测试还需把该 agent 的配置目录变量指向合成数据。写入后会读回保存值，已有会话保留运行中的配置；恢复时保留用户后来改过的字段，并报告冲突。
 
+原生会话服务独立于扩展连接，持续运行 Codex app-server 或 Claude stream-json 会话。断线后按游标读取事件，不重发消息；同一消息 ID 不会重复执行。失败或停止后暂停队列，需明确恢复。浏览器工具沿用 chrome-use，绑定当前 profile 和该会话。合成协议测试不代表真实模型、页面操作或隐身检测已验收。
+
 ## 连接你的 Chrome
 
 从 Chrome 应用商店安装 [**chrome-use** 扩展](https://chromewebstore.google.com/detail/chrome-use/knfcmbamhjmaonkfnjhldjedeobeafmk)，再注册一次本地桥：

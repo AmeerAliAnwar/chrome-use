@@ -200,3 +200,24 @@ identity and bytes, writes atomically and reads back. Restore preserves later
 user edits and reports conflicts. A saved config does not prove a running session
 changed model. If apply/restore loses its reply, inspect current values before
 retrying; the native request is not automatically replayed.
+
+Native conversation services also live under the profile's agent-panel data
+directory. A service holds an OS ownership lock and uses a capability kept in a
+private endpoint file; neither the endpoint nor its capability belongs in page
+scripts. The native host confirms service health and the exact executable hash
+before reusing it. An active service from another build is not silently replaced.
+
+Codex uses its app-server protocol; Claude uses its stream-json control protocol.
+Their processes stay open between turns. Browser tools use the same chrome-use
+binary with explicit `AGENT_BROWSER_BROWSER` and `AGENT_BROWSER_SESSION`, plus
+the relay registry override when present. No separate browser transport is
+introduced for displaying progress. Reconnect retrieves journal events by cursor
+without sending an old message again. A repeated message ID is idempotent, and
+reusing it with different text fails. Failure/interruption pauses queued messages
+until explicitly resumed. A stop remains pending until backend terminal output
+or owned-process exit is confirmed. An unconfirmed process or recovered active
+turn requires inspection; it is not marked successful or automatically replayed.
+
+Synthetic protocol fixtures verify lifecycle behavior without using an account
+or Chrome. They do not establish real CLI login, model access, browser acceptance,
+Windows process-tree behavior or unchanged detector results.

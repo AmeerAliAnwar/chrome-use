@@ -153,6 +153,8 @@ For hosts that speak **MCP but can't run arbitrary shell commands** (Claude Desk
 
 Native agent-panel configuration services keep per-profile journals under `~/.chrome-use/agent-panel`. For isolated development, the same absolute `CHROME_USE_RELAY_DIR` in the native host and CLI also scopes these journals. It does not isolate an installed agent's own settings: point that agent's config-root variable at synthetic settings for fixture checks. Apply reads back saved values; existing sessions retain their running configuration. Restore preserves later user edits and reports field conflicts.
 
+Native conversation services keep Codex app-server and Claude stream-json sessions open independently of the extension connection. Reconnect reads events by cursor without resending messages; repeated message IDs are idempotent. Failure or interruption pauses queued messages until resumed. Browser tools use the existing chrome-use binary, pinned to this profile and a conversation session. Synthetic lifecycle tests do not establish real model access or stealth acceptance.
+
 ## Setup: connect to your Chrome
 
 Install the [**chrome-use** extension from the Chrome Web Store](https://chromewebstore.google.com/detail/chrome-use/knfcmbamhjmaonkfnjhldjedeobeafmk), then register the local bridge once:

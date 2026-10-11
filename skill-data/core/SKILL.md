@@ -15,6 +15,10 @@ browser actions. Saved configuration proves file readback, not a model change
 in an existing session. Inspect current values after an unconfirmed write;
 never replay it automatically. Isolation and journal details: [connection](references/connection.md).
 
+Native conversations persist message IDs and event cursors. Reconnect reads
+events without resending a turn; failure or interruption pauses the queue.
+A CLI's completed response is not proof that the whole browser task succeeded.
+
 ## Start with the cheapest useful evidence
 
 | Task | First choice |

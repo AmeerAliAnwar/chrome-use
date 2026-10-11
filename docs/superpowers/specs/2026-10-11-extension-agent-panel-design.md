@@ -214,6 +214,36 @@ implementation, not UI-only reconnection logic. A reconnect replays events;
 it never resubmits a turn. Keep chrome-use's binary distribution and avoid a
 mandatory Node/Go runtime for users.
 
+The profile service stores a private authenticated loopback endpoint and holds
+an OS ownership lock. Native hosts health-check it and compare the running
+binary fingerprint before reuse. Disconnecting a native host leaves the service
+and CLI sessions alive. A different running build is not automatically killed
+or rebound; explicit shutdown still refuses active conversations. Corrupt state
+or event history is an error, never an empty successful conversation. Loading
+an active state after service loss marks its outcome unconfirmed and pauses the
+queue rather than sending the stored message again.
+
+Codex startup waits for initialization, reads effective configuration and then
+starts or resumes the exact saved thread. Other configured MCP servers are
+disabled for the conversation; chrome-use's server receives an explicit profile,
+session and relay-registry scope. Claude uses an initialized stream-json control
+channel with host permission prompts. Both keep the CLI process between turns.
+Text is split on UTF-8 boundaries into bounded events without discarding long
+responses. Backend terminal states are distinct from request dispatch. A result
+that completed before interruption wins that race; requested stop alone cannot
+label a completed response interrupted. Process exit that cannot be confirmed
+leaves the conversation in recovery-required state.
+
+Message IDs and text fingerprints provide durable duplicate suppression. A
+reused ID with different content is refused. Events carry increasing sequence
+numbers for reconnect replay; incomplete or discontinuous journals are reported.
+Failure or interruption pauses queued messages until explicit resume. Approval
+and input replies are correlated to the current conversation and generation;
+dispatching a reply is not confirmation that the CLI consumed it. Idle processes
+can be recycled at the running-process limit, after their exit is confirmed.
+Windows job containment, real-model compatibility and browser/detector acceptance
+remain required in addition to these synthetic-protocol tests.
+
 Native configuration requests use `configRead`, `configPlan`, `configApply`, and
 `configRestore`. The host supplies the Chrome profile identity from `hello`, not
 from caller parameters. Paths and public fields come from the agent registry;

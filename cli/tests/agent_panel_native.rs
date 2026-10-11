@@ -183,6 +183,396 @@ fn configuration_preview_apply_and_restore_use_only_isolated_fixture_settings() 
     assert_eq!(std::fs::read(&settings).unwrap(), original);
 }
 
+#[cfg(unix)]
+struct ServiceFixture {
+    root: std::path::PathBuf,
+    profile: String,
+    chats: Vec<String>,
+}
+
+#[cfg(unix)]
+impl ServiceFixture {
+    fn request(&self, operation: &str, params: Value) -> Option<Value> {
+        use std::net::TcpStream;
+        let endpoint: Value = serde_json::from_slice(
+            &std::fs::read(self.root.join(format!(
+                "agent-panel/profiles/{}/service.json",
+                self.profile
+            )))
+            .ok()?,
+        )
+        .ok()?;
+        if endpoint["profile"] != self.profile {
+            return None;
+        }
+        let mut stream = TcpStream::connect_timeout(
+            &endpoint["address"].as_str()?.parse().ok()?,
+            Duration::from_millis(300),
+        )
+        .ok()?;
+        stream.set_read_timeout(Some(Duration::from_secs(3))).ok()?;
+        let id = uuid::Uuid::new_v4().to_string();
+        let raw=json!({"capability":endpoint["capability"],"requestId":id,"operation":operation,"params":params}).to_string().into_bytes();
+        stream.write_all(&(raw.len() as u32).to_le_bytes()).ok()?;
+        stream.write_all(&raw).ok()?;
+        let mut len = [0u8; 4];
+        stream.read_exact(&mut len).ok()?;
+        let len = u32::from_le_bytes(len) as usize;
+        if len > 768 * 1024 {
+            return None;
+        }
+        let mut raw = vec![0u8; len];
+        stream.read_exact(&mut raw).ok()?;
+        let reply: Value = serde_json::from_slice(&raw).ok()?;
+        if reply["requestId"] != id {
+            return None;
+        }
+        Some(reply)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ServiceFixture {
+    fn drop(&mut self) {
+        for id in &self.chats {
+            let _ = self.request("conversationStop", json!({"conversationId":id}));
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
+        while std::time::Instant::now() < deadline {
+            let Some(health) = self.request("health", json!({})) else {
+                break;
+            };
+            if health["result"]["active"] == 0 {
+                let _ = self.request("serviceStop", json!({}));
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+#[cfg(unix)]
+fn conversation_poll(
+    host: &mut Host,
+    rx: &mpsc::Receiver<Result<Value, String>>,
+    id: &str,
+    phase: &str,
+) -> Value {
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let reply = panel_reply(
+            host,
+            rx,
+            "poll-conversation",
+            "conversationRead",
+            json!({"conversationId":id,"after":0}),
+        );
+        assert!(
+            reply.get("error").is_none(),
+            "Conversation read failed: {}",
+            reply["error"]
+        );
+        if reply["result"]["conversation"]["phase"] == phase {
+            return reply["result"].clone();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Conversation did not reach {phase}; observed {}",
+            reply["result"]["conversation"]["phase"]
+        );
+        std::thread::sleep(Duration::from_millis(40));
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn both_cli_protocols_keep_conversations_alive_across_native_host_disconnects() {
+    let registry = tempfile::tempdir().unwrap();
+    let profile = "native-conversation-fixture";
+    let mut cleanup = ServiceFixture {
+        root: registry.path().into(),
+        profile: profile.into(),
+        chats: vec![],
+    };
+    let spawn = || {
+        Host(
+            Command::new(env!("CARGO_BIN_EXE_chrome-use"))
+                .args(["__nm-host", "chrome-extension://agent-panel-fixture/"])
+                .env("CHROME_USE_RELAY_DIR", registry.path())
+                .env("CHROME_USE_NO_UPDATE_CHECK", "1")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        )
+    };
+    let mut host = spawn();
+    let mut rx = frames(&mut host);
+    send(
+        &mut host,
+        json!({"method":"hello","version":"fixture","profileId":profile}),
+    );
+    let health = panel_reply(&mut host, &rx, "health", "serviceHealth", json!({}));
+    assert!(health.get("error").is_none());
+    let service_pid = health["result"]["pid"].clone();
+    let fixture =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/panel_agent.py");
+    for agent in ["codex", "claude"] {
+        let created = panel_reply(
+            &mut host,
+            &rx,
+            "create",
+            "conversationCreate",
+            json!({"agentId":agent,"executable":fixture}),
+        );
+        assert!(created.get("error").is_none());
+        let id = created["result"]["conversation"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        cleanup.chats.push(id.clone());
+        let message = uuid::Uuid::new_v4().to_string();
+        let sent = panel_reply(
+            &mut host,
+            &rx,
+            "send-first",
+            "conversationSend",
+            json!({"conversationId":id,"messageId":message,"text":"first"}),
+        );
+        assert!(sent.get("error").is_none());
+        let done = conversation_poll(&mut host, &rx, &id, "idle");
+        assert_eq!(
+            done["conversation"]["model"],
+            format!("synthetic-{agent}-model")
+        );
+        let repeated = panel_reply(
+            &mut host,
+            &rx,
+            "send-duplicate",
+            "conversationSend",
+            json!({"conversationId":id,"messageId":message,"text":"first"}),
+        );
+        assert_eq!(repeated["result"]["message"]["accepted"], false);
+        let history = conversation_poll(&mut host, &rx, &id, "idle");
+        assert_eq!(
+            history["journal"]["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|e| e["kind"] == "user")
+                .count(),
+            1
+        );
+        let waiting = uuid::Uuid::new_v4().to_string();
+        panel_reply(
+            &mut host,
+            &rx,
+            "send-wait",
+            "conversationSend",
+            json!({"conversationId":id,"messageId":waiting,"text":"wait"}),
+        );
+        conversation_poll(&mut host, &rx, &id, "running");
+        drop(host);
+        host = spawn();
+        rx = frames(&mut host);
+        send(
+            &mut host,
+            json!({"method":"hello","version":"fixture","profileId":profile}),
+        );
+        let reconnected = panel_reply(
+            &mut host,
+            &rx,
+            "health-reconnect",
+            "serviceHealth",
+            json!({}),
+        );
+        assert_eq!(reconnected["result"]["pid"], service_pid);
+        let observed = conversation_poll(&mut host, &rx, &id, "running");
+        assert_eq!(observed["conversation"]["activeMessageId"], waiting);
+        panel_reply(
+            &mut host,
+            &rx,
+            "stop",
+            "conversationStop",
+            json!({"conversationId":id}),
+        );
+        conversation_poll(&mut host, &rx, &id, "interrupted");
+        panel_reply(
+            &mut host,
+            &rx,
+            "resume",
+            "conversationResumeQueue",
+            json!({"conversationId":id}),
+        );
+        panel_reply(
+            &mut host,
+            &rx,
+            "send-approval",
+            "conversationSend",
+            json!({"conversationId":id,"messageId":uuid::Uuid::new_v4().to_string(),"text":"approval"}),
+        );
+        let blocked = conversation_poll(&mut host, &rx, &id, "waitingInput");
+        let request = blocked["journal"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|e| e["kind"] == "request")
+            .unwrap()["data"]["requestId"]
+            .clone();
+        let answer = if agent == "codex" {
+            json!({"decision":"accept"})
+        } else {
+            json!({"behavior":"allow","updatedInput":{"questions":[],"answers":{"Synthetic question":"One"}}})
+        };
+        let reply = panel_reply(
+            &mut host,
+            &rx,
+            "answer",
+            "conversationRespond",
+            json!({"conversationId":id,"requestId":request,"result":answer}),
+        );
+        assert_eq!(reply["result"]["response"]["confirmed"], false);
+        conversation_poll(&mut host, &rx, &id, "idle");
+        panel_reply(
+            &mut host,
+            &rx,
+            "send-fail",
+            "conversationSend",
+            json!({"conversationId":id,"messageId":uuid::Uuid::new_v4().to_string(),"text":"fail"}),
+        );
+        panel_reply(
+            &mut host,
+            &rx,
+            "queue-next",
+            "conversationSend",
+            json!({"conversationId":id,"messageId":uuid::Uuid::new_v4().to_string(),"text":"queued-after-failure"}),
+        );
+        let failed = conversation_poll(&mut host, &rx, &id, "failed");
+        assert_eq!(failed["conversation"]["queuePaused"], true);
+        assert_eq!(failed["conversation"]["queued"], 1);
+        panel_reply(
+            &mut host,
+            &rx,
+            "resume-after-fail",
+            "conversationResumeQueue",
+            json!({"conversationId":id}),
+        );
+        let resumed = conversation_poll(&mut host, &rx, &id, "idle");
+        assert_eq!(resumed["conversation"]["queued"], 0);
+        let ready_pids: std::collections::HashSet<_> = resumed["journal"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["kind"] == "ready")
+            .map(|e| e["data"]["pid"].as_u64().unwrap())
+            .collect();
+        assert_eq!(
+            ready_pids.len(),
+            1,
+            "CLI process was restarted between turns"
+        );
+    }
+    let other_profile = "native-other-profile-fixture";
+    let _other_cleanup = ServiceFixture {
+        root: registry.path().into(),
+        profile: other_profile.into(),
+        chats: vec![],
+    };
+    let mut other_host = spawn();
+    let other_rx = frames(&mut other_host);
+    send(
+        &mut other_host,
+        json!({"method":"hello","version":"fixture","profileId":other_profile}),
+    );
+    let forbidden = panel_reply(
+        &mut other_host,
+        &other_rx,
+        "cross-profile",
+        "conversationRead",
+        json!({"conversationId":cleanup.chats[0],"after":0}),
+    );
+    assert!(forbidden["error"]
+        .as_str()
+        .unwrap()
+        .contains("this profile"));
+    let other_health = panel_reply(
+        &mut other_host,
+        &other_rx,
+        "other-health",
+        "serviceHealth",
+        json!({}),
+    );
+    assert_ne!(other_health["result"]["pid"], service_pid);
+    let endpoint_path = registry
+        .path()
+        .join(format!("agent-panel/profiles/{profile}/service.json"));
+    let endpoint_data: Value =
+        serde_json::from_slice(&std::fs::read(&endpoint_path).unwrap()).unwrap();
+    let mut unauthenticated =
+        std::net::TcpStream::connect(endpoint_data["address"].as_str().unwrap()).unwrap();
+    unauthenticated
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let raw=json!({"capability":"synthetic-wrong-capability","requestId":"denied","operation":"health","params":{}}).to_string().into_bytes();
+    unauthenticated
+        .write_all(&(raw.len() as u32).to_le_bytes())
+        .unwrap();
+    unauthenticated.write_all(&raw).unwrap();
+    let mut byte = [0u8; 1];
+    assert_eq!(unauthenticated.read(&mut byte).unwrap(), 0);
+    let stopped = panel_reply(&mut host, &rx, "service-stop", "serviceStop", json!({}));
+    assert_eq!(stopped["result"]["service"]["stopRequested"], true);
+    let endpoint = registry
+        .path()
+        .join(format!("agent-panel/profiles/{profile}/service.json"));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while endpoint.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Service shutdown was not confirmed"
+        );
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    // Restart the independent service without resubmitting any prior intent.
+    let restarted = panel_reply(
+        &mut host,
+        &rx,
+        "service-restart",
+        "serviceHealth",
+        json!({}),
+    );
+    assert!(restarted.get("error").is_none());
+    assert_ne!(restarted["result"]["pid"], service_pid);
+    let id = &cleanup.chats[0];
+    let before = conversation_poll(&mut host, &rx, id, "idle");
+    let count = before["journal"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["kind"] == "user")
+        .count();
+    assert_eq!(count, 5, "Service restart replayed a prior user message");
+    panel_reply(
+        &mut host,
+        &rx,
+        "after-restart",
+        "conversationSend",
+        json!({"conversationId":id,"messageId":uuid::Uuid::new_v4().to_string(),"text":"new-after-restart"}),
+    );
+    let after = conversation_poll(&mut host, &rx, id, "idle");
+    assert_eq!(
+        after["journal"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["kind"] == "user")
+            .count(),
+        6
+    );
+}
+
 #[test]
 fn discovery_and_errors_are_correlated_without_entering_browser_dispatch() {
     let registry = tempfile::tempdir().unwrap();

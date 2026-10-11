@@ -636,7 +636,11 @@ fn check_writable(path: &Path) -> Result<(), String> {
     }
 }
 
-fn atomic_write(path: &Path, bytes: &[u8], expected: Option<&Snapshot>) -> Result<(), String> {
+pub(super) fn atomic_write(
+    path: &Path,
+    bytes: &[u8],
+    expected: Option<&Snapshot>,
+) -> Result<(), String> {
     check_writable(path)?;
     if let Some(expected) = expected {
         verify_snapshot(expected)?;
@@ -725,7 +729,7 @@ fn restore_bytes(current: &Snapshot, original: &Snapshot) -> Result<(), String> 
     Ok(())
 }
 
-fn private_tree(path: &Path) -> Result<(), String> {
+pub(super) fn private_tree(path: &Path) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         if !parent.exists() {
             private_tree(parent)?;
@@ -759,7 +763,7 @@ fn private_tree(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn private_open(path: &Path, create: bool) -> Result<File, String> {
+pub(super) fn private_open(path: &Path, create: bool) -> Result<File, String> {
     if let Ok(meta) = fs::symlink_metadata(path) {
         if !meta.is_file() || meta.file_type().is_symlink() {
             return Err("Configuration lock must be a regular private file".into());

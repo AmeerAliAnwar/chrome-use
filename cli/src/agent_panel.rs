@@ -11,9 +11,16 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+mod backend;
 mod config_edit;
 mod config_transaction;
 mod configuration;
+mod conversation;
+mod service;
+
+pub fn run_service(args: &[String]) -> Result<(), String> {
+    service::run(args)
+}
 
 #[derive(Clone, Copy)]
 struct AgentSpec {
@@ -416,6 +423,15 @@ pub fn handle_for_profile(
         "configRead" | "configPlan" | "configApply" | "configRestore" => {
             configuration::handle(operation, params, profile)
         }
+        "conversationList"
+        | "conversationCreate"
+        | "conversationRead"
+        | "conversationSend"
+        | "conversationStop"
+        | "conversationResumeQueue"
+        | "conversationRespond"
+        | "serviceHealth"
+        | "serviceStop" => service::call(operation, params, profile),
         _ => Err(format!("Unsupported agent panel operation: {operation}")),
     }
 }

@@ -19,6 +19,14 @@ Use English Conventional Commits for this work, as requested by the maintainer.
 
 ## Native service and conversational adapters
 
+The native service and both protocol adapters are now implemented. SSH-host
+fixtures verify multiple turns on the same CLI process, native-host disconnects,
+service restart with history retained, duplicate message suppression, queued
+failure/interruption, questions/approvals, profile isolation and IPC capability
+rejection. The fixtures invoke synthetic protocol programs, not real models or
+Chrome. Real account, page, startup/version compatibility, Windows ownership and
+rendered side-panel acceptance remain below. Full completion is still unproven.
+
 - [ ] Profile-scoped persistent agent service, ownership lock and authenticated local transport.
 - [ ] Event journal/cursors, bounded replay and reconnection without duplicate turns.
 - [ ] Codex initialize/start/resume/turn lifecycle with correlated requests and strict terminal statuses.
