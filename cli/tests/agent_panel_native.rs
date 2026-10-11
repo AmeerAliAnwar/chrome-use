@@ -86,6 +86,7 @@ fn panel_reply(
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn configuration_preview_apply_and_restore_use_only_isolated_fixture_settings() {
     let registry = tempfile::tempdir().unwrap();
@@ -1082,4 +1083,58 @@ fn upgrade_refuses_busy_old_service_and_replaces_it_only_after_owned_idle_shutdo
         std::thread::sleep(Duration::from_millis(20));
     }
     panic!("Owned upgraded service exit was not confirmed");
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_native_panel_reads_fixture_configuration_but_refuses_writes_without_persistence() {
+    let registry = tempfile::tempdir().unwrap();
+    let agent_dir = registry.path().join("synthetic-agent");
+    std::fs::create_dir(&agent_dir).unwrap();
+    let settings = agent_dir.join("settings.json");
+    let original = br#"{"model":"old","env":{"ANTHROPIC_AUTH_TOKEN":"synthetic-token"}}"#;
+    std::fs::write(&settings, original).unwrap();
+    let mut host = Host(
+        Command::new(env!("CARGO_BIN_EXE_chrome-use"))
+            .args(["__nm-host", "chrome-extension://agent-panel-fixture/"])
+            .env("CHROME_USE_RELAY_DIR", registry.path())
+            .env("CLAUDE_CONFIG_DIR", &agent_dir)
+            .env("CHROME_USE_NO_UPDATE_CHECK", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let rx = frames(&mut host);
+    send(
+        &mut host,
+        json!({"method":"hello","version":"fixture","profileId":"windows-read-only-fixture"}),
+    );
+    let read = panel_reply(
+        &mut host,
+        &rx,
+        "read-only-config",
+        "configRead",
+        json!({"agentId":"claude"}),
+    );
+    assert!(read.get("error").is_none());
+    assert!(!read.to_string().contains("synthetic-token"));
+    for operation in [
+        "configPlan",
+        "configApply",
+        "configRestore",
+        "agentInspect",
+        "conversationCreate",
+        "serviceHealth",
+    ] {
+        let reply = panel_reply(&mut host, &rx, operation, operation, json!({}));
+        assert!(
+            reply["error"].as_str().unwrap().contains("read-only"),
+            "{}",
+            reply
+        );
+    }
+    assert_eq!(std::fs::read(settings).unwrap(), original);
+    assert!(!registry.path().join("agent-panel").exists());
 }
