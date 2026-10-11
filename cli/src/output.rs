@@ -2820,7 +2820,14 @@ attach; it may be attached but is not tracked).
 A tab a page opens itself (target=_blank, window.open) brings Chrome to the
 front over whatever app the user is in (#468). By default chrome-use leaves
 it to Chrome, exactly as a user's click; in your own Chrome the click then
-says so in openedTabWarning.
+says so in openedTabWarning. On macOS chrome-use then puts the app that was
+in front before the click back in front (on by default): only when Chrome
+comes to the front within 1.5 s of the click with a tab that was not there
+before, never when Chrome was already the frontmost app or another app came
+to the front. The click reports focusRestored (true with focusRestoredApp and
+focusRestoredAfterMs, or false with focusNote saying why). Windows and Linux:
+not done. AGENT_BROWSER_RESTORE_FOCUS=0 turns it off (read when the daemon
+starts).
 
 AGENT_BROWSER_BACKGROUND_LINKS=cross-site (opt-in; also `1`/`on`): in a tab
 the session created, a plain left click on a CROSS-SITE target=_blank link
@@ -5878,8 +5885,12 @@ and the community epiral/bb-sites pack; `update` syncs both. When Node.js 20+
 is on PATH, `update` also installs OpenCLI (jackwener/OpenCLI): a `name/command`
 neither pack has runs through OpenCLI's own runtime over this session, marked
 "(opencli)" in `site list`. Ours always win on a shared name, and
-douyin/delete, douyin/update and twitter/delete are ours (chrome-use-sites),
-never OpenCLI's. AGENT_BROWSER_SITES_NO_OPENCLI=1 turns OpenCLI off.
+douyin/delete, douyin/update, twitter/delete, twitter/like, twitter/follow,
+bilibili/user-videos and bilibili/creator-stats are ours (chrome-use-sites),
+never OpenCLI's. OpenCLI is third-party and not maintained by chrome-use:
+each run prints a stderr note and --json adds maintainedBy: "opencli".
+Use it as a last resort; port account actions into chrome-use-sites.
+AGENT_BROWSER_SITES_NO_OPENCLI=1 turns OpenCLI off.
 
 The spec is always `name/command`. `site` alone, or a wrong spec, prints a
 one-line usage and points you at `site list`.

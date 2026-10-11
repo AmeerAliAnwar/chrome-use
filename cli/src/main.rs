@@ -2016,6 +2016,11 @@ fn main() {
                     .filter(|a| !(verify && a.as_str() == "--write-fixture"))
                     .cloned()
                     .collect();
+                // Third-party code we don't maintain: say so once, every run.
+                eprintln!(
+                    "{}",
+                    color::yellow(&opencli::third_party_note(spec, &entry))
+                );
                 let mut env = opencli::run(spec, &entry, &rest, &flags.session);
                 let mut ok = env.get("success").and_then(|v| v.as_bool()) == Some(true);
                 let result = env.get("data").cloned().unwrap_or(Value::Null);
@@ -2037,7 +2042,7 @@ fn main() {
                     env["verify"] = report;
                 }
                 if flags.json {
-                    let mut data = json!({ "result": result, "source": opencli::SOURCE_LABEL });
+                    let mut data = opencli::tagged_data(spec, &entry, result);
                     if let Some(v) = env.get("verify") {
                         data["verify"] = v.clone();
                     }
@@ -3932,12 +3937,18 @@ fn main() {
                                 ))
                             );
                         }
+                        eprintln!(
+                            "{}",
+                            color::yellow(&opencli::third_party_note(spec, &entry))
+                        );
                         resp.success = true;
-                        resp.data = Some(json!({
-                            "result": env.get("data").cloned().unwrap_or(Value::Null),
-                            "source": opencli::SOURCE_LABEL,
-                            "fallbackFrom": first,
-                        }));
+                        let mut data = opencli::tagged_data(
+                            spec,
+                            &entry,
+                            env.get("data").cloned().unwrap_or(Value::Null),
+                        );
+                        data["fallbackFrom"] = json!(first);
+                        resp.data = Some(data);
                     }
                 }
             }
