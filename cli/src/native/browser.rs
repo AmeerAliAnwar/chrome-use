@@ -2785,6 +2785,12 @@ pub struct RelayTabBaseline {
     tab_ids: HashSet<i64>,
 }
 
+impl RelayTabBaseline {
+    pub fn tab_ids(&self) -> &HashSet<i64> {
+        &self.tab_ids
+    }
+}
+
 /// Budget for finding a relay pop-up in chrome.tabs and waiting for it to
 /// leave about:blank. Every chrome.tabs read inside it is cut off at the
 /// deadline, so this phase never runs past it.
@@ -2846,7 +2852,7 @@ fn relay_created_chrome_tabs(pages: &[PageInfo], created: &HashSet<String>) -> H
 /// source tab's group, while it reports the window's FRONT tab as
 /// `openerTabId`. A tab the user opens has no group and an opener that is not
 /// ours, so it is never picked either.
-fn relay_popup_candidate<'a>(
+pub(crate) fn relay_popup_candidate<'a>(
     tabs: &'a [Value],
     before: &HashSet<i64>,
     ours: &HashSet<i64>,
@@ -5056,6 +5062,43 @@ impl BrowserManager {
 
     pub fn on_relay(&self) -> bool {
         self.agent_group().is_some()
+    }
+
+    /// How a click's focus watch (#468) tells that the browser has a tab the
+    /// click opened, and the pid of a browser this daemon launched. `None`
+    /// where Chrome cannot be on this machine's screen or a new tab cannot be
+    /// told: a headless or remote browser, or a relay extension that cannot
+    /// list tabs (`relay_before` is `None`).
+    pub fn focus_watch_probe(
+        &self,
+        before: &HashSet<String>,
+        relay_before: Option<&RelayTabBaseline>,
+    ) -> Option<(super::focus_restore::NewTabProbe, Option<i32>)> {
+        use super::focus_restore::NewTabProbe;
+        match &self.browser_process {
+            Some(BrowserProcess::Chrome(p)) if !p.headless => Some((
+                NewTabProbe::Targets(before.clone()),
+                i32::try_from(p.pid()).ok(),
+            )),
+            Some(_) => None,
+            None if self.on_relay() => {
+                // The session's own tabs, plus the clicked tab even when it is
+                // a user tab taken with `tab adopt`: its pop-up still raises
+                // Chrome over the user's app.
+                let mut ours = self.relay_own_chrome_tabs();
+                ours.extend(self.active_session_id().ok().and_then(relay_chrome_tab_id));
+                relay_before.map(|b| {
+                    (
+                        NewTabProbe::RelayTabs {
+                            before: b.tab_ids().clone(),
+                            ours,
+                        },
+                        None,
+                    )
+                })
+            }
+            None => None,
+        }
     }
 
     /// Whether a click here may take over a `target=_blank` link and open it
