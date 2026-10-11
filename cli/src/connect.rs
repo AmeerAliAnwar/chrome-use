@@ -4140,13 +4140,18 @@ async fn nm_host_main() {
                 .unwrap_or("")
                 .to_string();
             let params = v.get("params").cloned().unwrap_or(serde_json::Value::Null);
+            let panel_profile = bound_profile_id.clone();
             let tx = to_ext.clone();
             let permit = panel_jobs.clone().try_acquire_owned();
             tokio::spawn(async move {
                 let result = match permit {
                     Ok(permit) => tokio::task::spawn_blocking(move || {
                         let _permit = permit;
-                        crate::agent_panel::handle(&operation, &params)
+                        crate::agent_panel::handle_for_profile(
+                            &operation,
+                            &params,
+                            panel_profile.as_deref(),
+                        )
                     })
                     .await
                     .unwrap_or_else(|_| Err("Agent panel service failed".into())),

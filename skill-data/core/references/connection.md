@@ -189,3 +189,14 @@ For isolated development, set `CHROME_USE_RELAY_DIR` to the same absolute
 directory in the native-host launcher and the CLI. This scopes relay discovery
 without changing HOME; combine it with unique session names and an explicit
 `--browser` ID. Relative paths are rejected before discovery. Omit it for ordinary shared-profile discovery.
+
+Native agent-panel configuration journals are also scoped by this directory,
+under `agent-panel/profiles/<profile-id>/configuration`. Without an override they
+live under `~/.chrome-use/agent-panel`. This isolates journals, not the installed
+agents' own settings. Fixture validation must also point each tested agent's
+config-root variable at synthetic settings. Discovery does not read credentials.
+Config planning reports a field diff without applying it; apply verifies source
+identity and bytes, writes atomically and reads back. Restore preserves later
+user edits and reports conflicts. A saved config does not prove a running session
+changed model. If apply/restore loses its reply, inspect current values before
+retrying; the native request is not automatically replayed.

@@ -139,6 +139,8 @@ npx skills add leeguooooo/chrome-use -g
 }
 ```
 
+原生 agent 面板的配置记录按 Chrome profile 保存在 `~/.chrome-use/agent-panel`。开发验收时，原生主机和 CLI 使用相同的绝对路径 `CHROME_USE_RELAY_DIR`，也会隔离这些记录。这个目录不会改变已安装 agent 的配置路径，测试还需把该 agent 的配置目录变量指向合成数据。写入后会读回保存值，已有会话保留运行中的配置；恢复时保留用户后来改过的字段，并报告冲突。
+
 ## 连接你的 Chrome
 
 从 Chrome 应用商店安装 [**chrome-use** 扩展](https://chromewebstore.google.com/detail/chrome-use/knfcmbamhjmaonkfnjhldjedeobeafmk)，再注册一次本地桥：

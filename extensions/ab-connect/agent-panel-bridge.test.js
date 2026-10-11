@@ -105,3 +105,42 @@ test('only packaged extension pages may invoke native agent services', () => {
     { id: 'own', url: runtime.getURL('sidepanel.html') + '?spoof' },
   ]) assert.equal(isAgentPanelSender(sender, runtime), false);
 });
+
+test('configuration replies must match the requested operation and real outcome', async () => {
+  const { bridge, messages } = setup();
+  const read = bridge.request('configRead', { agentId: 'codex' });
+  bridge.receive({ method: 'agentPanelReply', requestId: messages[0].requestId,
+    result: { schemaVersion: 1, configuration: { agentId: 'codex', fields: [], fingerprint: 'fixture' } } });
+  assert.equal((await read).configuration.agentId, 'codex');
+  const apply = bridge.request('configApply', { agentId: 'codex', planId: 'fixture' });
+  bridge.receive({ method: 'agentPanelReply', requestId: messages[1].requestId,
+    result: { schemaVersion: 1, configuration: { agentId: 'codex', planId: 'fixture', files: [], phase: 'planned' } } });
+  await assert.rejects(apply, /Malformed/);
+  const restore = bridge.request('configRestore', { agentId: 'codex', planId: 'fixture' });
+  bridge.receive({ method: 'agentPanelReply', requestId: messages[2].requestId,
+    result: { schemaVersion: 1, configuration: { agentId: 'codex', planId: 'fixture', files: [], phase: 'restoreConflicts', conflicts: [['model']] } } });
+  assert.deepEqual((await restore).configuration.conflicts, [['model']]);
+});
+
+test('configuration mutation timeout and disconnect retain uncertainty and never replay', async () => {
+  const { bridge, messages, timers } = setup();
+  const apply = bridge.request('configApply', { agentId: 'codex', planId: 'fixture' });
+  [...timers.values()][0]();
+  await assert.rejects(apply, /outcome could not be confirmed/);
+  const restore = bridge.request('configRestore', { agentId: 'codex', planId: 'fixture' });
+  bridge.disconnect('Host ended');
+  await assert.rejects(restore, /outcome is unconfirmed/);
+  assert.equal(messages.length, 2);
+});
+
+test('a reply for a different agent or plan cannot confirm a configuration effect', async () => {
+  for (const configuration of [
+    { agentId: 'claude', planId: 'requested', files: [], phase: 'applied' },
+    { agentId: 'codex', planId: 'different', files: [], phase: 'applied' },
+  ]) {
+    const { bridge, messages } = setup();
+    const result = bridge.request('configApply', { agentId: 'codex', planId: 'requested' });
+    bridge.receive({ method: 'agentPanelReply', requestId: messages[0].requestId, result: { schemaVersion: 1, configuration } });
+    await assert.rejects(result, /Malformed/);
+  }
+});

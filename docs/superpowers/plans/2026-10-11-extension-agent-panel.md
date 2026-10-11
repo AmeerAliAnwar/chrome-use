@@ -30,12 +30,22 @@ Use English Conventional Commits for this work, as requested by the maintainer.
 
 ## Discovery and configuration
 
+The native implementation now includes public-field readback for the built-in
+agent registry and profile-bound `configPlan`, `configApply`, and `configRestore`
+requests. `config_edit.rs` checks full-document semantics after lossless edits;
+`config_transaction.rs` stores private journals, verifies source identity/hash,
+recovers interrupted application and restores only unchanged fields. The native
+wire tests use synthetic Claude settings and a temporary relay/journal registry.
+This does not establish live model access, provider import, session overlays,
+Windows ACL/file-identity acceptance or the side-panel configuration UI.
+
 - [ ] Expand installation resolution to npm-prefix, nvm-default, fnm/mise/asdf, pnpm, Windows registry and custom paths.
 - [ ] Refresh/invalidation and bounded version/protocol/authentication probes.
 - [ ] Read allow-listed agent fields and report parse/permission errors without exposing credentials.
 - [ ] Format-preserving JSON/JSONC/TOML/YAML/env patch planners.
 - [ ] Redacted diffs, source hashes, apply/readback, atomic persistence and transaction journal.
 - [ ] Symlink/hard-link behavior, permissions, BOM/CRLF and multi-file failure recovery.
+- [ ] Windows private-journal ACLs and real file identity; Unix behavior is covered by native fixtures.
 - [ ] Conflict-aware restore that preserves later user edits.
 - [ ] Session/global configuration choices, presets, provider import previews and secret handles.
 - [ ] Custom providers and existing Magpie gateway compatibility, tested per backend protocol.

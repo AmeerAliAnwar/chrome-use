@@ -214,6 +214,31 @@ implementation, not UI-only reconnection logic. A reconnect replays events;
 it never resubmits a turn. Keep chrome-use's binary distribution and avoid a
 mandatory Node/Go runtime for users.
 
+Native configuration requests use `configRead`, `configPlan`, `configApply`, and
+`configRestore`. The host supplies the Chrome profile identity from `hello`, not
+from caller parameters. Paths and public fields come from the agent registry;
+requests cannot select an arbitrary file or secret field. Journals live in the
+profile's private configuration store, optionally scoped by
+`CHROME_USE_RELAY_DIR`. That override does not move the agents' own settings.
+
+Plans retain source bytes and resolved identities, show changed fields, and do
+not apply settings. Apply validates every source before committing any file and
+reads back the complete result. An interrupted apply either confirms that all
+planned writes already landed or recovers only files still equal to its own
+output. Restore preserves user changes and returns `restoreConflicts` when a
+field has changed. That state must render as a partial restore with the affected
+fields, not a successful full-restore toast. A running session remains on its
+own configuration; saved file values alone cannot establish a live model change.
+
+The format layer uses pinned native CST editors for JSON/JSONC, TOML and YAML;
+env files use literal assignment edits without evaluating code. Edits must also
+pass whole-document semantic equality against the requested changes. Duplicate
+keys, ambiguous parents, unsafe alias writes and invalid configuration are
+refused. Interpolated or multiline env values require a native session override,
+rather than a file edit that might have a different runtime value. Structured
+values inside string-only public fields are flagged without exposing their
+contents. Credential-file targets are never accepted through config symlinks.
+
 Browser tools use the existing CLI/MCP execution surface with explicit browser
 and session identity. The backend cannot silently switch to another browser
 extension, a launched browser, or its own generic browser tools. MCP tool results

@@ -10,6 +10,11 @@ Read and act on Chrome's live accessibility state through short `@eN` refs.
 This page holds the rules and the routing; load one reference from the table
 at the end only when the task or a symptom needs it.
 
+Native agent-panel configuration planning, apply and restore are separate from
+browser actions. Saved configuration proves file readback, not a model change
+in an existing session. Inspect current values after an unconfirmed write;
+never replay it automatically. Isolation and journal details: [connection](references/connection.md).
+
 ## Start with the cheapest useful evidence
 
 | Task | First choice |

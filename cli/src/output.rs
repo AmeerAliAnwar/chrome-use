@@ -6547,8 +6547,10 @@ Environment:
   AGENT_BROWSER_SESSION_NAME     Auto-save/restore state persistence name
   AGENT_BROWSER_ENCRYPTION_KEY   64-char hex key for AES-256-GCM state encryption
   AGENT_BROWSER_STATE_EXPIRE_DAYS Auto-delete states older than N days (opt-in; unset: never)
-  CHROME_USE_RELAY_DIR          Isolated relay registry directory; set the same
-                               absolute path in the native host and CLI
+  CHROME_USE_RELAY_DIR          Isolated relay registry and native agent-panel
+                               journal directory; set the same absolute path
+                               in the native host and CLI. Agent config files
+                               still follow their own config-root variables.
   AGENT_BROWSER_EXECUTABLE_PATH  Custom browser executable path
   AGENT_BROWSER_EXTENSIONS       Comma-separated browser extension paths
   AGENT_BROWSER_INIT_SCRIPTS     Comma-separated paths to page init scripts
