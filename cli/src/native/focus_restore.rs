@@ -511,22 +511,43 @@ mod platform {
             (!p.is_null()).then_some(p)
         };
         macro_rules! f {
-            ($name:literal) => {
-                std::mem::transmute::<*mut c_void, _>(sym($name)?)
+            ($name:literal, $signature:ty) => {
+                std::mem::transmute::<*mut c_void, $signature>(sym($name)?)
             };
         }
         Some(Api {
-            get_front_process: f!(c"GetFrontProcess"),
-            get_process_pid: f!(c"GetProcessPID"),
-            get_process_for_pid: f!(c"GetProcessForPID"),
-            set_front_process_with_options: f!(c"SetFrontProcessWithOptions"),
-            process_information_copy_dictionary: f!(c"ProcessInformationCopyDictionary"),
-            cf_dictionary_get_value: f!(c"CFDictionaryGetValue"),
-            cf_string_create_with_c_string: f!(c"CFStringCreateWithCString"),
-            cf_string_get_c_string: f!(c"CFStringGetCString"),
-            cf_get_type_id: f!(c"CFGetTypeID"),
-            cf_string_get_type_id: f!(c"CFStringGetTypeID"),
-            cf_release: f!(c"CFRelease"),
+            get_front_process: f!(c"GetFrontProcess", unsafe extern "C" fn(*mut Psn) -> i32),
+            get_process_pid: f!(
+                c"GetProcessPID",
+                unsafe extern "C" fn(*const Psn, *mut i32) -> i32
+            ),
+            get_process_for_pid: f!(
+                c"GetProcessForPID",
+                unsafe extern "C" fn(i32, *mut Psn) -> i32
+            ),
+            set_front_process_with_options: f!(
+                c"SetFrontProcessWithOptions",
+                unsafe extern "C" fn(*const Psn, u32) -> i32
+            ),
+            process_information_copy_dictionary: f!(
+                c"ProcessInformationCopyDictionary",
+                unsafe extern "C" fn(*const Psn, u32) -> CfRef
+            ),
+            cf_dictionary_get_value: f!(
+                c"CFDictionaryGetValue",
+                unsafe extern "C" fn(CfRef, CfRef) -> CfRef
+            ),
+            cf_string_create_with_c_string: f!(
+                c"CFStringCreateWithCString",
+                unsafe extern "C" fn(CfRef, *const c_char, u32) -> CfRef
+            ),
+            cf_string_get_c_string: f!(
+                c"CFStringGetCString",
+                unsafe extern "C" fn(CfRef, *mut c_char, isize, u32) -> u8
+            ),
+            cf_get_type_id: f!(c"CFGetTypeID", unsafe extern "C" fn(CfRef) -> usize),
+            cf_string_get_type_id: f!(c"CFStringGetTypeID", unsafe extern "C" fn() -> usize),
+            cf_release: f!(c"CFRelease", unsafe extern "C" fn(CfRef)),
         })
     }
 

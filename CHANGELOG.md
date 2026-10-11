@@ -1,8 +1,26 @@
 # Changelog
 
-## 1.5.188
+## 1.5.189
 
 <!-- release:start -->
+Requires extension ab-connect 0.5.36. Chrome Web Store publication follows Google review; CLI browser automation remains compatible with 0.5.35.
+
+### New Features
+
+- **Local agent side panel (macOS/Linux).** Open the extension panel to chat with your installed Codex or Claude Code using its existing configuration and login. Conversations persist locally, reconnect without resending messages, display streamed replies and tool returns, and support questions, approvals, stopping, queue edits/removal and direct sending after confirmed interruption. New chats use an independent browser session; binding the visible page is not included yet.
+- **Agent discovery and configuration.** Discover installation/configuration evidence for 14 agent families, preview allow-listed changes, verify saved values and restore unchanged fields without overwriting later edits. Codex/Claude model suggestions come from their CLI metadata, with explicit partial/unavailable states. Finding a CLI, account or model does not prove execution access.
+
+### Bug Fixes
+
+- **First-open and host compatibility.** A panel opened while connecting loads metadata after confirmation. Browser timer bindings retain their correct receiver. Older native hosts show an upgrade requirement rather than enabling unsupported panel operations. Windows panels remain read-only for agent discovery/configuration viewing until process ownership and private persistence support are verified; existing Windows browser CLI automation is unchanged.
+
+### Contributors
+
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.188
+
 Requires extension ab-connect 0.5.35 (published on the Chrome Web Store; Chrome updates it automatically).
 
 ### Fixes
@@ -12,7 +30,6 @@ Requires extension ab-connect 0.5.35 (published on the Chrome Web Store; Chrome 
 ### Contributors
 
 - @leeguooooo
-<!-- release:end -->
 
 ## 1.5.187
 

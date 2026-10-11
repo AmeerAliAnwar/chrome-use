@@ -85,6 +85,16 @@ test('legacy and read-only hosts never enable conversations or persistence opera
   }
 });
 
+test('MCP approvals show arguments and send a once-only decision without persistence metadata', async () => {
+  const params={serverName:'chrome_use',mode:'form',message:'Allow browser navigation?',_meta:{codex_approval_kind:'mcp_tool_call',tool_params:{url:'http://127.0.0.1/fixture'},tool_description:'Navigate'},requestedSchema:{type:'object',properties:{}}};
+  const f=await fixture({conversationRead:async()=>({success:true,result:{conversation:chat('a','waitingInput'),journal:{events:[{sequence:1,kind:'request',data:{requestId:1,method:'mcpServer/elicitation/request',params}}],cursor:1,more:false}}}),conversationRespond:async()=>({success:true,result:{}})});
+  f.panel.select('a');await settle();
+  assert.match(f.nodes.get('requests').querySelectorAll('pre')[0].textContent,/127.0.0.1/);
+  const allow=f.nodes.get('requests').querySelectorAll('button').find(button=>button.textContent==='Allow once');
+  allow.fire('click');await settle();
+  assert.deepEqual(f.calls.find(call=>call.operation==='conversationRespond').params.result,{action:'accept',content:{}});f.panel.close();
+});
+
 test('sending locks selection until the acknowledgement and keeps the message identity on failure', async () => {
   const send = deferred();
   const f = await fixture({ conversationSend: () => send.promise });

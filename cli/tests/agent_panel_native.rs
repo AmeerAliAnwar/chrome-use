@@ -73,6 +73,10 @@ fn panel_reply(
             send(host, json!({"method":"pong"}));
             continue;
         }
+        if reply["method"] == "pong" {
+            assert_eq!(reply["params"]["agentPanel"]["schemaVersion"], 1);
+            continue;
+        }
         assert_eq!(
             reply["method"], "agentPanelReply",
             "Panel request entered browser command dispatch"
@@ -490,7 +494,14 @@ fn both_cli_protocols_keep_conversations_alive_across_native_host_disconnects() 
             json!({"conversationId":id,"requestId":request,"result":answer}),
         );
         assert_eq!(reply["result"]["response"]["confirmed"], false);
-        conversation_poll(&mut host, &rx, &id, "idle");
+        let completed = conversation_poll(&mut host, &rx, &id, "idle");
+        assert!(completed["journal"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(
+                |event| event["kind"] == "requestResolved" && event["data"]["requestId"] == request
+            ));
         panel_reply(
             &mut host,
             &rx,

@@ -9,7 +9,7 @@ if "--version" in sys.argv:
     print("0.0.1 (Claude Code)"); sys.exit(0)
 
 codex = "app-server" in sys.argv
-inspection = False
+inspection = "--no-session-persistence" in sys.argv
 session = "synthetic-codex-thread" if codex else "synthetic-claude-session"
 turn = None
 pending = None
@@ -82,6 +82,8 @@ for line in sys.stdin:
             complete("synthetic approval handled")
             pending = None
     else:
+        if not inspection:
+            assert sys.argv[sys.argv.index('--permission-prompt-tool')+1] == 'stdio'
         if message.get("type") == "control_request":
             subtype = message["request"]["subtype"]
             inspection = inspection or message["request_id"] == "panel-inspect-init"
@@ -105,11 +107,13 @@ for line in sys.stdin:
                 continue
             if text == "approval":
                 pending = "fixture-permission"
-                emit({"type": "control_request", "request_id": pending, "request": {"subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": {"questions": [{"question": "Synthetic question", "header": "Fixture", "options": [{"label": "One", "description": "Synthetic"}, {"label": "Two", "description": "Synthetic"}], "multiSelect": False}]}}})
+                emit({"type": "control_request", "request_id": pending, "request": {"subtype": "can_use_tool", "tool_use_id": "fixture-tool-use", "tool_name": "AskUserQuestion", "input": {"questions": [{"question": "Synthetic question", "header": "Fixture", "options": [{"label": "One", "description": "Synthetic"}, {"label": "Two", "description": "Synthetic"}], "multiSelect": False}]}}})
+                emit({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"unrelated-tool","content":"unrelated"}]}})
                 continue
             if text == "fail":
                 time.sleep(0.4)
             complete("synthetic reply: " + text, "failed" if text == "fail" else "completed")
         elif message.get("type") == "control_response" and message["response"]["request_id"] == pending:
+            emit({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"fixture-tool-use","content":"confirmed"}]}})
             complete("synthetic question handled")
             pending = None

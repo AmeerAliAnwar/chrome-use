@@ -32,7 +32,7 @@ async function evaluate(sessionId, expression, userGesture = false) {
   return result.result.value;
 }
 async function waitFor(read, accept, label) {
-  const deadline = Date.now() + 15000;
+  const deadline = Date.now() + Number(flags['--timeout-ms'] || 15000);
   let value;
   while (Date.now() < deadline) { value = await read(); if (accept(value)) return value; await new Promise(resolve => setTimeout(resolve, 100)); }
   throw new Error(`${label}: ${JSON.stringify(value)}`);
@@ -65,12 +65,31 @@ try {
   panelSession = (await call('Target.attachToTarget', {targetId:panel.targetId,flatten:true})).sessionId;
   const initial = await waitFor(() => evaluate(panelSession, `({connection:document.getElementById('connection')?.textContent,agentCount:document.getElementById('agentList')?.children.length,notice:document.getElementById('notice')?.textContent})`), value => value?.connection === 'Local bridge connected' && value.agentCount >= 2, 'Panel did not load native discovery');
   evidence.steps.push({initial});
-  await evaluate(panelSession, `document.getElementById('executable').value=${JSON.stringify(flags['--fixture-agent'])};document.getElementById('executable').dispatchEvent(new Event('input'));document.getElementById('inspectAgent').click();true`);
-  const catalog = await waitFor(() => evaluate(panelSession, `({count:document.getElementById('modelList').children.length,status:document.getElementById('modelStatus').textContent,notice:document.getElementById('notice').textContent})`), value => value.count === 2, 'Model catalog did not arrive through the real extension');
+  const executable = flags['--real-agent'] || flags['--fixture-agent'];
+  evidence.backendKind = flags['--real-agent'] ? 'real CLI' : 'synthetic protocol';
+  await evaluate(panelSession, `document.getElementById('executable').value=${JSON.stringify(executable)};document.getElementById('executable').dispatchEvent(new Event('input'));document.getElementById('inspectAgent').click();true`);
+  const catalog = await waitFor(() => evaluate(panelSession, `({count:document.getElementById('modelList').children.length,status:document.getElementById('modelStatus').textContent,notice:document.getElementById('notice').textContent})`), value => flags['--real-agent'] ? value.count > 0 : value.count === 2, 'Model catalog did not arrive through the real extension');
   assert.match(catalog.status, /execution access is unverified/);
   evidence.steps.push({catalog});
-  await evaluate(panelSession, `document.getElementById('message').value='first';document.getElementById('composer').requestSubmit();true`);
-  const chat = await waitFor(() => evaluate(panelSession, `({phase:document.getElementById('phase').textContent,text:document.getElementById('transcript').textContent,notice:document.getElementById('notice').textContent})`), value => value.phase === 'Ready' && value.text.includes('synthetic reply: first'), 'Conversation did not complete');
+  const prompt = flags['--fixture-url'] ? `Use only the chrome_use browser tools to open ${flags['--fixture-url']} and click the button "Verify panel browser task" exactly once. Verify the visible text "Action verified". Do not read or change local files or run shell commands. Reply panel-browser-fixture-complete only after verifying the page effect.` : 'first';
+  await evaluate(panelSession, `document.getElementById('message').value=${JSON.stringify(prompt)};document.getElementById('composer').requestSubmit();true`);
+  evidence.approvalsOnce = [];
+  const chat = await waitFor(async () => {
+    const value = await evaluate(panelSession, `({phase:document.getElementById('phase').textContent,text:document.getElementById('transcript').textContent,notice:document.getElementById('notice').textContent,requests:[...document.querySelectorAll('.request')].map(node=>({kind:node.dataset.approvalKind,server:node.dataset.serverName,args:node.querySelector('.tool-arguments')?.textContent,allow:[...node.querySelectorAll('button')].some(button=>button.textContent==='Allow once'&&!button.disabled)}))})`);
+    if (['Response failed','Previous outcome unconfirmed'].includes(value.phase)) throw new Error(`Backend failed: ${value.text}`);
+    if (flags['--real-agent']) for (const request of value.requests) if (request.allow) {
+      assert.equal(request.kind,'mcpTool');assert.equal(request.server,'chrome_use');
+      const args=JSON.parse(request.args);
+      if (args.url) assert.equal(new URL(args.url).origin,new URL(flags['--fixture-url']).origin,'Fixture approval escaped the loopback task');
+      evidence.approvalsOnce.push({server:request.server,args});
+      await evaluate(panelSession, `(()=>{const node=[...document.querySelectorAll('.request')].find(node=>node.dataset.approvalKind==='mcpTool'&&[...node.querySelectorAll('button')].some(button=>button.textContent==='Allow once'&&!button.disabled));[...node.querySelectorAll('button')].find(button=>button.textContent==='Allow once').click();return true;})()`);
+    }
+    return value;
+  }, value => value.phase === 'Ready' && value.text.includes(flags['--real-agent'] ? 'panel-browser-fixture-complete' : 'synthetic reply: first'), 'Conversation did not complete');
+  if (flags['--fixture-url']) {
+    evidence.browserEffect = await (await fetch(new URL('/state', flags['--fixture-url']))).json();
+    assert.equal(evidence.browserEffect.clicks, 1, 'Agent response did not prove the fixture click');
+  }
   evidence.steps.push({chat});
   evidence.senders = await evaluate(workerSession, '__panelSenders');
   assert.ok(evidence.senders.some(sender => sender.operation === 'conversationSend' && sender.panel));
@@ -86,7 +105,11 @@ try {
   evidence.verdict = 'failed'; evidence.error = error.message;
   if (panelSession) {
     try { evidence.panelState = await evaluate(panelSession, `({text:document.body.innerText,notice:document.getElementById('notice')?.textContent})`); } catch {}
-    try { await evaluate(panelSession, `(async()=>await chrome.runtime.sendMessage({type:'ab-agent-request',operation:'serviceStop',params:{}}))()`); } catch {}
+    try {
+      await evaluate(panelSession, `(async()=>{const list=await chrome.runtime.sendMessage({type:'ab-agent-request',operation:'conversationList',params:{}});for(const chat of list.result?.conversations||[])if(['starting','running','waitingInput','stopping'].includes(chat.phase))await chrome.runtime.sendMessage({type:'ab-agent-request',operation:'conversationStop',params:{conversationId:chat.id}});return true;})()`);
+      await new Promise(resolve=>setTimeout(resolve,1000));
+      await evaluate(panelSession, `(async()=>await chrome.runtime.sendMessage({type:'ab-agent-request',operation:'serviceStop',params:{}}))()`);
+    } catch {}
   }
   process.exitCode = 1;
 } finally {

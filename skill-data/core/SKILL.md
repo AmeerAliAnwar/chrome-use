@@ -18,6 +18,7 @@ never replay it automatically. Isolation and journal details: [connection](refer
 Native conversations persist message IDs and event cursors. Reconnect reads
 events without resending a turn; failure or interruption pauses the queue.
 A CLI's completed response is not proof that the whole browser task succeeded.
+Browser-tool approvals show arguments and grant one call.
 The extension toolbar opens a packaged side panel with chat history, agent
 requests, queue controls and configuration previews. It adds no page content
 script. Unsupported/unconfirmed Chrome behavior retains the connection popup.

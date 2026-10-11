@@ -6382,6 +6382,8 @@ Setup:
                              Read CLI models fetches bounded CLI metadata without
                              a prompt; account reports do not verify model access.
                              This metadata adapter currently requires Unix ownership.
+                             Browser-tool approvals preview arguments and allow one
+                             call. Replies remain pending until backend confirmation.
                              Agent panel conversations/configuration writes support
                              macOS/Linux; Windows panel discovery/config reads are
                              read-only. Legacy native hosts require a CLI upgrade.

@@ -272,7 +272,7 @@ Version output from a nonzero exit is not reported as a verified version.
 Two concurrent probes, bounded output, deadlines and owned process-group exit
 checks apply; unknown cleanup fails rather than returning successful metadata.
 The current adapter requires Unix ownership support. Windows ownership,
-persistent caches, additional adapters and real-model execution remain separate
+persistent caches and additional adapters remain separate
 acceptance work. The panel discards results after agent/program selection changes
 and never overwrites a typed model ID or substitutes static aliases on failure.
 
@@ -284,3 +284,7 @@ agent/history metadata after host confirmation. Windows mode is readOnly: only
 discover/configRead pass the native gate; no panel service, process or private
 configuration journal is created through its API. Existing browser commands are
 unchanged. Conversation support and write support are macOS/Linux in this release.
+
+Browser-tool approvals show the requested arguments and allow only a single call. Claude permission requests remain pending until a matching tool result arrives; writing a reply alone does not confirm resolution.
+Codex chrome_use MCP approvals accept only the known empty-form call schema;
+unknown forms can be declined or cancelled. Claude uses stdio permission prompts.

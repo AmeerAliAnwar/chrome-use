@@ -158,6 +158,17 @@ export function createPanel({ document, runtime, storage, schedule = setTimeout,
       if (params.command) container.append(element('pre', params.command));
       if (params.cwd) container.append(element('p', `Working folder: ${params.cwd}`, 'hint'));
       actions.append(button('Allow once', () => respond(key, { decision: 'accept' }), 'primary'), button('Decline', () => respond(key, { decision: 'decline' })));
+    } else if (method === 'mcpServer/elicitation/request') {
+      container.append(element('p', params.message || 'The MCP server needs a decision.'));
+      const properties = params.requestedSchema?.properties;
+      const approval = params.serverName === 'chrome_use' && params.mode === 'form' && params._meta?.codex_approval_kind === 'mcp_tool_call' && params.requestedSchema?.type === 'object' && properties && typeof properties === 'object' && Object.keys(properties).length === 0 && (params.requestedSchema.required === undefined || (Array.isArray(params.requestedSchema.required) && params.requestedSchema.required.length === 0)) && params._meta.tool_params && typeof params._meta.tool_params === 'object' && !Array.isArray(params._meta.tool_params);
+      if (approval) {
+        container.dataset.approvalKind = 'mcpTool'; container.dataset.serverName = params.serverName;
+        if (params._meta.tool_description) container.append(element('p', params._meta.tool_description, 'hint'));
+        container.append(element('pre', JSON.stringify(params._meta.tool_params, null, 2), 'tool-arguments'));
+        actions.append(button('Allow once', () => respond(key, {action:'accept',content:{}}), 'primary'));
+      } else container.append(element('p', 'This form cannot be safely completed here. Decline or cancel this request.'));
+      actions.append(button('Decline', () => respond(key, {action:'decline',content:null})), button('Cancel request', () => respond(key, {action:'cancel',content:null})));
     } else if (method === 'can_use_tool') {
       container.append(element('p', params.tool_name || 'Tool request')); container.append(element('pre', JSON.stringify(params.input || {}, null, 2)));
       actions.append(button('Allow once', () => respond(key, { behavior: 'allow', updatedInput: params.input || {} }), 'primary'), button('Decline', () => respond(key, { behavior: 'deny', message: 'User declined' })));

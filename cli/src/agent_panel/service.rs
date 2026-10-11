@@ -353,6 +353,27 @@ impl Engine {
         if let Some(message) = self.chat(id)?.active.as_ref() {
             notice.data["messageId"] = message.id.clone().into();
         }
+        // Claude confirms a permission round trip by returning the matching
+        // tool_use_id. A stdin write alone never resolves the request.
+        if notice.kind == "tool" && notice.data["completed"] == true {
+            if let Some(tool_id) = notice.data["item"]["tool_use_id"].as_str() {
+                let resolved: Vec<_> = self
+                    .requests
+                    .iter()
+                    .filter(|((chat, _), (_, method, params, sent))| {
+                        chat == id
+                            && *sent
+                            && method == "can_use_tool"
+                            && params["tool_use_id"] == tool_id
+                    })
+                    .map(|(key, (request_id, _, _, _))| (key.clone(), request_id.clone()))
+                    .collect();
+                for (key, request_id) in resolved {
+                    self.requests.remove(&key);
+                    self.record(id, "requestResolved", json!({"requestId":request_id}))?;
+                }
+            }
+        }
         match notice.kind {
             "ready" => {
                 let chat = self.chat(id)?;
@@ -360,9 +381,14 @@ impl Engine {
                 chat.model = notice.data["model"].as_str().map(String::from);
             }
             "running" | "textDelta" | "tool" => {
+                let waiting = self.requests.keys().any(|(chat, _)| chat == id);
                 let chat = self.chat(id)?;
                 if chat.active.is_some() && chat.phase != Phase::Stopping {
-                    chat.phase = Phase::Running;
+                    chat.phase = if waiting {
+                        Phase::WaitingInput
+                    } else {
+                        Phase::Running
+                    };
                 }
             }
             "request" => {
@@ -839,7 +865,30 @@ fn validate_reply(method: &str, original: &Value, result: &Value) -> Result<(), 
                 && (result["behavior"] == "deny" || result.get("updatedInput").is_some())
         }
         "mcpServer/elicitation/request" => {
-            ["accept", "decline", "cancel"].contains(&result["action"].as_str().unwrap_or(""))
+            let action = result["action"].as_str().unwrap_or("");
+            let known_fields = result.as_object().is_some_and(|o| {
+                o.keys()
+                    .all(|k| ["action", "content"].contains(&k.as_str()))
+            });
+            let approval = original["serverName"] == "chrome_use"
+                && original["mode"] == "form"
+                && original["_meta"]["codex_approval_kind"] == "mcp_tool_call"
+                && original["requestedSchema"]["type"] == "object"
+                && original["requestedSchema"]["properties"]
+                    .as_object()
+                    .is_some_and(|o| o.is_empty())
+                && original["requestedSchema"]
+                    .get("required")
+                    .is_none_or(|value| value.as_array().is_some_and(|a| a.is_empty()))
+                && original["_meta"]["tool_params"].is_object();
+            known_fields
+                && match action {
+                    "accept" => {
+                        approval && result["content"].as_object().is_some_and(|o| o.is_empty())
+                    }
+                    "decline" | "cancel" => result.get("content").is_none_or(Value::is_null),
+                    _ => false,
+                }
         }
         "item/permissions/requestApproval" => {
             result.get("permissions").is_some()
@@ -1055,4 +1104,39 @@ pub fn run(args: &[String]) -> Result<(), String> {
         }
         let _=std::fs::remove_file(directory.join("service.json"));Ok::<(),String>(())
     })
+}
+
+#[cfg(test)]
+mod approval_tests {
+    use super::*;
+    #[test]
+    fn mcp_tool_approval_is_once_only_and_requires_reviewable_known_server_metadata() {
+        let original = json!({"serverName":"chrome_use","mode":"form","_meta":{"codex_approval_kind":"mcp_tool_call","tool_params":{"url":"http://127.0.0.1/fixture"}},"requestedSchema":{"type":"object","properties":{}}});
+        let method = "mcpServer/elicitation/request";
+        assert!(
+            validate_reply(method, &original, &json!({"action":"accept","content":{}})).is_ok()
+        );
+        assert!(validate_reply(
+            method,
+            &original,
+            &json!({"action":"accept","content":{},"_meta":{"persist":"always"}})
+        )
+        .is_err());
+        for field in ["serverName", "mode", "_meta", "requestedSchema"] {
+            let mut unknown = original.clone();
+            unknown[field] = Value::Null;
+            assert!(
+                validate_reply(method, &unknown, &json!({"action":"accept","content":{}})).is_err()
+            );
+            assert!(validate_reply(
+                method,
+                &unknown,
+                &json!({"action":"decline","content":null})
+            )
+            .is_ok());
+        }
+        let mut needed = original;
+        needed["requestedSchema"]["properties"] = json!({"answer":{"type":"string"}});
+        assert!(validate_reply(method, &needed, &json!({"action":"accept","content":{}})).is_err());
+    }
 }

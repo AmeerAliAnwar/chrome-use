@@ -135,6 +135,8 @@ async fn drive(
                 "default",
                 "--permission-prompts",
                 "host",
+                "--permission-prompt-tool",
+                "stdio",
             ]);
         if let Some(session) = &setup.backend_session {
             command.arg("--resume").arg(session);
@@ -296,7 +298,8 @@ async fn protocol(
                                 "turn/started"=>{let id=p["turn"]["id"].as_str().ok_or("Backend turn has no identity")?.to_string();turn=Some(id.clone());events.send(notice("running",json!({"turnId":id}))).await.map_err(|_|"Event consumer closed")?;if stopping {next_id+=1;write(stdin,json!({"id":next_id,"method":"turn/interrupt","params":{"threadId":session,"turnId":turn}})).await?;}}
                                 "turn/completed"=>{if !busy {continue;}let completed=&p["turn"];if completed["id"].as_str()!=turn.as_deref(){return Err("Backend completed a different turn".into());}let status=completed["status"].as_str().ok_or("Backend terminal status is missing")?;if !["completed","failed","interrupted"].contains(&status){return Err("Unknown backend terminal status".into());}busy=false;turn=None;stopping=false;stopping_at=None;events.send(notice("terminal",json!({"status":status,"error":completed["error"]["message"]}))).await.map_err(|_|"Event consumer closed")?;}
                                 "item/agentMessage/delta"=>{if let Some(text)=p["delta"].as_str(){emit_text(events,"textDelta",p["itemId"].as_str().unwrap_or("assistant"),text).await?;}}
-                                "item/started"|"item/completed"=>{let item=&p["item"];if item["type"]=="agentMessage" {if method=="item/completed" {if let Some(text)=item["text"].as_str(){emit_text(events,"textFinal",item["id"].as_str().unwrap_or("assistant"),text).await?;}}}else {events.send(notice("tool",json!({"completed":method=="item/completed","item":short(item)}))).await.map_err(|_|"Event consumer closed")?;}}
+                                "item/started"|"item/completed"=>{let item=&p["item"];if item["type"]=="userMessage" {continue;}
+                                if item["type"]=="agentMessage" {if method=="item/completed" {if let Some(text)=item["text"].as_str(){emit_text(events,"textFinal",item["id"].as_str().unwrap_or("assistant"),text).await?;}}}else {events.send(notice("tool",json!({"completed":method=="item/completed","item":short(item)}))).await.map_err(|_|"Event consumer closed")?;}}
                                 "serverRequest/resolved"=>{events.send(notice("requestResolved",json!({"requestId":p["requestId"]}))).await.map_err(|_|"Event consumer closed")?;}
                                 "mcpServer/startupStatus/updated" if p["name"]=="chrome_use" && p["status"]=="failed"=>return Err("The conversation's chrome-use browser tools did not start".into()),
                                 "thread/name/updated"=>{if let Some(name)=p["threadName"].as_str(){events.send(notice("title",json!({"title":name}))).await.map_err(|_|"Event consumer closed")?;}}
