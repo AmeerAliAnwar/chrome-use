@@ -141,6 +141,8 @@ npx skills add leeguooooo/chrome-use -g
 
 原生 agent 面板的配置记录按 Chrome profile 保存在 `~/.chrome-use/agent-panel`。开发验收时，原生主机和 CLI 使用相同的绝对路径 `CHROME_USE_RELAY_DIR`，也会隔离这些记录。这个目录不会改变已安装 agent 的配置路径，测试还需把该 agent 的配置目录变量指向合成数据。写入后会读回保存值，已有会话保留运行中的配置；恢复时保留用户后来改过的字段，并报告冲突。
 
+点击扩展图标打开 agent 侧栏。界面使用 Chrome 的扩展页面，没有新增网页 content script；Chrome 未确认支持时，图标保留连接弹窗。侧栏的 **Settings** 打开连接设置。**Conversations** 可选择 Codex 或 Claude Code，沿用 CLI 默认模型或填写模型 ID，使用本机 CLI 已有登录。新会话使用独立浏览器 session，目前尚未绑定眼前网页。历史显示流式文本、工具返回和 agent 请求；工具返回不代表任务成功。回复中发送消息会进入队列，失败或中断后暂停，需要点 **Resume queue**。发送未获确认时按已保存的消息 ID 查询，不自动重发。**Agents & models** 发现程序和配置，提供改动预览、写入读回及保留后续修改的恢复。发现结果不证明登录或模型可用。真实 Chrome 界面、账号、Windows 和隐身验收仍在[实施清单](docs/superpowers/plans/2026-10-11-extension-agent-panel.md)中。
+
 原生会话服务独立于扩展连接，持续运行 Codex app-server 或 Claude stream-json 会话。断线后按游标读取事件，不重发消息；同一消息 ID 不会重复执行。失败或停止后暂停队列，需明确恢复。浏览器工具沿用 chrome-use，绑定当前 profile 和该会话。合成协议测试不代表真实模型、页面操作或隐身检测已验收。
 
 ## 连接你的 Chrome

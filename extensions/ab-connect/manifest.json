@@ -16,6 +16,7 @@
     "tabGroups",
     "nativeMessaging",
     "storage",
+    "sidePanel",
     "alarms",
     "idle",
     "webNavigation",
@@ -31,6 +32,9 @@
   "action": {
     "default_title": "chrome-use",
     "default_popup": "popup.html"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
   },
   "options_ui": {
     "page": "options.html",

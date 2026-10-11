@@ -221,3 +221,15 @@ turn requires inspection; it is not marked successful or automatically replayed.
 Synthetic protocol fixtures verify lifecycle behavior without using an account
 or Chrome. They do not establish real CLI login, model access, browser acceptance,
 Windows process-tree behavior or unchanged detector results.
+
+The toolbar side panel requires Chrome's native sidePanel API. The worker reads
+back open-on-action behavior before removing the connection popup; failure keeps
+that popup available. Settings in the panel opens the existing options page.
+Conversation text and tool data render as text, not HTML. Reconnect reads the
+journal cursor; an uncertain send queries conversationMessageStatus for the
+original message ID and does not interpret absence as rejection or resend it.
+Selection changes discard old read/control replies, and drafts remain scoped to
+each conversation while the panel stays open. Tool rows say Returned or Error
+returned, not that the requested browser effect was verified. Queue resume is
+explicit. Agents & models offers allow-listed field previews and native verified
+apply/restore; installation evidence is separate from authentication/model access.

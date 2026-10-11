@@ -2,6 +2,22 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { AgentPanelBridge, isAgentPanelSender } from './agent-panel-bridge.js';
 
+test('message status validates identity and never interprets an absent ID as rejection', async () => {
+  for (const [message, valid] of [
+    [{ id: 'message', known: true, status: 'previouslyAccepted' }, true],
+    [{ id: 'message', known: false, status: 'unconfirmed' }, true],
+    [{ id: 'wrong', known: true, status: 'active' }, false],
+    [{ id: 'message', known: false, status: 'rejected' }, false],
+    [{ id: 'message', known: true, status: 'unconfirmed' }, false],
+  ]) {
+    const { bridge, messages } = setup();
+    const reply = bridge.request('conversationMessageStatus', { conversationId: 'chat', messageId: 'message' });
+    bridge.receive({ method: 'agentPanelReply', requestId: messages[0].requestId, result: { schemaVersion: 1, conversation: { id: 'chat', phase: 'idle' }, message } });
+    if (valid) assert.deepEqual((await reply).message, message);
+    else await assert.rejects(reply, /Malformed/);
+  }
+});
+
 function setup(options = {}) {
   const messages = [], timers = new Map();
   let next = 0;

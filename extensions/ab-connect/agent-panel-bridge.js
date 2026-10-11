@@ -15,7 +15,7 @@ export class AgentPanelBridge {
   }
 
   request(operation, params = {}) {
-    if (!['discover', 'configRead', 'configPlan', 'configApply', 'configRestore', 'serviceHealth', 'serviceStop', 'conversationList', 'conversationCreate', 'conversationRead', 'conversationSend', 'conversationStop', 'conversationResumeQueue', 'conversationRespond'].includes(operation)) return Promise.reject(new Error(`Unsupported agent panel operation: ${operation}`));
+    if (!['discover', 'configRead', 'configPlan', 'configApply', 'configRestore', 'serviceHealth', 'serviceStop', 'conversationList', 'conversationCreate', 'conversationRead', 'conversationSend', 'conversationMessageStatus', 'conversationStop', 'conversationResumeQueue', 'conversationRespond'].includes(operation)) return Promise.reject(new Error(`Unsupported agent panel operation: ${operation}`));
     if (this.pending.size >= this.maxPending) return Promise.reject(new Error('Too many pending agent panel requests'));
     const requestId = `${this.identity}:${this.generation}:${++this.sequence}`;
     return new Promise((resolve, reject) => {
@@ -75,6 +75,7 @@ function validResult({ operation, agentId, planId, conversationId, messageId }, 
     if (!['idle', 'starting', 'running', 'waitingInput', 'stopping', 'failed', 'interrupted', 'recoveryRequired'].includes(conversation.phase)) return false;
     if (operation === 'conversationRead') return Array.isArray(result.journal?.events) && Number.isInteger(result.journal.cursor);
     if (operation === 'conversationSend') return result.message?.id === messageId && typeof result.message.accepted === 'boolean' && result.message.replayed === false;
+    if (operation === 'conversationMessageStatus') return result.message?.id === messageId && typeof result.message.known === 'boolean' && (result.message.known ? ['active', 'queued', 'previouslyAccepted'].includes(result.message.status) : result.message.status === 'unconfirmed');
     if (operation === 'conversationRespond') return result.response?.dispatched === true && result.response.confirmed === false;
     return true;
   }

@@ -6360,6 +6360,9 @@ Setup:
                              queueing it.
   extension status           Host/relay/extension versions, driving profile, per-profile
                              coverage, and what the install policy currently costs
+                             The extension toolbar opens its agent side panel when
+                             Chrome confirms support; otherwise it keeps the setup
+                             popup. Settings remain accessible in the side panel.
   extension uninstall        Remove the native-messaging host (+ tells you how to drop
                              the policy profile and leave managed mode)
   extension call <ns.method> [json-args]

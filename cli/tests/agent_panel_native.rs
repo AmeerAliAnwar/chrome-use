@@ -354,6 +354,25 @@ fn both_cli_protocols_keep_conversations_alive_across_native_host_disconnects() 
             json!({"conversationId":id,"messageId":message,"text":"first"}),
         );
         assert_eq!(repeated["result"]["message"]["accepted"], false);
+        let status = panel_reply(
+            &mut host,
+            &rx,
+            "message-status",
+            "conversationMessageStatus",
+            json!({"conversationId":id,"messageId":message}),
+        );
+        assert_eq!(status["result"]["message"]["id"], message);
+        assert_eq!(status["result"]["message"]["known"], true);
+        assert_eq!(status["result"]["message"]["status"], "previouslyAccepted");
+        let unknown = panel_reply(
+            &mut host,
+            &rx,
+            "unknown-message-status",
+            "conversationMessageStatus",
+            json!({"conversationId":id,"messageId":uuid::Uuid::new_v4().to_string()}),
+        );
+        assert_eq!(unknown["result"]["message"]["known"], false);
+        assert_eq!(unknown["result"]["message"]["status"], "unconfirmed");
         let history = conversation_poll(&mut host, &rx, &id, "idle");
         assert_eq!(
             history["journal"]["events"]

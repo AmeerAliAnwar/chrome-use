@@ -67,6 +67,7 @@
       <p>网页中的其他扩展 iframe 也可能导致 <code>debugger_access_denied</code>。Chrome 会在执行主页面命令前检查整个框架树；关闭 auto-attach 或过滤子框架事件无法解除这个限制。先保存工作，再禁用该站点上注入框架的扩展并重新加载，或使用不含该扩展的独立 profile。不要把权限错误当作成功，也不要循环重连。使用 <code>tab inspect &lt;ref&gt;</code> 查看浏览器级状态，或选择独立测试 profile。开发验收可在原生主机和 CLI 中设置相同的绝对路径 <code>CHROME_USE_RELAY_DIR</code>，配合唯一 session 与明确的 <code>--browser</code>，避免把候选中继登记到共享目录。</p>
       <p>原生 agent 面板的配置记录也按该目录隔离，默认保存在 <code>~/.chrome-use/agent-panel</code>。这不会改变 agent 自己的配置路径；测试写入需另设该 agent 的配置目录变量，并使用合成数据。已有会话不会因保存配置而切换模型。应用或恢复没有收到确认时，先读当前值；恢复会保留外部修改并报告字段冲突。</p>
       <p>中继导航最多执行三次有时限的访问检查，确认 debugger 访问被拒绝时提前结束等待；成功检查或临时错误不会被当作页面已经就绪。</p>
+      <p>点击扩展图标打开原生 agent 侧栏，Chrome 未确认支持时保留连接弹窗。侧栏 Settings 打开连接设置。Conversations 使用本机 Codex 或 Claude Code 的已有登录，新会话使用独立浏览器 session，目前不绑定眼前网页。发送未获确认时查询原消息 ID，不自动重发；失败或中断后需明确恢复队列。工具返回不代表任务成功。Agents &amp; models 可发现程序和配置、预览字段改动、写入读回及恢复；发现结果不证明登录或模型可用。界面没有新增网页 content script；真实 Chrome、账号、Windows 和隐身检测仍待验收。</p>
       <h2>Daemon 仍忙碌</h2>
       <p>CLI 在命令执行期间接收 daemon 每 10 秒发送的心跳。无响应超时预算不变，总等待上限为 180 秒或该命令预算中的较大值。出现 "daemon still busy" 时命令仍在执行：等待后再检查会话，不要重放有副作用的命令。</p>
 

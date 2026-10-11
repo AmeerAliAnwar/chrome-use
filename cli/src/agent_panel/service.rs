@@ -334,7 +334,7 @@ impl Engine {
         &mut self,
         id: &str,
         generation: u64,
-        notice: Notice,
+        mut notice: Notice,
     ) -> Result<Option<Message>, String> {
         if self.chat(id)?.generation != generation {
             return Ok(None);
@@ -345,6 +345,9 @@ impl Engine {
             .is_some_and(|job| job.generation != generation)
         {
             return Ok(None);
+        }
+        if let Some(message) = self.chat(id)?.active.as_ref() {
+            notice.data["messageId"] = message.id.clone().into();
         }
         match notice.kind {
             "ready" => {
@@ -466,6 +469,13 @@ struct Send {
     message_id: String,
     text: String,
 }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MessageStatus {
+    conversation_id: String,
+    message_id: String,
+}
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Events {
@@ -545,6 +555,25 @@ async fn dispatch(
             let summary = e.chat(&p.conversation_id)?.summary();
             let events = e.store.events(&p.conversation_id, p.after)?;
             Ok(json!({"schemaVersion":1,"conversation":summary,"journal":events}))
+        }
+        "conversationMessageStatus" => {
+            let p: MessageStatus = serde_json::from_value(params.clone())
+                .map_err(|_| "Message status requires conversationId and messageId")?;
+            let mut e = engine.lock().await;
+            let chat = e.chat(&p.conversation_id)?;
+            let known = chat.accepted.contains_key(&p.message_id);
+            let status = if chat.active.as_ref().is_some_and(|m| m.id == p.message_id) {
+                "active"
+            } else if chat.queue.iter().any(|m| m.id == p.message_id) {
+                "queued"
+            } else if known {
+                "previouslyAccepted"
+            } else {
+                "unconfirmed"
+            };
+            Ok(
+                json!({"schemaVersion":1,"conversation":chat.summary(),"message":{"id":p.message_id,"known":known,"status":status}}),
+            )
         }
         "conversationSend" => {
             let p: Send = serde_json::from_value(params.clone())

@@ -62,6 +62,21 @@ Windows ACL/file-identity acceptance or the side-panel configuration UI.
 
 ## Side panel experience
 
+The packaged HTML/CSS/controller and native toolbar behavior are implemented.
+Node controller tests cover late transcript/control responses, draft isolation,
+uncertain sends, reopen correlation IDs and entry fallback. They do not prove rendered layout, actual
+Chrome toolbar opening or native sender compatibility. The new native message
+status query reports stored acceptance; an absent ID remains unconfirmed.
+Remote native tests pass for stored-message status, including unknown IDs remaining
+unconfirmed. Remote fmt/clippy and 276 extension tests pass. Headless screenshot
+windows clamp the DOM viewport to 500px; cropped screenshots do not establish
+320px layout acceptance. Isolated iframe rendering confirms a real 320px viewport
+and no horizontal body/transcript/composer overflow in the dark chat/request
+fixture. Screenshot review shortened the queued-send label to keep controls
+compact. Light mode, other screens, keyboard/scroll behavior and actual extension
+entry/sender acceptance still require verification.
+Queue editing, attachments, catalogs and the other items below remain required.
+
 - [ ] Toolbar opens the native side panel; retain connection/setup access.
 - [ ] Persistent chats, stream rendering, tool outcomes and readable failures.
 - [ ] Actual target display and explicit target switching without silent tab/profile drift.

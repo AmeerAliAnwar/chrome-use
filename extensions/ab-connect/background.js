@@ -18,6 +18,7 @@
 
 import { getRelayHealth, observeDebuggerCommand } from './relay-health.js';
 import { AgentPanelBridge, isAgentPanelSender } from './agent-panel-bridge.js';
+import { configureAgentPanel } from './sidepanel-entry.js';
 import { extensionInstallIdentity } from './relay-identity.js';
 import { duplicateTab as runDuplicateTab } from './tab-duplicate.js';
 import {
@@ -84,6 +85,8 @@ import {
 } from './tab-replacement.js';
 
 const HOST_NAME = 'com.agent_browser.connect';
+let agentPanelEntry = { ready: false, error: 'Side panel entry is being configured.' };
+void configureAgentPanel(chrome).then(result => { agentPanelEntry = result; });
 const agentPanelBridge = new AgentPanelBridge({
   send(message) {
     if (!port) throw new Error('Native host is not connected');
@@ -2425,7 +2428,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         connectHost();
       } catch (e) {}
     }
-    sendResponse({ ...hostConnection.snapshot(), tabCount: tabs.size, host: HOST_NAME });
+    sendResponse({ ...hostConnection.snapshot(), tabCount: tabs.size, host: HOST_NAME, agentPanelEntry });
   }
   return false;
 });
