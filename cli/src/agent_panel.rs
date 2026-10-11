@@ -16,6 +16,7 @@ mod config_edit;
 mod config_transaction;
 mod configuration;
 mod conversation;
+mod inspection;
 mod service;
 
 pub fn run_service(args: &[String]) -> Result<(), String> {
@@ -424,6 +425,7 @@ pub fn handle_for_profile(
             configuration::handle(operation, params, profile)
         }
         "conversationList"
+        | "agentInspect"
         | "conversationCreate"
         | "conversationRead"
         | "conversationSend"

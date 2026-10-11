@@ -95,3 +95,5 @@ details summary { cursor:pointer; color:var(--muted); font-size:12px; }
 .queued-message summary { overflow-wrap:anywhere; }
 .queued-message textarea { margin-top:7px; font-size:12px; }
 .queued-message .actions { display:flex; gap:8px; margin-top:5px; }
+
+.new-options #inspectAgent { grid-column:1/-1; justify-self:start; }

@@ -27,7 +27,10 @@
     </div>
     <section id="newOptions" class="new-options" aria-label="New conversation options">
       <label>Agent<select id="agent"><option value="codex">Codex</option><option value="claude">Claude Code</option></select></label>
-      <label>Model<input id="model" placeholder="CLI default" autocomplete="off"></label>
+      <label>Model<input id="model" list="modelList" placeholder="CLI default" autocomplete="off"></label>
+      <datalist id="modelList"></datalist>
+      <button id="inspectAgent" class="quiet" type="button">Read CLI models</button>
+      <p id="modelStatus" class="hint">CLI model access has not been checked.</p>
       <details><summary>Custom program</summary><label>Executable path<input id="executable" placeholder="Use the discovered program" autocomplete="off"></label></details>
       <p class="hint">Uses the local CLI's login. Each conversation works in its own browser session.</p>
     </section>

@@ -15,7 +15,7 @@ export class AgentPanelBridge {
   }
 
   request(operation, params = {}) {
-    if (!['discover', 'configRead', 'configPlan', 'configApply', 'configRestore', 'serviceHealth', 'serviceStop', 'conversationList', 'conversationCreate', 'conversationRead', 'conversationSend', 'conversationSendDirect', 'conversationMessageStatus', 'conversationQueueEdit', 'conversationQueueMessageRead', 'conversationQueueRemove', 'conversationStop', 'conversationResumeQueue', 'conversationRespond'].includes(operation)) return Promise.reject(new Error(`Unsupported agent panel operation: ${operation}`));
+    if (!['discover', 'agentInspect', 'configRead', 'configPlan', 'configApply', 'configRestore', 'serviceHealth', 'serviceStop', 'conversationList', 'conversationCreate', 'conversationRead', 'conversationSend', 'conversationSendDirect', 'conversationMessageStatus', 'conversationQueueEdit', 'conversationQueueMessageRead', 'conversationQueueRemove', 'conversationStop', 'conversationResumeQueue', 'conversationRespond'].includes(operation)) return Promise.reject(new Error(`Unsupported agent panel operation: ${operation}`));
     if (this.pending.size >= this.maxPending) return Promise.reject(new Error('Too many pending agent panel requests'));
     const requestId = `${this.identity}:${this.generation}:${++this.sequence}`;
     return new Promise((resolve, reject) => {
@@ -65,6 +65,10 @@ export class AgentPanelBridge {
 
 function validResult({ operation, agentId, planId, conversationId, messageId, replacementId }, result) {
   if (result?.schemaVersion !== 1) return false;
+  if (operation === 'agentInspect') {
+    const inspection = result.inspection;
+    return inspection?.agentId === agentId && inspection.source === 'cliProtocol' && inspection.modelAccessVerified === false && inspection.processExitConfirmed === true && typeof inspection.complete === 'boolean' && Array.isArray(inspection.models) && inspection.models.length <= 256 && inspection.models.every(model => typeof model.id === 'string' && typeof model.label === 'string' && Array.isArray(model.efforts)) && ['reportedSignedIn','reportedSignedOut','reportedMetadata','unverified'].includes(inspection.account?.status);
+  }
   if (operation === 'discover') return Array.isArray(result.agents);
   if (operation === 'serviceHealth') return typeof result.profile === 'string' && typeof result.binaryHash === 'string' && Number.isInteger(result.pid);
   if (operation === 'serviceStop') return result.service?.stopRequested === true;

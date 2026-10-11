@@ -31,6 +31,10 @@ the running turn. Stop & send or Ctrl/Cmd+Enter is a separate direct-send
 operation: it waits for terminal/owned-process-exit confirmation and leaves
 ordinary queued messages paused. Unconfirmed or recovered turns cannot release
 a pending direct message automatically.
+Read CLI models is an explicit metadata probe, separate from installation
+discovery. It returns CLI-reported model suggestions and account state without
+identity or credentials, sends no prompt and does not verify model access.
+Missing or partial catalogs are explicit; typed model IDs remain available.
 
 ## Start with the cheapest useful evidence
 

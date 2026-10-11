@@ -36,6 +36,30 @@ rendered side-panel acceptance remain below. Full completion is still unproven.
 - [ ] Additional runtime adapters with their real capabilities, and custom adapter registration.
 - [ ] Browser MCP integration through the existing chrome-use binary, pinned profile/session/tab identity.
 
+## CLI model inspection
+
+The explicit agentInspect operation queries Codex model/list and account/read
+without token refresh, or Claude initialization metadata. It sends no thread or
+prompt and transports no account identity/credential fields. Codex pagination
+is bounded and partial catalogs are labeled; Claude suggestions use returned
+value identifiers and supportedEffortLevels rather than Tiller's fixed aliases.
+Magpie's FellBack/ListError distinction informed the explicit unavailable state:
+no default list is presented as a successful CLI read. Late UI replies cannot
+populate another agent/program, and typed model IDs remain unchanged.
+
+A live local Claude 2.1.296 initialization returned models/value/displayName/
+resolvedModel/supportedEffortLevels and account metadata keys. Only key shapes
+were inspected; no prompt or model generation was sent. Native synthetic
+fixtures verify both protocols, Codex pagination, no conversation creation and
+identity/credential stripping. A real Codex 0.161.0 on the SSH build host returned 7 models, a complete
+catalog and reportedSignedIn through the native operation. Probe processes and
+the isolated service exited with confirmation. No prompt/model generation was
+sent. The model work passes 66 Rust tests, 283 extension tests and 3 native
+integration tests; remote fmt/clippy pass. These do not establish model execution
+access or actual rendered picker acceptance.
+Windows ownership support, persistent catalog caches, custom providers, other
+runtime adapters and rendered model-picker acceptance remain required.
+
 ## Discovery and configuration
 
 The native implementation now includes public-field readback for the built-in

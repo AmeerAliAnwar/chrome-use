@@ -5,7 +5,11 @@ import os
 import sys
 import time
 
+if "--version" in sys.argv:
+    print("0.0.1 (Claude Code)"); sys.exit(0)
+
 codex = "app-server" in sys.argv
+inspection = False
 session = "synthetic-codex-thread" if codex else "synthetic-claude-session"
 turn = None
 pending = None
@@ -31,10 +35,19 @@ for line in sys.stdin:
     if codex:
         method = message.get("method")
         if method == "initialize":
+            inspection = message["params"]["clientInfo"]["name"] == "chrome_use_inspection"
             emit({"id": message["id"], "result": {}})
+        elif method == "account/read":
+            assert message["params"]["refreshToken"] is False
+            emit({"id":message["id"],"result":{"account":{"type":"chatgpt","email":"private@synthetic.invalid","accessToken":"synthetic-never-transport"},"requiresOpenaiAuth":True}})
+        elif method == "model/list":
+            page = message["params"].get("cursor")
+            data=[{"model":"synthetic-codex-model","displayName":"Synthetic Codex","isDefault":True,"supportedReasoningEfforts":[{"reasoningEffort":"high"}]}] if page is None else [{"model":"synthetic-codex-alternate","displayName":"Synthetic alternate","isDefault":False}]
+            emit({"id":message["id"],"result":{"data":data,"nextCursor":"page-two" if page is None else None}})
         elif method == "config/read":
             emit({"id": message["id"], "result": {"config": {"mcp_servers": {"other_browser": {"command": "never-executed"}}}}})
         elif method in ("thread/start", "thread/resume"):
+            assert not inspection, "Metadata inspection started a conversation"
             params = message["params"]
             mcp = params["config"]["mcp_servers"]
             assert mcp["other_browser"]["enabled"] is False
@@ -45,6 +58,7 @@ for line in sys.stdin:
                 assert params["threadId"] == session
             emit({"id": message["id"], "result": {"thread": {"id": session}, "model": "synthetic-codex-model"}})
         elif method == "turn/start":
+            assert not inspection, "Metadata inspection sent a prompt"
             turn = "turn-" + message["params"]["clientUserMessageId"]
             text = message["params"]["input"][0]["text"]
             emit({"id": message["id"], "result": {"turn": {"id": turn}}})
@@ -70,12 +84,20 @@ for line in sys.stdin:
     else:
         if message.get("type") == "control_request":
             subtype = message["request"]["subtype"]
-            emit({"type": "control_response", "response": {"subtype": "success", "request_id": message["request_id"], "response": {}}})
+            inspection = inspection or message["request_id"] == "panel-inspect-init"
+            body={"models":[{"value":"synthetic-claude-model","displayName":"Synthetic Claude","supportedEffortLevels":["low","high"]}],"account":{"email":"private@synthetic.invalid","token":"synthetic-never-transport"}} if inspection else {}
+            if inspection:
+                assert "--no-session-persistence" in sys.argv
+                assert json.loads(sys.argv[sys.argv.index("--mcp-config")+1]) == {"mcpServers":{}}
+                assert sys.argv[sys.argv.index("--tools")+1] == ""
+                assert json.loads(sys.argv[sys.argv.index("--settings")+1])["disableAllHooks"] is True
+            emit({"type": "control_response", "response": {"subtype": "success", "request_id": message["request_id"], "response": body}})
             if subtype == "interrupt" and turn is not None:
                 time.sleep(0.2)
                 if text == "wait-exit": sys.exit(0)
                 complete("synthetic stop", "interrupted")
         elif message.get("type") == "user":
+            assert not inspection, "Metadata inspection sent a prompt"
             text = message["message"]["content"]
             turn = message["uuid"]
             emit({"type": "system", "subtype": "init", "session_id": session, "model": "synthetic-claude-model"})

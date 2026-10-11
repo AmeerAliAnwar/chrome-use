@@ -4,11 +4,12 @@ const busyPhases = new Set(['starting', 'running', 'waitingInput', 'stopping']);
 const fieldLabels = { model: 'Model', provider: 'Provider', effort: 'Reasoning effort', serviceTier: 'Service tier', smallModel: 'Small model', opusModel: 'Opus model', sonnetModel: 'Sonnet model', haikuModel: 'Haiku model' };
 
 export function createPanel({ document, runtime, storage, schedule = setTimeout, cancel = clearTimeout }) {
-  const ids = ['connection', 'notice', 'refresh', 'settings', 'chatTab', 'agentsTab', 'chatView', 'agentsView', 'conversation', 'newChat', 'newOptions', 'agent', 'model', 'executable', 'phase', 'effectiveModel', 'transcript', 'empty', 'latest', 'requests', 'composer', 'message', 'queue', 'queuedMessages', 'resume', 'stop', 'sendDirect', 'send', 'discover', 'agentList', 'configuration', 'configTitle', 'configPath', 'configWarnings', 'configForm', 'configFields', 'configPreview', 'configDiff', 'applyConfig', 'discardConfig', 'restoreConfig', 'configResult'];
+  const ids = ['connection', 'notice', 'refresh', 'settings', 'chatTab', 'agentsTab', 'chatView', 'agentsView', 'conversation', 'newChat', 'newOptions', 'agent', 'model', 'modelList', 'modelStatus', 'inspectAgent', 'executable', 'phase', 'effectiveModel', 'transcript', 'empty', 'latest', 'requests', 'composer', 'message', 'queue', 'queuedMessages', 'resume', 'stop', 'sendDirect', 'send', 'discover', 'agentList', 'configuration', 'configTitle', 'configPath', 'configWarnings', 'configForm', 'configFields', 'configPreview', 'configDiff', 'applyConfig', 'discardConfig', 'restoreConfig', 'configResult'];
   const nodes = Object.fromEntries(ids.map(id => [id, document.getElementById(id)]));
   let selected = '', selectionEpoch = 0, connectionEpoch = 0, connected = false, closed = false;
   let timeline = new PanelTimeline(), conversations = [], conversation = null, timer = null, polling = false;
   const pendingMessages = new Map(), drafts = new Map();
+  let modelEpoch = 0;
   let sending = false, configuration = null, configEpoch = 0, preview = null, applied = null;
   const rendered = new Map(), requestNodes = new Map(), queuedNodes = new Map();
 
@@ -255,6 +256,20 @@ export function createPanel({ document, runtime, storage, schedule = setTimeout,
     } finally { sending = false; controls(); }
   }
   function view(agents) { nodes.chatView.hidden = agents; nodes.agentsView.hidden = !agents; nodes.chatTab.classList.toggle('selected', !agents); nodes.agentsTab.classList.toggle('selected', agents); nodes.chatTab.setAttribute('aria-pressed', String(!agents)); nodes.agentsTab.setAttribute('aria-pressed', String(agents)); }
+  function clearModels() { modelEpoch++; nodes.modelList.replaceChildren(); nodes.modelStatus.textContent = 'CLI model access has not been checked.'; nodes.inspectAgent.disabled = false; }
+  async function inspectModels() {
+    const epoch = ++modelEpoch, agentId = nodes.agent.value, executable = nodes.executable.value.trim();
+    nodes.inspectAgent.disabled = true; nodes.modelList.replaceChildren(); nodes.modelStatus.textContent = 'Reading CLI model metadata…';
+    try {
+      const result = await api('agentInspect', { agentId, ...(executable ? { executable } : {}) });
+      if (closed || epoch !== modelEpoch || agentId !== nodes.agent.value || executable !== nodes.executable.value.trim()) return;
+      const inspection = result.inspection;
+      for (const model of inspection.models) { const option = element('option', `${model.label}${model.efforts.length ? ` · effort: ${model.efforts.join(', ')}` : ''}`); option.value = model.id; nodes.modelList.append(option); }
+      const account = { reportedSignedIn: 'CLI reports signed in', reportedSignedOut: 'CLI reports signed out', reportedMetadata: 'CLI reports account metadata', unverified: 'Account state unverified' }[inspection.account.status];
+      nodes.modelStatus.textContent = `${inspection.versionReported ? `CLI ${inspection.versionReported}. ` : 'CLI version unverified. '}${inspection.models.length} models${inspection.complete ? '' : ' (partial catalog)'}. ${account}. Model execution access is unverified.`;
+    } catch (failure) { if (epoch === modelEpoch) nodes.modelStatus.textContent = 'Model metadata unavailable. No fallback list was substituted; you can still enter a model ID.'; throw failure; }
+    finally { if (epoch === modelEpoch) nodes.inspectAgent.disabled = false; }
+  }
   async function discover() {
     const result = await api('discover'); nodes.agentList.replaceChildren();
     for (const agent of result.agents) {
@@ -307,6 +322,9 @@ export function createPanel({ document, runtime, storage, schedule = setTimeout,
   nodes.conversation.addEventListener('change', () => select(nodes.conversation.value));
   nodes.newChat.addEventListener('click', () => { nodes.conversation.value = ''; select(''); });
   nodes.refresh.addEventListener('click', () => void refresh().catch(error));
+  nodes.inspectAgent.addEventListener('click', () => void inspectModels().catch(error));
+  nodes.agent.addEventListener('change', () => { clearModels(); nodes.model.value = ''; });
+  nodes.executable.addEventListener('input', clearModels);
   nodes.discover.addEventListener('click', () => void discover().catch(error));
   nodes.settings.addEventListener('click', () => runtime?.openOptionsPage?.());
   nodes.chatTab.addEventListener('click', () => view(false)); nodes.agentsTab.addEventListener('click', () => view(true));
@@ -334,7 +352,7 @@ export function createPanel({ document, runtime, storage, schedule = setTimeout,
       await refresh();
       if (selected && conversations.some(c => c.id === selected)) select(selected); else select('');
     } catch (failure) { error(failure); }
-  }, refresh, select, send, timeline: () => timeline, close() { closed = true; cancel(timer); selectionEpoch++; configEpoch++; connectionEpoch++; } };
+  }, refresh, select, send, timeline: () => timeline, close() { closed = true; modelEpoch++; cancel(timer); selectionEpoch++; configEpoch++; connectionEpoch++; } };
 }
 
 if (typeof document !== 'undefined') {

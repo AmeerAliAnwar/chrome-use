@@ -256,3 +256,22 @@ is refused. Queue edit/remove can replace or cancel the pending intent before
 execution. The native service can restart the CLI after confirmed exit, retaining
 its backend session identity; startup failure reports recoveryRequired rather
 than dropping the selected message or pretending it ran.
+
+agentInspect runs the selected Codex/Claude executable in private scratch
+directories, separately from installation-only discover. It checks version
+output, then uses initialize and Codex model/list/account/read (refreshToken
+false) or Claude initialize metadata. Codex cursor pages are bounded and a
+remaining cursor marks the list partial. No thread or prompt is sent. Claude
+receives empty tools/MCP configuration, no-session-persistence and a
+disableAllHooks setting, with user settings retained for agent configuration.
+The response allow-lists model identifiers, labels and reasoning efforts.
+Codex returns reportedSignedIn/reportedSignedOut/unverified; Claude reports
+account metadata presence, not verified authentication. Email, organization and
+credential fields are never transported. modelAccessVerified remains false.
+Version output from a nonzero exit is not reported as a verified version.
+Two concurrent probes, bounded output, deadlines and owned process-group exit
+checks apply; unknown cleanup fails rather than returning successful metadata.
+The current adapter requires Unix ownership support. Windows ownership,
+persistent caches, additional adapters and real-model execution remain separate
+acceptance work. The panel discards results after agent/program selection changes
+and never overwrites a typed model ID or substitutes static aliases on failure.

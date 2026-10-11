@@ -127,7 +127,11 @@ fn exchange(endpoint: &Endpoint, operation: &str, params: Value) -> Result<Value
     let mut stream = TcpStream::connect_timeout(&endpoint.address, Duration::from_millis(750))
         .map_err(|_| "Agent service did not answer")?;
     stream
-        .set_read_timeout(Some(Duration::from_secs(8)))
+        .set_read_timeout(Some(Duration::from_secs(if operation == "agentInspect" {
+            12
+        } else {
+            8
+        })))
         .map_err(|_| "Cannot set agent service timeout")?;
     stream
         .set_write_timeout(Some(Duration::from_secs(3)))
@@ -524,6 +528,10 @@ async fn dispatch(
         return Err("Agent service is stopping; reconnect after its exit is confirmed".into());
     }
     match operation {
+        "agentInspect" => {
+            let root = engine.lock().await.store.directory.clone();
+            super::inspection::inspect(params, &root).await
+        }
         "health" => {
             if params != &json!({}) {
                 return Err("health takes no parameters".into());

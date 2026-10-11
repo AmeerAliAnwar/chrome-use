@@ -319,6 +319,43 @@ fn both_cli_protocols_keep_conversations_alive_across_native_host_disconnects() 
     let fixture =
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/panel_agent.py");
     for agent in ["codex", "claude"] {
+        let inspected = panel_reply(
+            &mut host,
+            &rx,
+            "inspect-cli",
+            "agentInspect",
+            json!({"agentId":agent,"executable":fixture}),
+        );
+        assert!(
+            inspected.get("error").is_none(),
+            "Metadata inspection failed: {}",
+            inspected["error"]
+        );
+        let metadata = &inspected["result"]["inspection"];
+        assert_eq!(metadata["source"], "cliProtocol");
+        assert_eq!(metadata["modelAccessVerified"], false);
+        assert_eq!(metadata["processExitConfirmed"], true);
+        assert_eq!(metadata["complete"], true);
+        assert_eq!(
+            metadata["models"].as_array().unwrap().len(),
+            if agent == "codex" { 2 } else { 1 }
+        );
+        let serialized = metadata.to_string();
+        assert!(!serialized.contains("private@synthetic.invalid"));
+        assert!(!serialized.contains("synthetic-never-transport"));
+    }
+    let empty_after_inspection = panel_reply(
+        &mut host,
+        &rx,
+        "inspect-no-conversations",
+        "conversationList",
+        json!({}),
+    );
+    assert!(empty_after_inspection["result"]["conversations"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    for agent in ["codex", "claude"] {
         let created = panel_reply(
             &mut host,
             &rx,

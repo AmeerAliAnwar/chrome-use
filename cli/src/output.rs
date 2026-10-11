@@ -6368,6 +6368,9 @@ Setup:
                              unconfirmed and never automatically replayed.
                              Stop & send (Ctrl/Cmd+Enter) waits for confirmed stop
                              before priority sending; ordinary queues remain paused.
+                             Read CLI models fetches bounded CLI metadata without
+                             a prompt; account reports do not verify model access.
+                             This metadata adapter currently requires Unix ownership.
   extension uninstall        Remove the native-messaging host (+ tells you how to drop
                              the policy profile and leave managed mode)
   extension call <ns.method> [json-args]
