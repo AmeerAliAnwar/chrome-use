@@ -1,0 +1,675 @@
+//! Native services for the extension's agent panel.
+//!
+//! Discovery is intentionally independent of browser/daemon preparation. It
+//! inspects installation evidence only: no agent is launched, no credential
+//! file is read, and no debugger is attached. Presence is not runtime health.
+
+use serde::Serialize;
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::ffi::OsString;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+#[derive(Clone, Copy)]
+struct AgentSpec {
+    id: &'static str,
+    name: &'static str,
+    binary: &'static str,
+    directory: &'static str,
+    root_variable: Option<&'static str>,
+    configs: &'static [&'static str],
+}
+
+// Files are installation evidence, not credentials. Adapter capabilities are
+// negotiated separately; finding an executable never promises chat support.
+const AGENTS: &[AgentSpec] = &[
+    AgentSpec {
+        id: "codex",
+        name: "Codex",
+        binary: "codex",
+        directory: ".codex",
+        root_variable: Some("CODEX_HOME"),
+        configs: &["config.toml"],
+    },
+    AgentSpec {
+        id: "claude",
+        name: "Claude Code",
+        binary: "claude",
+        directory: ".claude",
+        root_variable: Some("CLAUDE_CONFIG_DIR"),
+        configs: &["settings.json"],
+    },
+    AgentSpec {
+        id: "gemini",
+        name: "Gemini CLI",
+        binary: "gemini",
+        directory: ".gemini",
+        root_variable: None,
+        configs: &["settings.json"],
+    },
+    AgentSpec {
+        id: "opencode",
+        name: "OpenCode",
+        binary: "opencode",
+        directory: ".config/opencode",
+        root_variable: Some("OPENCODE_CONFIG_DIR"),
+        configs: &["opencode.json", "opencode.jsonc"],
+    },
+    AgentSpec {
+        id: "pi",
+        name: "Pi",
+        binary: "pi",
+        directory: ".pi/agent",
+        root_variable: Some("PI_CODING_AGENT_DIR"),
+        configs: &["settings.json"],
+    },
+    AgentSpec {
+        id: "qoder",
+        name: "Qoder CLI",
+        binary: "qodercli",
+        directory: ".qoder",
+        root_variable: Some("QODER_CONFIG_DIR"),
+        configs: &["settings.json"],
+    },
+    AgentSpec {
+        id: "qoder-cn",
+        name: "Qoder CN",
+        binary: "qoderclicn",
+        directory: ".qoder-cn",
+        root_variable: Some("QODERCN_CONFIG_DIR"),
+        configs: &["settings.json"],
+    },
+    AgentSpec {
+        id: "grok",
+        name: "Grok Build",
+        binary: "grok",
+        directory: ".grok",
+        root_variable: Some("GROK_HOME"),
+        configs: &["config.toml"],
+    },
+    AgentSpec {
+        id: "kimi",
+        name: "Kimi Code",
+        binary: "kimi",
+        directory: ".kimi-code",
+        root_variable: Some("KIMI_CODE_HOME"),
+        configs: &["config.toml"],
+    },
+    AgentSpec {
+        id: "qwen",
+        name: "Qwen Code",
+        binary: "qwen",
+        directory: ".qwen",
+        root_variable: Some("QWEN_HOME"),
+        configs: &["settings.json"],
+    },
+    AgentSpec {
+        id: "goose",
+        name: "Goose",
+        binary: "goose",
+        directory: ".config/goose",
+        root_variable: None,
+        configs: &["config.yaml"],
+    },
+    AgentSpec {
+        id: "hermes",
+        name: "Hermes Agent",
+        binary: "hermes",
+        directory: ".hermes",
+        root_variable: Some("HERMES_HOME"),
+        configs: &["config.yaml"],
+    },
+    AgentSpec {
+        id: "droid",
+        name: "Droid",
+        binary: "droid",
+        directory: ".factory",
+        root_variable: Some("FACTORY_HOME_OVERRIDE"),
+        configs: &["settings.json"],
+    },
+    AgentSpec {
+        id: "cline",
+        name: "Cline",
+        binary: "cline",
+        directory: ".cline",
+        root_variable: Some("CLINE_DIR"),
+        configs: &["data/settings/providers.json"],
+    },
+];
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentInstallation {
+    id: &'static str,
+    name: &'static str,
+    executable: Option<PathBuf>,
+    config_directory: PathBuf,
+    config_files: Vec<PathBuf>,
+    directory_evidence: bool,
+    // Deliberately not bool: discovery cannot establish authentication or
+    // successful inference, even when an auth.json happens to be present.
+    authentication: &'static str,
+    runtime: &'static str,
+    warnings: Vec<String>,
+}
+
+struct DiscoveryContext {
+    home: PathBuf,
+    cwd: PathBuf,
+    directories: Vec<PathBuf>,
+    environment: HashMap<String, OsString>,
+    windows: bool,
+}
+
+impl DiscoveryContext {
+    fn current() -> Result<Self, String> {
+        let home = dirs::home_dir().ok_or("Cannot locate the user's home directory")?;
+        let environment: HashMap<_, _> = std::env::vars_os()
+            .filter_map(|(k, v)| k.into_string().ok().map(|k| (k, v)))
+            .collect();
+        let mut directories: Vec<PathBuf> = environment
+            .get("PATH")
+            .map(|p| {
+                std::env::split_paths(p)
+                    .filter(|p| p.is_absolute())
+                    .collect()
+            })
+            .unwrap_or_default();
+        // Chrome may start the native host with a minimal PATH. Resolve
+        // actual binaries without sourcing shell aliases/functions or hooks.
+        for suffix in [
+            ".local/bin",
+            ".cargo/bin",
+            ".bun/bin",
+            ".volta/bin",
+            ".npm-global/bin",
+        ] {
+            directories.push(home.join(suffix));
+        }
+        if cfg!(windows) {
+            for key in ["APPDATA", "PNPM_HOME"] {
+                if let Some(path) = environment.get(key).filter(|v| !v.is_empty()) {
+                    let p = PathBuf::from(path);
+                    directories.push(if key == "APPDATA" { p.join("npm") } else { p });
+                }
+            }
+        } else {
+            directories.extend([
+                PathBuf::from("/opt/homebrew/bin"),
+                PathBuf::from("/usr/local/bin"),
+            ]);
+        }
+        Ok(Self {
+            home,
+            cwd: std::env::current_dir()
+                .map_err(|_| "Cannot locate the process working directory")?,
+            directories,
+            environment,
+            windows: cfg!(windows),
+        })
+    }
+
+    fn root(&self, spec: AgentSpec) -> PathBuf {
+        if let Some(value) = spec.root_variable.and_then(|key| self.variable_path(key)) {
+            // Factory's override replaces HOME, not the .factory directory.
+            return if spec.id == "droid" {
+                value.join(".factory")
+            } else {
+                value
+            };
+        }
+        // The new Kimi Code has a different home from legacy kimi-cli. Once
+        // migrated, the old directory no longer controls its model settings.
+        if spec.id == "kimi" && !self.home.join(".kimi-code").is_dir() {
+            if let Some(value) = self.variable_path("KIMI_SHARE_DIR") {
+                return value;
+            }
+            if self.home.join(".kimi").is_dir() {
+                return self.home.join(".kimi");
+            }
+        }
+        if spec.id == "goose" && self.windows {
+            if let Some(value) = self.variable_path("APPDATA") {
+                return value.join("Block/goose/config");
+            }
+        }
+        if let Some(suffix) = spec.directory.strip_prefix(".config/") {
+            if let Some(value) = self.variable_path("XDG_CONFIG_HOME") {
+                return value.join(suffix);
+            }
+        }
+        self.home.join(spec.directory)
+    }
+
+    fn variable_path(&self, key: &str) -> Option<PathBuf> {
+        let value = self.environment.get(key).filter(|v| !v.is_empty())?;
+        let p = PathBuf::from(value);
+        if p == Path::new("~") {
+            return Some(self.home.clone());
+        }
+        if let Ok(suffix) = p.strip_prefix("~") {
+            return Some(self.home.join(suffix));
+        }
+        Some(if p.is_absolute() { p } else { self.cwd.join(p) })
+    }
+
+    fn config_path(&self, spec: AgentSpec, directory: &Path, name: &str) -> PathBuf {
+        if spec.id == "cline" {
+            if let Some(data) = self.variable_path("CLINE_DATA_DIR") {
+                return data.join("settings/providers.json");
+            }
+        }
+        directory.join(name)
+    }
+
+    fn executable(&self, binary: &str) -> Option<PathBuf> {
+        let names = if self.windows {
+            vec![
+                format!("{binary}.exe"),
+                format!("{binary}.cmd"),
+                format!("{binary}.bat"),
+                binary.into(),
+            ]
+        } else {
+            vec![binary.into()]
+        };
+        self.directories
+            .iter()
+            .filter(|p| p.is_absolute())
+            .find_map(|dir| {
+                names
+                    .iter()
+                    .map(|name| dir.join(name))
+                    .find(|path| is_executable(path, self.windows))
+            })
+    }
+}
+
+fn is_executable(path: &Path, windows: bool) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        windows || metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = windows;
+        true
+    }
+}
+
+/// Ignore skill installers and remnants of an uninstalled agent. Only
+/// directories with meaningful contents supply directory evidence. A file
+/// named "logs" still counts; a logs directory doesn't.
+fn directory_evidence(path: &Path) -> Result<bool, std::io::Error> {
+    match fs::read_dir(path) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry?;
+                let name = entry.file_name().to_string_lossy().to_lowercase();
+                if name == ".ds_store" {
+                    continue;
+                }
+                if ["skills", "logs", "log", "debug", "diagnostics", "cache"]
+                    .contains(&name.as_str())
+                    && fs::metadata(entry.path())?.is_dir()
+                {
+                    continue;
+                }
+                return Ok(true);
+            }
+            Ok(false)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+fn discover_in(context: &DiscoveryContext) -> Vec<AgentInstallation> {
+    AGENTS
+        .iter()
+        .map(|&spec| {
+            let directory = context.root(spec);
+            let mut warnings = Vec::new();
+            let directory_evidence = match directory_evidence(&directory) {
+                Ok(value) => value,
+                Err(e) => {
+                    warnings.push(format!(
+                        "Cannot inspect configuration directory: {:?}",
+                        e.kind()
+                    ));
+                    false
+                }
+            };
+            let config_files = spec
+                .configs
+                .iter()
+                .filter_map(|name| {
+                    let path = context.config_path(spec, &directory, name);
+                    match fs::metadata(&path) {
+                        Ok(metadata) if metadata.is_file() => Some(path),
+                        Ok(_) => {
+                            warnings
+                                .push(format!("Configuration path is not a regular file: {name}"));
+                            None
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                        Err(e) => {
+                            warnings.push(format!(
+                                "Cannot inspect configuration file {name}: {:?}",
+                                e.kind()
+                            ));
+                            None
+                        }
+                    }
+                })
+                .collect();
+            AgentInstallation {
+                id: spec.id,
+                name: spec.name,
+                executable: context.executable(spec.binary),
+                config_directory: directory,
+                config_files,
+                directory_evidence,
+                authentication: "unverified",
+                runtime: "unverified",
+                warnings,
+            }
+        })
+        .collect()
+}
+
+/// Dispatch panel service requests without starting a browser or modifying
+/// agent configuration. Unknown operations fail explicitly, including on an
+/// older host that supports discovery but not a later panel service.
+pub fn handle(operation: &str, params: &Value) -> Result<Value, String> {
+    match operation {
+        "discover" => {
+            if !params.is_object() || params.as_object().is_some_and(|p| !p.is_empty()) {
+                return Err("discover expects an empty params object".into());
+            }
+            let context = DiscoveryContext::current()?;
+            Ok(json!({ "schemaVersion": 1, "agents": discover_in(&context) }))
+        }
+        _ => Err(format!("Unsupported agent panel operation: {operation}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn context(home: &TempDir) -> DiscoveryContext {
+        DiscoveryContext {
+            home: home.path().into(),
+            cwd: home.path().join("working"),
+            directories: vec![home.path().join("bin")],
+            environment: HashMap::new(),
+            windows: false,
+        }
+    }
+
+    fn write(path: impl AsRef<Path>, body: &str) {
+        let path = path.as_ref();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, body).unwrap();
+    }
+
+    #[test]
+    fn skill_installer_and_uninstall_leftovers_do_not_prove_installation() {
+        let home = TempDir::new().unwrap();
+        for name in ["skills", "logs", "cache", "diagnostics", "debug"] {
+            fs::create_dir_all(home.path().join(".codex").join(name)).unwrap();
+        }
+        let found = discover_in(&context(&home));
+        let codex = &found[0];
+        assert!(!codex.directory_evidence);
+        assert!(codex.executable.is_none());
+        assert!(codex.config_files.is_empty());
+    }
+
+    #[test]
+    fn credential_contents_are_never_read_or_returned() {
+        let home = TempDir::new().unwrap();
+        write(
+            home.path().join(".codex/auth.json"),
+            "synthetic-secret-never-return",
+        );
+        write(
+            home.path().join(".claude/settings.json"),
+            "synthetic-config-secret",
+        );
+        let result = serde_json::to_string(&discover_in(&context(&home))).unwrap();
+        assert!(!result.contains("synthetic-"));
+        let found = discover_in(&context(&home));
+        assert!(found[0].directory_evidence);
+        assert_eq!(found[0].authentication, "unverified");
+        assert_eq!(found[1].runtime, "unverified");
+        assert_eq!(found[1].config_files.len(), 1);
+    }
+
+    #[test]
+    fn configured_root_and_xdg_override_default_paths() {
+        let home = TempDir::new().unwrap();
+        let mut c = context(&home);
+        c.environment.insert(
+            "CODEX_HOME".into(),
+            home.path().join("custom").into_os_string(),
+        );
+        c.environment.insert(
+            "XDG_CONFIG_HOME".into(),
+            home.path().join("xdg").into_os_string(),
+        );
+        write(
+            home.path().join("custom/config.toml"),
+            "model = 'synthetic'",
+        );
+        write(home.path().join("xdg/opencode/opencode.jsonc"), "{}");
+        let found = discover_in(&c);
+        assert_eq!(
+            found[0].config_files,
+            vec![home.path().join("custom/config.toml")]
+        );
+        assert_eq!(
+            found[3].config_files,
+            vec![home.path().join("xdg/opencode/opencode.jsonc")]
+        );
+    }
+
+    #[test]
+    fn per_agent_roots_follow_backend_semantics_instead_of_one_generic_override() {
+        let home = TempDir::new().unwrap();
+        let mut c = context(&home);
+        c.environment.insert(
+            "FACTORY_HOME_OVERRIDE".into(),
+            home.path().join("factory-home").into_os_string(),
+        );
+        c.environment.insert(
+            "CLINE_DATA_DIR".into(),
+            home.path().join("cline-data").into_os_string(),
+        );
+        c.environment.insert(
+            "QWEN_HOME".into(),
+            home.path().join("qwen-home").into_os_string(),
+        );
+        write(
+            home.path().join("factory-home/.factory/settings.json"),
+            "{}",
+        );
+        write(home.path().join("cline-data/settings/providers.json"), "{}");
+        write(home.path().join("qwen-home/settings.json"), "{}");
+        let found = discover_in(&c);
+        assert_eq!(
+            found[12].config_files,
+            vec![home.path().join("factory-home/.factory/settings.json")]
+        );
+        assert_eq!(
+            found[13].config_files,
+            vec![home.path().join("cline-data/settings/providers.json")]
+        );
+        assert_eq!(
+            found[9].config_files,
+            vec![home.path().join("qwen-home/settings.json")]
+        );
+    }
+
+    #[test]
+    fn new_kimi_directory_wins_over_legacy_configuration() {
+        let home = TempDir::new().unwrap();
+        let c = context(&home);
+        write(home.path().join(".kimi/config.toml"), "legacy");
+        assert_eq!(
+            discover_in(&c)[8].config_files,
+            vec![home.path().join(".kimi/config.toml")]
+        );
+        write(home.path().join(".kimi-code/config.toml"), "new");
+        assert_eq!(
+            discover_in(&c)[8].config_files,
+            vec![home.path().join(".kimi-code/config.toml")]
+        );
+    }
+
+    #[test]
+    fn relative_override_and_tilde_are_resolved_without_a_shell() {
+        let home = TempDir::new().unwrap();
+        let mut c = context(&home);
+        c.environment
+            .insert("OPENCODE_CONFIG_DIR".into(), "relative-config".into());
+        c.environment
+            .insert("PI_CODING_AGENT_DIR".into(), "~/pi-config".into());
+        assert_eq!(c.root(AGENTS[3]), c.cwd.join("relative-config"));
+        assert_eq!(c.root(AGENTS[4]), c.home.join("pi-config"));
+    }
+
+    #[test]
+    fn windows_goose_configuration_uses_its_appdata_directory() {
+        let home = TempDir::new().unwrap();
+        let mut c = context(&home);
+        c.windows = true;
+        c.environment.insert(
+            "APPDATA".into(),
+            home.path().join("roaming").into_os_string(),
+        );
+        write(
+            home.path().join("roaming/Block/goose/config/config.yaml"),
+            "{}",
+        );
+        assert_eq!(
+            discover_in(&c)[10].config_files,
+            vec![home.path().join("roaming/Block/goose/config/config.yaml")]
+        );
+    }
+
+    #[test]
+    fn empty_root_override_does_not_mean_current_directory() {
+        let home = TempDir::new().unwrap();
+        let mut c = context(&home);
+        c.environment.insert("CODEX_HOME".into(), OsString::new());
+        assert_eq!(c.root(AGENTS[0]), home.path().join(".codex"));
+    }
+
+    #[test]
+    fn relative_path_and_non_executable_file_are_not_programs() {
+        let home = TempDir::new().unwrap();
+        let mut c = context(&home);
+        c.directories.insert(0, PathBuf::from("."));
+        write(home.path().join("bin/codex"), "synthetic");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(
+                home.path().join("bin/codex"),
+                fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
+            assert!(c.executable("codex").is_none());
+            fs::set_permissions(
+                home.path().join("bin/codex"),
+                fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
+        }
+        assert_eq!(c.executable("codex"), Some(home.path().join("bin/codex")));
+    }
+
+    #[test]
+    fn windows_shims_can_be_discovered_without_executing_them() {
+        let home = TempDir::new().unwrap();
+        let mut c = context(&home);
+        c.windows = true;
+        write(
+            home.path().join("bin/claude.cmd"),
+            "synthetic fixture, never executed",
+        );
+        assert_eq!(
+            c.executable("claude"),
+            Some(home.path().join("bin/claude.cmd"))
+        );
+    }
+
+    #[test]
+    fn qoder_china_uses_its_own_binary_name() {
+        let home = TempDir::new().unwrap();
+        let mut c = context(&home);
+        c.windows = true;
+        write(home.path().join("bin/qoderclicn.exe"), "synthetic");
+        let found = discover_in(&c);
+        assert!(found[5].executable.is_none());
+        assert_eq!(
+            found[6].executable,
+            Some(home.path().join("bin/qoderclicn.exe"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_does_not_open_credential_or_configuration_fifos() {
+        use std::ffi::CString;
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let home = TempDir::new().unwrap();
+        fs::create_dir_all(home.path().join(".codex")).unwrap();
+        for name in ["auth.json", "config.toml"] {
+            let path = home.path().join(".codex").join(name);
+            let raw = CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+            // Opening either path for reading would wait for a writer forever.
+            assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o600) }, 0);
+        }
+        let c = context(&home);
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(discover_in(&c));
+        });
+        let found = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("discovery opened a FIFO");
+        assert!(found[0].config_files.is_empty());
+        assert_eq!(found[0].authentication, "unverified");
+    }
+
+    #[test]
+    fn bad_configuration_path_is_visible_not_silently_empty() {
+        let home = TempDir::new().unwrap();
+        fs::create_dir_all(home.path().join(".claude/settings.json")).unwrap();
+        let found = discover_in(&context(&home));
+        assert!(found[1].config_files.is_empty());
+        assert_eq!(found[1].warnings.len(), 1);
+    }
+
+    #[test]
+    fn unknown_and_malformed_requests_are_refused() {
+        assert!(handle("run", &json!({}))
+            .unwrap_err()
+            .contains("Unsupported"));
+        assert!(handle("discover", &json!({"program": "arbitrary"})).is_err());
+        assert!(handle("discover", &Value::Null).is_err());
+    }
+}

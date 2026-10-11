@@ -2,6 +2,7 @@
 // reqwest) that proving it `Send` passes the default limit of 128.
 #![recursion_limit = "256"]
 mod account;
+mod agent_panel;
 mod autologin;
 mod bwu_login;
 mod chat;
