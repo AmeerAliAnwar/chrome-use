@@ -3,7 +3,7 @@
 ## 1.5.189
 
 <!-- release:start -->
-Requires extension ab-connect 0.5.36. Chrome Web Store publication follows Google review; CLI browser automation remains compatible with 0.5.35.
+Requires extension ab-connect 0.5.37. Chrome Web Store publication follows Google review; CLI browser automation remains compatible with 0.5.35.
 
 ### New Features
 
@@ -12,6 +12,7 @@ Requires extension ab-connect 0.5.36. Chrome Web Store publication follows Googl
 
 ### Bug Fixes
 
+- **Panel recovery.** Unconfirmed sends offer explicit same-ID retry or warning reset without automatic replay. Idle older agent services are replaced after verified shutdown while active work can still be read and stopped. Custom metadata programs require absolute paths. Long history replay seeks from validated byte cursors instead of rescanning each page.
 - **Saved tab groups.** Agent-created tabs are ungrouped before closing so Chrome does not retain an empty saved group (#537).
 - **Snapshot context.** Repeated controls receive context only when it helps distinguish them (#540).
 - **Site inspection.** `site info <pack>` works and prints a runnable hint example (#539).

@@ -322,6 +322,9 @@ pub(super) async fn inspect(params: &Value, root: &Path) -> Result<Value, String
             .executable
             .or_else(|| context.executable(&request.agent_id))
             .ok_or("The selected agent CLI was not found")?;
+        if !executable.is_absolute() {
+            return Err("A custom agent executable must be an absolute path".into());
+        }
         if !super::is_executable(&executable, false) {
             return Err("The selected CLI is not executable".into());
         }

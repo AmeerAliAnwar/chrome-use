@@ -422,7 +422,7 @@ pub fn handle_for_profile(
     profile: Option<&str>,
 ) -> Result<Value, String> {
     if !operation_allowed(operation, cfg!(windows)) {
-        return Err("The local agent panel is read-only on Windows in this release; browser CLI automation remains available".into());
+        return Err(format!("Unsupported agent-panel operation {operation} in Windows read-only mode; browser CLI automation remains available"));
     }
     match operation {
         "discover" => {

@@ -322,6 +322,17 @@ fn both_cli_protocols_keep_conversations_alive_across_native_host_disconnects() 
     let service_pid = health["result"]["pid"].clone();
     let fixture =
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/panel_agent.py");
+    let relative = panel_reply(
+        &mut host,
+        &rx,
+        "inspect-relative",
+        "agentInspect",
+        json!({"agentId":"codex","executable":"relative-program"}),
+    );
+    assert!(relative["error"]
+        .as_str()
+        .unwrap()
+        .contains("absolute path"));
     for agent in ["codex", "claude"] {
         let inspected = panel_reply(
             &mut host,
@@ -982,4 +993,93 @@ fn discovery_and_errors_are_correlated_without_entering_browser_dispatch() {
         );
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn upgrade_refuses_busy_old_service_and_replaces_it_only_after_owned_idle_shutdown() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    };
+    let registry = tempfile::tempdir().unwrap();
+    let profile = "upgrade-fixture";
+    let directory = registry.path().join("agent-panel/profiles").join(profile);
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let ownership = std::fs::File::create(directory.join("service.lock")).unwrap();
+    ownership.lock().unwrap();
+    let endpoint_path = directory.join("service.json");
+    std::fs::write(&endpoint_path, json!({"schemaVersion":1,"profile":profile,"address":listener.local_addr().unwrap(),"capability":"f".repeat(64),"binaryHash":"synthetic-old-build","pid":std::process::id()}).to_string()).unwrap();
+    std::fs::set_permissions(&endpoint_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let active = Arc::new(AtomicU64::new(1));
+    let active_for_server = active.clone();
+    let server = std::thread::spawn(move || {
+        for incoming in listener.incoming() {
+            let mut stream = incoming.unwrap();
+            let mut length = [0u8; 4];
+            stream.read_exact(&mut length).unwrap();
+            let mut bytes = vec![0; u32::from_le_bytes(length) as usize];
+            stream.read_exact(&mut bytes).unwrap();
+            let request: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(request["capability"], "f".repeat(64));
+            let stop = request["operation"] == "serviceStop";
+            let result = if stop {
+                assert_eq!(active_for_server.load(Ordering::SeqCst), 0);
+                json!({"schemaVersion":1,"service":{"stopRequested":true}})
+            } else {
+                assert_eq!(request["operation"], "health");
+                json!({"schemaVersion":1,"binaryHash":"synthetic-old-build","active":active_for_server.load(Ordering::SeqCst)})
+            };
+            let reply = json!({"requestId":request["requestId"],"result":result})
+                .to_string()
+                .into_bytes();
+            stream
+                .write_all(&(reply.len() as u32).to_le_bytes())
+                .unwrap();
+            stream.write_all(&reply).unwrap();
+            if stop {
+                std::fs::remove_file(endpoint_path).unwrap();
+                drop(ownership);
+                break;
+            }
+        }
+    });
+    let mut host = Host(
+        Command::new(env!("CARGO_BIN_EXE_chrome-use"))
+            .args(["__nm-host", "chrome-extension://agent-panel-fixture/"])
+            .env("CHROME_USE_RELAY_DIR", registry.path())
+            .env("CHROME_USE_NO_UPDATE_CHECK", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let rx = frames(&mut host);
+    send(
+        &mut host,
+        json!({"method":"hello","version":"fixture","profileId":profile}),
+    );
+    let refused = panel_reply(&mut host, &rx, "busy-upgrade", "serviceHealth", json!({}));
+    assert!(refused["error"]
+        .as_str()
+        .unwrap()
+        .contains("stop its conversations"));
+    active.store(0, Ordering::SeqCst);
+    let upgraded = panel_reply(&mut host, &rx, "idle-upgrade", "serviceHealth", json!({}));
+    assert!(upgraded.get("error").is_none(), "{}", upgraded["error"]);
+    assert_ne!(upgraded["result"]["binaryHash"], "synthetic-old-build");
+    server.join().unwrap();
+    let stop = panel_reply(&mut host, &rx, "stop-new-service", "serviceStop", json!({}));
+    assert!(stop.get("error").is_none());
+    for _ in 0..100 {
+        if !directory.join("service.json").exists() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("Owned upgraded service exit was not confirmed");
 }

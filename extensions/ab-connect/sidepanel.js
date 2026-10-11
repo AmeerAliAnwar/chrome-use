@@ -4,7 +4,7 @@ const busyPhases = new Set(['starting', 'running', 'waitingInput', 'stopping']);
 const fieldLabels = { model: 'Model', provider: 'Provider', effort: 'Reasoning effort', serviceTier: 'Service tier', smallModel: 'Small model', opusModel: 'Opus model', sonnetModel: 'Sonnet model', haikuModel: 'Haiku model' };
 
 export function createPanel({ document, runtime, storage, schedule = setTimeout, cancel = clearTimeout }) {
-  const ids = ['connection', 'notice', 'refresh', 'settings', 'chatTab', 'agentsTab', 'chatView', 'agentsView', 'conversation', 'newChat', 'newOptions', 'agent', 'model', 'modelList', 'modelStatus', 'inspectAgent', 'executable', 'phase', 'effectiveModel', 'transcript', 'empty', 'latest', 'requests', 'composer', 'message', 'queue', 'queuedMessages', 'resume', 'stop', 'sendDirect', 'send', 'discover', 'agentList', 'configuration', 'configTitle', 'configPath', 'configWarnings', 'configForm', 'configFields', 'configPreview', 'configDiff', 'applyConfig', 'discardConfig', 'restoreConfig', 'configResult'];
+  const ids = ['pendingRecovery', 'retryPending', 'clearPending', 'connection', 'notice', 'refresh', 'settings', 'chatTab', 'agentsTab', 'chatView', 'agentsView', 'conversation', 'newChat', 'newOptions', 'agent', 'model', 'modelList', 'modelStatus', 'inspectAgent', 'executable', 'phase', 'effectiveModel', 'transcript', 'empty', 'latest', 'requests', 'composer', 'message', 'queue', 'queuedMessages', 'resume', 'stop', 'sendDirect', 'send', 'discover', 'agentList', 'configuration', 'configTitle', 'configPath', 'configWarnings', 'configForm', 'configFields', 'configPreview', 'configDiff', 'applyConfig', 'discardConfig', 'restoreConfig', 'configResult'];
   const nodes = Object.fromEntries(ids.map(id => [id, document.getElementById(id)]));
   let selected = '', selectionEpoch = 0, connectionEpoch = 0, connected = false, closed = false, panelSupport = null;
   let timeline = new PanelTimeline(), conversations = [], conversation = null, timer = null, polling = false;
@@ -51,6 +51,9 @@ export function createPanel({ document, runtime, storage, schedule = setTimeout,
   }
   function controls() {
     const pending = pendingMessages.get(selected);
+    nodes.pendingRecovery.hidden = !pending?.unconfirmed;
+    nodes.retryPending.disabled = sending || !connected || typeof pending?.text !== 'string';
+    nodes.clearPending.disabled = sending;
     const writable = panelSupport?.mode === 'full';
     nodes.conversation.disabled = sending || !writable; nodes.newChat.disabled = sending || !writable;
     nodes.message.disabled = !writable; nodes.inspectAgent.disabled = !connected || !writable || !panelSupport?.modelInspection;
@@ -243,6 +246,9 @@ export function createPanel({ document, runtime, storage, schedule = setTimeout,
           await savePending();
           if (id === selected && epoch === selectionEpoch) { if (nodes.message.value === pending.text) nodes.message.value = ''; controls(); }
           if (drafts.get(id) === pending.text) drafts.delete(id);
+        } else if (pendingMessages.get(id) === pending) {
+          pending.unconfirmed = true;
+          if (id === selected && epoch === selectionEpoch) controls();
         }
       }
     } finally { polling = false; }
@@ -254,6 +260,23 @@ export function createPanel({ document, runtime, storage, schedule = setTimeout,
       loop();
     }, busyPhases.has(conversation?.phase) || pendingMessages.has(selected) ? 600 : 1800);
   }
+  async function recoverPending(retry) {
+    const id = selected, pending = pendingMessages.get(id);
+    if (!pending?.unconfirmed || sending) return;
+    if (retry && typeof pending.text !== 'string') throw new Error('The original text is unavailable; clear the warning or inspect the conversation history.');
+    sending = true; controls();
+    try {
+      if (retry) {
+        await api(pending.direct ? 'conversationSendDirect' : 'conversationSend', {conversationId:id,messageId:pending.id,text:pending.text});
+        if (selected === id && nodes.message.value === pending.text) nodes.message.value = '';
+        if (drafts.get(id) === pending.text) drafts.delete(id);
+      }
+      if (pendingMessages.get(id) === pending) { pendingMessages.delete(id); await savePending(); }
+      await poll();
+    } finally { sending = false; controls(); }
+  }
+  nodes.retryPending.addEventListener('click', () => void recoverPending(true).catch(error));
+  nodes.clearPending.addEventListener('click', () => void recoverPending(false).catch(error));
   async function send(direct = false) {
     if (panelSupport?.mode !== 'full') throw new Error('Local agent conversations require a supported current CLI.');
     if (!connected || sending || pendingMessages.has(selected) || conversation?.phase === 'recoveryRequired' || !nodes.message.value.trim()) return;
@@ -266,7 +289,7 @@ export function createPanel({ document, runtime, storage, schedule = setTimeout,
         if (nodes.executable.value.trim()) options.executable = nodes.executable.value.trim();
         const result = await api('conversationCreate', options); conversations.unshift(result.conversation); conversationChoices(); select(result.conversation.id, true); nodes.message.value = text;
       }
-      const id = selected, pending = { id: crypto.randomUUID(), text }; pendingMessages.set(id, pending); controls();
+      const id = selected, pending = { id: crypto.randomUUID(), text, direct }; pendingMessages.set(id, pending); controls();
       try { await savePending(); } catch (failure) { pendingMessages.delete(id); throw failure; }
       const result = await api(direct ? 'conversationSendDirect' : 'conversationSend', { conversationId: id, messageId: pending.id, text });
       if (selected === id) { conversation = result.conversation; if (nodes.message.value === text) nodes.message.value = ''; }

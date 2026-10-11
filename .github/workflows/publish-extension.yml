@@ -58,6 +58,7 @@ jobs:
           DRAFT: ${{ inputs.draft }}
           MANUAL: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
+          set -o pipefail
           args=""
           [ "$DRAFT" = "true" ] && args="$args --draft"
           # A manual run always uploads; an automatic one only for a new version.

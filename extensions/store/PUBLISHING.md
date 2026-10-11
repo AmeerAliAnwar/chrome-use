@@ -47,3 +47,14 @@ or wait for the next zip on main.
 The old `CWS_CLIENT_ID` / `CWS_CLIENT_SECRET` / `CWS_REFRESH_TOKEN` secrets still
 work as a fallback (`scripts/cws-get-refresh-token.sh` mints a new token) and
 can be deleted once the service account works.
+
+
+A successful ZIP upload is not a submitted review. The publish step uses
+`pipefail` so an API refusal cannot be hidden by `tee` or by the following status
+read. `INVALID_ITEM_METADATA` requires the Developer Dashboard's exact missing
+field to be repaired. For the local-agent panel, the Privacy practices page must
+include a sidePanel permission justification describing packaged persistent UI
+for local agent browser tasks, approvals and configuration, outside webpage DOM.
+Read back the submitted version/state separately from the currently published
+version; the dashboard's overall Published badge can still refer to an older
+version.
