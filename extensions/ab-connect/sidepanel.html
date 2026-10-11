@@ -32,7 +32,7 @@
       <button id="inspectAgent" class="quiet" type="button">Read CLI models</button>
       <p id="modelStatus" class="hint">CLI model access has not been checked.</p>
       <details><summary>Custom program</summary><label>Executable path<input id="executable" placeholder="Use the discovered program" autocomplete="off"></label></details>
-      <p class="hint">Uses the local CLI's login. Each conversation works in its own browser session.</p>
+      <p class="hint">Uses the local CLI's login and an independent browser session. Your CLI may send tasks and page observations to its configured model service. Conversation history stays on this computer.</p>
     </section>
     <div class="conversation-status"><span id="phase">Ready</span><span id="effectiveModel"></span></div>
     <div id="transcript" class="transcript" tabindex="0" aria-label="Conversation transcript">

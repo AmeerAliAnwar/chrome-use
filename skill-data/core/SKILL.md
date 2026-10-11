@@ -20,6 +20,7 @@ events without resending a turn; failure or interruption pauses the queue.
 A CLI's completed response is not proof that the whole browser task succeeded.
 Browser-tool approvals show arguments and grant one call. Unconfirmed sends
 have explicit recovery controls; clearing a warning does not cancel delivery.
+Panel tasks and browser context may be sent to the configured CLI model service.
 The extension toolbar opens a packaged side panel with chat history, agent
 requests, queue controls and configuration previews. It adds no page content
 script. Unsupported/unconfirmed Chrome behavior retains the connection popup.
