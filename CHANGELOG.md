@@ -1,8 +1,22 @@
 # Changelog
 
-## 1.5.186
+## 1.5.187
 
 <!-- release:start -->
+Requires extension ab-connect 0.5.35 (published on the Chrome Web Store; Chrome updates it automatically).
+
+### Changes
+
+- **OpenCLI is a last resort, and account actions use our own adapters.** Every site command that runs through OpenCLI now prints a stderr note that it is third-party code chrome-use does not maintain; for a write it adds that our own adapter is recommended and the agent should offer to port it into chrome-use-sites. `--json` keeps `source: "opencli"` and adds `maintainedBy: "opencli"`, `readOnly` and `notice`; `site info` shows `maintainedBy` too. Exit codes and behaviour are unchanged. The skill docs now treat OpenCLI as a last resort and say not to rely on it for posting, liking, following, deleting or publishing on real accounts. (#534)
+- **`twitter/like`, `twitter/follow`, `bilibili/user-videos` and `bilibili/creator-stats` are ours.** They were ported into chrome-use-sites (chrome-use-sites#19, with attribution) and OpenCLI never runs them, even from a cache synced before the port. `like` and `follow` only act on the tweet or profile you named, never undo an existing like or follow, and confirm the result; run them with `--until-done`. The bilibili commands now return one object (`{mid, order, total, count, videos}` and `{bvid, title, source, values, metrics, missing}`) instead of OpenCLI's row list. (#535)
+
+### Contributors
+
+- @leeguooooo
+<!-- release:end -->
+
+## 1.5.186
+
 Requires extension ab-connect 0.5.35 (published on the Chrome Web Store; Chrome updates it automatically).
 
 ### Features
@@ -12,7 +26,6 @@ Requires extension ab-connect 0.5.35 (published on the Chrome Web Store; Chrome 
 ### Contributors
 
 - @leeguooooo
-<!-- release:end -->
 
 ## 1.5.185
 
