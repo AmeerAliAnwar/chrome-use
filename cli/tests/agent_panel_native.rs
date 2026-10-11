@@ -461,16 +461,71 @@ fn both_cli_protocols_keep_conversations_alive_across_native_host_disconnects() 
             "conversationSend",
             json!({"conversationId":id,"messageId":uuid::Uuid::new_v4().to_string(),"text":"fail"}),
         );
+        let queued_id = uuid::Uuid::new_v4().to_string();
         panel_reply(
             &mut host,
             &rx,
             "queue-next",
             "conversationSend",
-            json!({"conversationId":id,"messageId":uuid::Uuid::new_v4().to_string(),"text":"queued-after-failure"}),
+            json!({"conversationId":id,"messageId":queued_id,"text":"queued-after-failure"}),
         );
         let failed = conversation_poll(&mut host, &rx, &id, "failed");
         assert_eq!(failed["conversation"]["queuePaused"], true);
         assert_eq!(failed["conversation"]["queued"], 1);
+        assert_eq!(failed["queuedMessages"][0]["id"], queued_id);
+        let full = panel_reply(
+            &mut host,
+            &rx,
+            "queue-full",
+            "conversationQueueMessageRead",
+            json!({"conversationId":id,"messageId":queued_id}),
+        );
+        assert_eq!(
+            full["result"]["queuedMessage"]["text"],
+            "queued-after-failure"
+        );
+        let replacement = uuid::Uuid::new_v4().to_string();
+        let edited = panel_reply(
+            &mut host,
+            &rx,
+            "queue-edit",
+            "conversationQueueEdit",
+            json!({"conversationId":id,"messageId":queued_id,"expectedText":"queued-after-failure","replacementId":replacement,"text":"edited-after-failure"}),
+        );
+        assert_eq!(
+            edited["result"]["queueChange"]["replacementId"],
+            replacement
+        );
+        let stale = panel_reply(
+            &mut host,
+            &rx,
+            "queue-stale",
+            "conversationQueueRemove",
+            json!({"conversationId":id,"messageId":queued_id,"expectedText":"queued-after-failure"}),
+        );
+        assert!(stale["error"].is_string());
+        let discard = uuid::Uuid::new_v4().to_string();
+        panel_reply(
+            &mut host,
+            &rx,
+            "queue-discard",
+            "conversationSend",
+            json!({"conversationId":id,"messageId":discard,"text":"discard-before-running"}),
+        );
+        let removed = panel_reply(
+            &mut host,
+            &rx,
+            "queue-remove",
+            "conversationQueueRemove",
+            json!({"conversationId":id,"messageId":discard,"expectedText":"discard-before-running"}),
+        );
+        assert_eq!(removed["result"]["queueChange"]["kind"], "removed");
+        let before_resume = conversation_poll(&mut host, &rx, &id, "failed");
+        assert_eq!(before_resume["queuedMessages"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            before_resume["queuedMessages"][0]["text"],
+            "edited-after-failure"
+        );
         panel_reply(
             &mut host,
             &rx,
@@ -480,6 +535,15 @@ fn both_cli_protocols_keep_conversations_alive_across_native_host_disconnects() 
         );
         let resumed = conversation_poll(&mut host, &rx, &id, "idle");
         assert_eq!(resumed["conversation"]["queued"], 0);
+        let output: String = resumed["journal"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| event["kind"] == "textDelta")
+            .filter_map(|event| event["data"]["text"].as_str())
+            .collect();
+        assert!(output.contains("synthetic reply: edited-after-failure"));
+        assert!(!output.contains("synthetic reply: discard-before-running"));
         let ready_pids: std::collections::HashSet<_> = resumed["journal"]["events"]
             .as_array()
             .unwrap()
@@ -541,6 +605,14 @@ fn both_cli_protocols_keep_conversations_alive_across_native_host_disconnects() 
     unauthenticated.write_all(&raw).unwrap();
     let mut byte = [0u8; 1];
     assert_eq!(unauthenticated.read(&mut byte).unwrap(), 0);
+    let history_before_restart = conversation_poll(&mut host, &rx, &cleanup.chats[0], "idle");
+    let users_before_restart: Vec<Value> = history_before_restart["journal"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["kind"] == "user")
+        .map(|event| event["data"].clone())
+        .collect();
     let stopped = panel_reply(&mut host, &rx, "service-stop", "serviceStop", json!({}));
     assert_eq!(stopped["result"]["service"]["stopRequested"], true);
     let endpoint = registry
@@ -572,7 +644,17 @@ fn both_cli_protocols_keep_conversations_alive_across_native_host_disconnects() 
         .iter()
         .filter(|e| e["kind"] == "user")
         .count();
-    assert_eq!(count, 5, "Service restart replayed a prior user message");
+    let users_after_restart: Vec<Value> = before["journal"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["kind"] == "user")
+        .map(|event| event["data"].clone())
+        .collect();
+    assert_eq!(
+        users_after_restart, users_before_restart,
+        "Service restart changed prior message identity or text"
+    );
     panel_reply(
         &mut host,
         &rx,
@@ -588,7 +670,7 @@ fn both_cli_protocols_keep_conversations_alive_across_native_host_disconnects() 
             .iter()
             .filter(|e| e["kind"] == "user")
             .count(),
-        6
+        count + 1
     );
 }
 

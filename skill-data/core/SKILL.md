@@ -24,6 +24,11 @@ script. Unsupported/unconfirmed Chrome behavior retains the connection popup.
 New chats use independent browser sessions; do not assume they target the
 currently visible page. The panel's Settings button opens connection options.
 
+Queued messages can be edited or removed only while still queued and matching
+the original text. Edits use a new ID; superseded IDs stay deduplicated. Long
+previews need a full-message read before changes. Queue operations preserve
+the running turn and do not prove interruption or direct sending.
+
 ## Start with the cheapest useful evidence
 
 | Task | First choice |

@@ -478,6 +478,28 @@ struct MessageStatus {
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct QueueRemove {
+    conversation_id: String,
+    message_id: String,
+    expected_text: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct QueueIdentify {
+    conversation_id: String,
+    message_id: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct QueueEdit {
+    conversation_id: String,
+    message_id: String,
+    expected_text: String,
+    replacement_id: String,
+    text: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Events {
     conversation_id: String,
     #[serde(default)]
@@ -554,7 +576,57 @@ async fn dispatch(
             let mut e = engine.lock().await;
             let summary = e.chat(&p.conversation_id)?.summary();
             let events = e.store.events(&p.conversation_id, p.after)?;
-            Ok(json!({"schemaVersion":1,"conversation":summary,"journal":events}))
+            let queued = e.chat(&p.conversation_id)?.queue_snapshot();
+            Ok(
+                json!({"schemaVersion":1,"conversation":summary,"journal":events,"queuedMessages":queued}),
+            )
+        }
+        "conversationQueueMessageRead" => {
+            let p: QueueIdentify = serde_json::from_value(params.clone())
+                .map_err(|_| "Queue message read requires conversationId and messageId")?;
+            let mut e = engine.lock().await;
+            let chat = e.chat(&p.conversation_id)?;
+            let message = chat
+                .queue
+                .iter()
+                .find(|m| m.id == p.message_id)
+                .ok_or("Message is no longer queued; read its current state")?;
+            Ok(json!({"schemaVersion":1,"conversation":chat.summary(),"queuedMessage":message}))
+        }
+        "conversationQueueEdit" => {
+            let p: QueueEdit = serde_json::from_value(params.clone()).map_err(|_| "Queue edit requires conversationId, messageId, expectedText, replacementId and text")?;
+            let mut e = engine.lock().await;
+            e.chat(&p.conversation_id)?.edit_queued(
+                &p.message_id,
+                &p.expected_text,
+                Message {
+                    id: p.replacement_id.clone(),
+                    text: p.text.clone(),
+                },
+            )?;
+            e.record(
+                &p.conversation_id,
+                "queueEdited",
+                json!({"messageId":p.message_id,"replacementId":p.replacement_id,"text":p.text}),
+            )?;
+            Ok(
+                json!({"schemaVersion":1,"conversation":e.chat(&p.conversation_id)?.summary(),"queueChange":{"messageId":p.message_id,"replacementId":p.replacement_id,"kind":"edited"}}),
+            )
+        }
+        "conversationQueueRemove" => {
+            let p: QueueRemove = serde_json::from_value(params.clone())
+                .map_err(|_| "Queue removal requires conversationId, messageId and expectedText")?;
+            let mut e = engine.lock().await;
+            e.chat(&p.conversation_id)?
+                .remove_queued(&p.message_id, &p.expected_text)?;
+            e.record(
+                &p.conversation_id,
+                "queueRemoved",
+                json!({"messageId":p.message_id}),
+            )?;
+            Ok(
+                json!({"schemaVersion":1,"conversation":e.chat(&p.conversation_id)?.summary(),"queueChange":{"messageId":p.message_id,"kind":"removed"}}),
+            )
         }
         "conversationMessageStatus" => {
             let p: MessageStatus = serde_json::from_value(params.clone())

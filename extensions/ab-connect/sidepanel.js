@@ -4,13 +4,13 @@ const busyPhases = new Set(['starting', 'running', 'waitingInput', 'stopping']);
 const fieldLabels = { model: 'Model', provider: 'Provider', effort: 'Reasoning effort', serviceTier: 'Service tier', smallModel: 'Small model', opusModel: 'Opus model', sonnetModel: 'Sonnet model', haikuModel: 'Haiku model' };
 
 export function createPanel({ document, runtime, storage, schedule = setTimeout, cancel = clearTimeout }) {
-  const ids = ['connection', 'notice', 'refresh', 'settings', 'chatTab', 'agentsTab', 'chatView', 'agentsView', 'conversation', 'newChat', 'newOptions', 'agent', 'model', 'executable', 'phase', 'effectiveModel', 'transcript', 'empty', 'latest', 'requests', 'composer', 'message', 'queue', 'resume', 'stop', 'send', 'discover', 'agentList', 'configuration', 'configTitle', 'configPath', 'configWarnings', 'configForm', 'configFields', 'configPreview', 'configDiff', 'applyConfig', 'discardConfig', 'restoreConfig', 'configResult'];
+  const ids = ['connection', 'notice', 'refresh', 'settings', 'chatTab', 'agentsTab', 'chatView', 'agentsView', 'conversation', 'newChat', 'newOptions', 'agent', 'model', 'executable', 'phase', 'effectiveModel', 'transcript', 'empty', 'latest', 'requests', 'composer', 'message', 'queue', 'queuedMessages', 'resume', 'stop', 'send', 'discover', 'agentList', 'configuration', 'configTitle', 'configPath', 'configWarnings', 'configForm', 'configFields', 'configPreview', 'configDiff', 'applyConfig', 'discardConfig', 'restoreConfig', 'configResult'];
   const nodes = Object.fromEntries(ids.map(id => [id, document.getElementById(id)]));
   let selected = '', selectionEpoch = 0, connectionEpoch = 0, connected = false, closed = false;
   let timeline = new PanelTimeline(), conversations = [], conversation = null, timer = null, polling = false;
   const pendingMessages = new Map(), drafts = new Map();
   let sending = false, configuration = null, configEpoch = 0, preview = null, applied = null;
-  const rendered = new Map(), requestNodes = new Map();
+  const rendered = new Map(), requestNodes = new Map(), queuedNodes = new Map();
 
   // Keep only correlation IDs in extension storage. Chat text lives in the
   // native journal; closing the view must not turn an uncertain send into a retry.
@@ -71,7 +71,7 @@ export function createPanel({ document, runtime, storage, schedule = setTimeout,
     nodes.message.value = drafts.get(id) || '';
     nodes.conversation.value = id;
     selected = id; selectionEpoch++; conversation = conversations.find(c => c.id === id) || null;
-    timeline = new PanelTimeline(); rendered.clear(); requestNodes.clear(); nodes.requests.replaceChildren();
+    timeline = new PanelTimeline(); queuedNodes.clear(); nodes.queuedMessages.replaceChildren(); nodes.queuedMessages.hidden = true; rendered.clear(); requestNodes.clear(); nodes.requests.replaceChildren();
     nodes.transcript.replaceChildren(nodes.empty); nodes.empty.hidden = false; controls();
     storage?.local?.set({ ab_panel_conversation: id }).catch(() => {});
     void poll().catch(error);
@@ -92,11 +92,12 @@ export function createPanel({ document, runtime, storage, schedule = setTimeout,
         } else {
           const container = element('article', undefined, `message-row ${row.type}`);
           const speaker = element('div', row.type === 'user' ? 'You' : row.type === 'assistant' ? 'Assistant' : 'Response status', 'speaker');
-          const content = element('div', undefined, 'content'); container.append(speaker, content); view = { container, content };
+          const content = element('div', undefined, 'content'); container.append(speaker, content); view = { container, content, speaker };
         }
         rendered.set(row.key, view); nodes.transcript.append(view.container);
       }
       if (view.content.textContent !== row.text) view.content.textContent = row.text;
+      if (row.type === 'user') view.speaker.textContent = row.queueStatus ? `You · ${row.queueStatus}` : 'You';
       if (row.type === 'tool') { view.name.textContent = row.name; view.state.textContent = row.failed ? 'Error returned' : row.completed ? 'Returned' : 'Running'; view.container.classList.toggle('failed', row.failed); }
     }
     if (follow) nodes.transcript.scrollTop = nodes.transcript.scrollHeight;
@@ -164,6 +165,44 @@ export function createPanel({ document, runtime, storage, schedule = setTimeout,
       if (request.sent || request.unconfirmed) for (const node of view.container.querySelectorAll('button')) node.disabled = true;
     }
   }
+  function renderQueue(messages) {
+    nodes.queuedMessages.hidden = messages.length === 0;
+    const live = new Set(messages.map(message => message.id));
+    for (const [id, view] of queuedNodes) if (!live.has(id)) { view.container.remove(); queuedNodes.delete(id); }
+    for (const message of messages) {
+      if (queuedNodes.has(message.id)) continue;
+      const container = element('details', undefined, 'queued-message');
+      container.append(element('summary', `Queued: ${message.text.split('\n')[0].slice(0, 100)}`));
+      let expectedText = message.truncated ? null : message.text;
+      const input = element('textarea'); input.readOnly = message.truncated === true; input.value = message.text; input.maxLength = 32768; input.setAttribute('aria-label', 'Edit queued message');
+      const actions = element('div', undefined, 'actions'); const status = element('p', '', 'hint');
+      const id = selected, epoch = selectionEpoch;
+      const mutate = async (operation, extra = {}) => {
+        if (selected !== id || selectionEpoch !== epoch) return;
+        if (expectedText === null) throw new Error('Load the full queued message before changing it.');
+        for (const node of actions.querySelectorAll('button')) node.disabled = true;
+        try {
+          await api(operation, { conversationId: id, messageId: message.id, expectedText, ...extra });
+          if (selected === id && selectionEpoch === epoch) { status.textContent = 'Change saved; reading the queue.'; await poll(); }
+        } catch (failure) { if (selected === id && selectionEpoch === epoch) status.textContent = 'Change unconfirmed. Refresh the queue before editing again.'; throw failure; }
+      };
+      if (message.truncated) actions.append(button('Load full text', async () => {
+        const result = await api('conversationQueueMessageRead', { conversationId: id, messageId: message.id });
+        if (selected !== id || selectionEpoch !== epoch) return;
+        expectedText = result.queuedMessage.text; input.value = expectedText; input.readOnly = false; status.textContent = 'Full queued message loaded.';
+      }));
+      actions.append(button('Save edit', async () => {
+        if (!input.value.trim()) throw new Error('Enter a message, or remove it from the queue.');
+        if (input.value === expectedText) return;
+        await mutate('conversationQueueEdit', { replacementId: crypto.randomUUID(), text: input.value });
+      }), button('Remove', () => mutate('conversationQueueRemove')));
+      container.append(input, actions, status); queuedNodes.set(message.id, { container }); nodes.queuedMessages.append(container);
+    }
+    for (const [index, message] of messages.entries()) {
+      const container = queuedNodes.get(message.id).container;
+      if (nodes.queuedMessages.children[index] !== container) nodes.queuedMessages.insertBefore(container, nodes.queuedMessages.children[index] || null);
+    }
+  }
   async function poll() {
     if (closed || polling || !connected || !selected) return;
     polling = true; const id = selected, epoch = selectionEpoch;
@@ -173,7 +212,7 @@ export function createPanel({ document, runtime, storage, schedule = setTimeout,
         const result = await api('conversationRead', { conversationId: id, after: timeline.cursor });
         if (id !== selected || epoch !== selectionEpoch) break;
         timeline.apply(result.journal.events, result.journal.cursor); conversation = result.conversation; more = result.journal.more === true;
-        renderTimeline(); renderRequests(); controls();
+        renderTimeline(); renderRequests(); renderQueue(result.queuedMessages || []); controls();
       }
       const pending = pendingMessages.get(id);
       if (pending && id === selected && epoch === selectionEpoch) {
@@ -254,6 +293,7 @@ export function createPanel({ document, runtime, storage, schedule = setTimeout,
   }
   async function refresh() {
     clearError(); await connectionStatus(); if (!connected) return;
+    queuedNodes.clear(); nodes.queuedMessages.replaceChildren();
     const results = await Promise.allSettled([list(), discover()]); for (const result of results) if (result.status === 'rejected') error(result.reason);
     await poll(); loop();
   }

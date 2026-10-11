@@ -2,6 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { AgentPanelBridge, isAgentPanelSender } from './agent-panel-bridge.js';
 
+test('queue mutation replies must prove the requested original and replacement identities', async () => {
+  for (const operation of ['conversationQueueEdit','conversationQueueRemove']) {
+    const {bridge,messages}=setup();
+    const pending=bridge.request(operation,{conversationId:'chat',messageId:'original',replacementId:'replacement'});
+    bridge.receive({method:'agentPanelReply',requestId:messages[0].requestId,result:{schemaVersion:1,conversation:{id:'chat',phase:'running'},queueChange:{messageId:'wrong',replacementId:'replacement',kind:operation==='conversationQueueEdit'?'edited':'removed'}}});
+    await assert.rejects(pending,/Malformed/);
+  }
+});
+
 test('message status validates identity and never interprets an absent ID as rejection', async () => {
   for (const [message, valid] of [
     [{ id: 'message', known: true, status: 'previouslyAccepted' }, true],

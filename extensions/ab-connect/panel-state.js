@@ -8,7 +8,13 @@ export class PanelTimeline {
       if (event.sequence <= this.cursor) continue;
       if (event.sequence !== this.cursor + 1) throw new Error('Conversation history has a gap. Refresh before relying on this view.');
       const data = event.data || {};
-      if (event.kind === 'user') this.rows.push({ key: `user:${data.messageId}`, type: 'user', text: data.text || '', at: event.at });
+      if (event.kind === 'user') this.rows.push({ key: `user:${data.messageId}`, type: 'user', messageId: data.messageId, text: data.text || '', at: event.at });
+      else if (event.kind === 'queueEdited' || event.kind === 'queueRemoved') {
+        const row = this.rows.find(row => row.type === 'user' && row.messageId === data.messageId);
+        if (row) { row.queueStatus = event.kind === 'queueRemoved' ? 'Removed from queue' : 'Edited before sending';
+          if (event.kind === 'queueEdited') { row.text = data.text; row.messageId = data.replacementId; }
+        }
+      }
       else if (event.kind === 'textDelta' || event.kind === 'textFinal') {
         const key = `text:${data.messageId || 'legacy'}:${data.itemId}`;
         let row = this.items.get(key);

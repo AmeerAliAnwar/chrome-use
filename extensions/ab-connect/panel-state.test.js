@@ -3,6 +3,15 @@ import test from 'node:test';
 import { PanelTimeline } from './panel-state.js';
 const event = (sequence, kind, data) => ({ sequence, kind, data, at: sequence });
 
+test('queue edits and removals keep history from looking like executed original messages', () => {
+  const timeline = new PanelTimeline();
+  timeline.apply([event(1,'user',{messageId:'old',text:'old text'}),event(2,'queueEdited',{messageId:'old',replacementId:'new',text:'edited text'})],2);
+  assert.equal(timeline.rows.length,1); assert.equal(timeline.rows[0].text,'edited text');
+  assert.equal(timeline.rows[0].messageId,'new'); assert.equal(timeline.rows[0].queueStatus,'Edited before sending');
+  timeline.apply([event(3,'queueRemoved',{messageId:'new'})],3);
+  assert.equal(timeline.rows[0].queueStatus,'Removed from queue');
+});
+
 test('reconnect replay cannot duplicate user messages or partial output', () => {
   const timeline = new PanelTimeline();
   const events = [event(1, 'user', { messageId: 'one', text: 'fixture' }), event(2, 'textDelta', { itemId: 'answer', text: 'partial' })];

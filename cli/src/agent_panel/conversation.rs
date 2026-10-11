@@ -121,6 +121,17 @@ impl Conversation {
     pub(super) fn summary(&self) -> Value {
         json!({"id":self.id,"agentId":self.agent_id,"title":self.title,"created":self.created,"updated":self.updated,"phase":self.phase,"generation":self.generation,"model":self.model,"requestedModel":self.requested_model,"queued":self.queue.len(),"queuePaused":self.queue_paused,"activeMessageId":self.active.as_ref().map(|m|&m.id),"lastError":self.last_error,"lastSequence":self.next_sequence.saturating_sub(1),"target":{"mode":"agentSession","session":format!("panel-{}",self.id)}})
     }
+    pub(super) fn queue_snapshot(&self) -> Value {
+        Value::Array(
+            self.queue
+                .iter()
+                .map(|message| {
+                    let text: String = message.text.chars().take(1024).collect();
+                    json!({"id":message.id,"truncated":text.len()!=message.text.len(),"text":text})
+                })
+                .collect(),
+        )
+    }
     pub(super) fn accept(&mut self, message: Message) -> Result<bool, String> {
         uuid::Uuid::parse_str(&message.id).map_err(|_| "A message needs a stable UUID")?;
         if message.text.trim().is_empty() || message.text.len() > 32 * 1024 {
@@ -163,6 +174,54 @@ impl Conversation {
         self.phase = Phase::Starting;
         self.last_error = None;
         Some(next)
+    }
+    pub(super) fn edit_queued(
+        &mut self,
+        id: &str,
+        expected: &str,
+        replacement: Message,
+    ) -> Result<(), String> {
+        let index = self
+            .queue
+            .iter()
+            .position(|m| m.id == id)
+            .ok_or("Message is no longer queued; read its current state")?;
+        if self.queue[index].text != expected {
+            return Err("Queued message changed; read its current state".into());
+        }
+        if self.accepted.contains_key(&replacement.id) {
+            return Err("Replacement message id has already been used".into());
+        }
+        // Keep the original accepted ID as a tombstone so a delayed send cannot
+        // put the superseded text back in the queue.
+        uuid::Uuid::parse_str(&replacement.id)
+            .map_err(|_| "Replacement message needs a stable UUID")?;
+        if replacement.text.trim().is_empty() || replacement.text.len() > 32768 {
+            return Err("Replacement text must contain between one and 32768 bytes".into());
+        }
+        if self.accepted.len() >= 50000 {
+            return Err("Conversation deduplication capacity reached".into());
+        }
+        self.accepted.insert(
+            replacement.id.clone(),
+            hex::encode(Sha256::digest(replacement.text.as_bytes())),
+        );
+        self.queue[index] = replacement;
+        self.updated = now();
+        Ok(())
+    }
+    pub(super) fn remove_queued(&mut self, id: &str, expected: &str) -> Result<(), String> {
+        let index = self
+            .queue
+            .iter()
+            .position(|m| m.id == id)
+            .ok_or("Message is no longer queued; read its current state")?;
+        if self.queue[index].text != expected {
+            return Err("Queued message changed; read its current state".into());
+        }
+        self.queue.remove(index);
+        self.updated = now();
+        Ok(())
     }
     pub(super) fn terminal(
         &mut self,
@@ -428,6 +487,53 @@ mod tests {
             .unwrap());
         assert!(c.begin_next().is_none());
         assert_eq!(c.queue.len(), 1);
+    }
+    #[test]
+    fn queued_edits_preserve_order_and_old_ids_cannot_reinsert_superseded_text() {
+        let mut c = Conversation::new("codex", None, None).unwrap();
+        let first = message("first");
+        let second = message("second");
+        let edited = message("edited");
+        c.accept(first.clone()).unwrap();
+        c.accept(second.clone()).unwrap();
+        c.edit_queued(&first.id, "first", edited.clone()).unwrap();
+        assert!(!c.accept(first).unwrap());
+        assert_eq!(c.queue.len(), 2);
+        assert_eq!(c.begin_next().unwrap().id, edited.id);
+        assert_eq!(c.queue[0].id, second.id);
+    }
+    #[test]
+    fn large_queues_have_bounded_previews_without_truncating_stored_messages() {
+        let mut c = Conversation::new("codex", None, None).unwrap();
+        for _ in 0..64 {
+            c.accept(message(&"\u{0001}".repeat(32768))).unwrap();
+        }
+        let snapshot = c.queue_snapshot();
+        assert!(serde_json::to_vec(&snapshot).unwrap().len() < 450000);
+        assert_eq!(snapshot[0]["truncated"], true);
+        assert_eq!(c.queue[0].text.len(), 32768);
+    }
+    #[test]
+    fn stale_edit_and_removal_never_change_active_or_other_queued_messages() {
+        let mut c = Conversation::new("claude", None, None).unwrap();
+        let active = message("active");
+        let queued = message("queued");
+        c.accept(active.clone()).unwrap();
+        c.accept(queued.clone()).unwrap();
+        c.begin_next();
+        assert!(c
+            .edit_queued(&active.id, "active", message("wrong"))
+            .is_err());
+        assert!(c.remove_queued(&active.id, "active").is_err());
+        assert!(c
+            .edit_queued(&queued.id, "stale", message("wrong"))
+            .is_err());
+        assert!(c.remove_queued(&queued.id, "stale").is_err());
+        assert_eq!(c.queue[0].text, "queued");
+        c.remove_queued(&queued.id, "queued").unwrap();
+        assert!(!c.accept(queued).unwrap());
+        assert!(c.queue.is_empty());
+        assert_eq!(c.active.unwrap().id, active.id);
     }
     #[test]
     fn unknown_terminal_status_is_not_success() {

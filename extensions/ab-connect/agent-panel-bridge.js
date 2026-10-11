@@ -15,7 +15,7 @@ export class AgentPanelBridge {
   }
 
   request(operation, params = {}) {
-    if (!['discover', 'configRead', 'configPlan', 'configApply', 'configRestore', 'serviceHealth', 'serviceStop', 'conversationList', 'conversationCreate', 'conversationRead', 'conversationSend', 'conversationMessageStatus', 'conversationStop', 'conversationResumeQueue', 'conversationRespond'].includes(operation)) return Promise.reject(new Error(`Unsupported agent panel operation: ${operation}`));
+    if (!['discover', 'configRead', 'configPlan', 'configApply', 'configRestore', 'serviceHealth', 'serviceStop', 'conversationList', 'conversationCreate', 'conversationRead', 'conversationSend', 'conversationMessageStatus', 'conversationQueueEdit', 'conversationQueueMessageRead', 'conversationQueueRemove', 'conversationStop', 'conversationResumeQueue', 'conversationRespond'].includes(operation)) return Promise.reject(new Error(`Unsupported agent panel operation: ${operation}`));
     if (this.pending.size >= this.maxPending) return Promise.reject(new Error('Too many pending agent panel requests'));
     const requestId = `${this.identity}:${this.generation}:${++this.sequence}`;
     return new Promise((resolve, reject) => {
@@ -27,7 +27,7 @@ export class AgentPanelBridge {
           ? 'The configuration outcome could not be confirmed. Read its current values before retrying; the request was not replayed.'
           : 'The native host did not answer the agent panel request. Check the host version and connection; the request was not replayed.'));
       }, this.timeoutMs);
-      this.pending.set(requestId, { resolve, reject, timeout, operation, agentId: params?.agentId, planId: params?.planId, conversationId: params?.conversationId, messageId: params?.messageId });
+      this.pending.set(requestId, { resolve, reject, timeout, operation, agentId: params?.agentId, planId: params?.planId, conversationId: params?.conversationId, messageId: params?.messageId, replacementId: params?.replacementId });
       try { this.send({ method: 'agentPanel', requestId, operation, params }); }
       catch (error) {
         this.cancel(timeout);
@@ -63,7 +63,7 @@ export class AgentPanelBridge {
   }
 }
 
-function validResult({ operation, agentId, planId, conversationId, messageId }, result) {
+function validResult({ operation, agentId, planId, conversationId, messageId, replacementId }, result) {
   if (result?.schemaVersion !== 1) return false;
   if (operation === 'discover') return Array.isArray(result.agents);
   if (operation === 'serviceHealth') return typeof result.profile === 'string' && typeof result.binaryHash === 'string' && Number.isInteger(result.pid);
@@ -73,9 +73,12 @@ function validResult({ operation, agentId, planId, conversationId, messageId }, 
     const conversation = result.conversation;
     if (!conversation || typeof conversation.id !== 'string' || (operation === 'conversationCreate' ? conversation.agentId !== agentId : conversation.id !== conversationId)) return false;
     if (!['idle', 'starting', 'running', 'waitingInput', 'stopping', 'failed', 'interrupted', 'recoveryRequired'].includes(conversation.phase)) return false;
-    if (operation === 'conversationRead') return Array.isArray(result.journal?.events) && Number.isInteger(result.journal.cursor);
+    if (operation === 'conversationRead') return Array.isArray(result.journal?.events) && Number.isInteger(result.journal.cursor) && Array.isArray(result.queuedMessages) && result.queuedMessages.length === conversation.queued && result.queuedMessages.length <= 64 && result.queuedMessages.every(message => typeof message.id === 'string' && typeof message.text === 'string' && typeof message.truncated === 'boolean');
     if (operation === 'conversationSend') return result.message?.id === messageId && typeof result.message.accepted === 'boolean' && result.message.replayed === false;
     if (operation === 'conversationMessageStatus') return result.message?.id === messageId && typeof result.message.known === 'boolean' && (result.message.known ? ['active', 'queued', 'previouslyAccepted'].includes(result.message.status) : result.message.status === 'unconfirmed');
+    if (operation === 'conversationQueueMessageRead') return result.queuedMessage?.id === messageId && typeof result.queuedMessage.text === 'string';
+    if (operation === 'conversationQueueEdit') return result.queueChange?.messageId === messageId && result.queueChange.replacementId === replacementId && result.queueChange.kind === 'edited';
+    if (operation === 'conversationQueueRemove') return result.queueChange?.messageId === messageId && result.queueChange.kind === 'removed';
     if (operation === 'conversationRespond') return result.response?.dispatched === true && result.response.confirmed === false;
     return true;
   }

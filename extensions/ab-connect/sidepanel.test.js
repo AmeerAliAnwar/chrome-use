@@ -12,6 +12,7 @@ class Node {
     this.classList = { toggle() {} };
   }
   append(...nodes) { for (const node of nodes) { node.parent = this; this.children.push(node); } }
+  insertBefore(node, before) { if (node.parent) node.remove(); node.parent=this; const index=this.children.indexOf(before); this.children.splice(index<0?this.children.length:index,0,node); }
   replaceChildren(...nodes) { this.children = []; this.append(...nodes); }
   get firstElementChild() { return this.children[0]; }
   addEventListener(type, listener) { this.listeners[type] = listener; }
@@ -113,4 +114,35 @@ test('a durable acceptance clears only the stored uncertain ID', async () => {
   assert.ok(f.writes.some(w => w.ab_panel_pending?.b === 'other' && !w.ab_panel_pending.a));
   assert.equal(f.nodes.get('send').disabled, false);
   assert.equal(f.calls.filter(c => c.operation === 'conversationSend').length, 0); f.panel.close();
+});
+
+test('editing a queued message preserves the composer draft and sends its original text for conflict detection', async () => {
+  let queued = [{ id: 'queued', text: 'original', truncated: false }, { id: 'second', text: 'second message' }];
+  const f = await fixture({
+    conversationRead: async () => ({ success:true,result:{ conversation:chat('a','running'), journal:{events:[],cursor:0,more:false},queuedMessages:queued } }),
+    conversationQueueEdit: async params => { queued=[{id:params.replacementId,text:params.text},queued[1]]; return {success:true,result:{}}; },
+  });
+  f.panel.select('a'); await settle(); f.nodes.get('message').value='separate draft';
+  const section=f.nodes.get('queuedMessages'); const input=section.querySelectorAll('textarea')[0]; input.value='replacement';
+  section.querySelectorAll('button')[0].fire('click'); await settle();
+  const edit=f.calls.find(call=>call.operation==='conversationQueueEdit');
+  assert.equal(edit.params.messageId,'queued'); assert.equal(edit.params.expectedText,'original');
+  assert.equal(edit.params.text,'replacement'); assert.notEqual(edit.params.replacementId,'queued');
+  assert.equal(f.nodes.get('message').value,'separate draft');
+  assert.equal(section.querySelectorAll('textarea')[0].value,'replacement');
+  assert.equal(section.querySelectorAll('textarea')[1].value,'second message'); f.panel.close();
+});
+
+test('a truncated queue preview cannot be changed until its full text is read', async () => {
+  const full='x'.repeat(1500);
+  const f=await fixture({
+    conversationRead:async()=>({success:true,result:{conversation:chat('a'),journal:{events:[],cursor:0,more:false},queuedMessages:[{id:'large',text:full.slice(0,1024),truncated:true}]}}),
+    conversationQueueMessageRead:async()=>({success:true,result:{queuedMessage:{id:'large',text:full}}}),
+  });
+  f.panel.select('a'); await settle();
+  const section=f.nodes.get('queuedMessages'); const input=section.querySelectorAll('textarea')[0];
+  assert.equal(input.readOnly,true);
+  section.querySelectorAll('button')[0].fire('click'); await settle();
+  assert.equal(input.value,full); assert.equal(input.readOnly,false);
+  assert.equal(f.calls.filter(c=>c.operation==='conversationQueueEdit').length,0); f.panel.close();
 });

@@ -75,7 +75,17 @@ and no horizontal body/transcript/composer overflow in the dark chat/request
 fixture. Screenshot review shortened the queued-send label to keep controls
 compact. Light mode, other screens, keyboard/scroll behavior and actual extension
 entry/sender acceptance still require verification.
-Queue editing, attachments, catalogs and the other items below remain required.
+Queue edit/remove and bounded previews are now implemented, with fresh
+replacement IDs, original-text conflict checks and accepted-ID tombstones.
+Tiller AgentChat.swift distinguishes queue resume from pendingDirect (Ctrl+Enter
+stops first); our separate direct-send flow remains required. The sidebar keeps
+edits inside the queue row rather than merging them into the composer draft.
+Remote native fixtures verify both adapters execute edited text, do not execute
+removed text and retain exact pre-restart user IDs/texts. Queue checks pass in
+59 Rust tests, 3 native integration tests and 280 extension tests; remote fmt and
+clippy pass. These do not establish rendered queue controls or real-model use.
+Direct-send, attachments, catalogs and remaining items below still require
+implementation/acceptance.
 
 - [ ] Toolbar opens the native side panel; retain connection/setup access.
 - [ ] Persistent chats, stream rendering, tool outcomes and readable failures.

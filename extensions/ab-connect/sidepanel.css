@@ -89,3 +89,9 @@ details summary { cursor:pointer; color:var(--muted); font-size:12px; }
 @media(prefers-color-scheme:dark) { :root { --bg:#202124; --surface:#292a2d; --ink:#e8eaed; --muted:#bdc1c6; --line:#5f6368; --accent:#8ab4f8; --accent-ink:#202124; --warning:#fdd663; --error:#f2b8b5; } }
 @media(max-width:340px) { .toolbar { gap:5px; } .toolbar button { padding:4px; } .new-options { grid-template-columns:1fr; } .composer-controls { flex-wrap:wrap; } .composer-controls #queue { flex-basis:100%; } }
 @media(prefers-reduced-motion:reduce) { * { scroll-behavior:auto !important; } }
+
+.queued-messages { padding:0 14px; max-height:24vh; overflow:auto; }
+.queued-message { border-top:1px solid var(--line); padding:7px 0; }
+.queued-message summary { overflow-wrap:anywhere; }
+.queued-message textarea { margin-top:7px; font-size:12px; }
+.queued-message .actions { display:flex; gap:8px; margin-top:5px; }

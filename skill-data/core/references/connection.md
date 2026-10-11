@@ -233,3 +233,14 @@ each conversation while the panel stays open. Tool rows say Returned or Error
 returned, not that the requested browser effect was verified. Queue resume is
 explicit. Agents & models offers allow-listed field previews and native verified
 apply/restore; installation evidence is separate from authentication/model access.
+
+
+conversationRead returns bounded queued-message previews. A truncated preview
+is not editable text: conversationQueueMessageRead reads one full message while
+confirming it is still queued. conversationQueueEdit and conversationQueueRemove
+compare expectedText with the stored original under the service lock. Edit
+assigns a fresh immutable replacement ID; both original and removed IDs remain
+in the acceptance map so delayed sends cannot restore old queue entries.
+A changed/dequeued message is refused. Queue events keep transcript audit notes;
+they do not claim the message ran. Editing keeps the composer draft intact.
+Lost mutation replies are unconfirmed and never automatically retried.

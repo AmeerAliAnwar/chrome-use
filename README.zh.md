@@ -143,6 +143,8 @@ npx skills add leeguooooo/chrome-use -g
 
 点击扩展图标打开 agent 侧栏。界面使用 Chrome 的扩展页面，没有新增网页 content script；Chrome 未确认支持时，图标保留连接弹窗。侧栏的 **Settings** 打开连接设置。**Conversations** 可选择 Codex 或 Claude Code，沿用 CLI 默认模型或填写模型 ID，使用本机 CLI 已有登录。新会话使用独立浏览器 session，目前尚未绑定眼前网页。历史显示流式文本、工具返回和 agent 请求；工具返回不代表任务成功。回复中发送消息会进入队列，失败或中断后暂停，需要点 **Resume queue**。发送未获确认时按已保存的消息 ID 查询，不自动重发。**Agents & models** 发现程序和配置，提供改动预览、写入读回及保留后续修改的恢复。发现结果不证明登录或模型可用。真实 Chrome 界面、账号、Windows 和隐身验收仍在[实施清单](docs/superpowers/plans/2026-10-11-extension-agent-panel.md)中。
 
+排队消息可展开编辑或删除，不占用输入框里的草稿。原生服务会核对编辑前的原文，并给修改后的消息分配新 ID；旧 ID 不会把已改或已删的文字重新放回队列。已经开始执行或被其他页面改过的消息会明确拒绝修改。长消息先点 **Load full text** 加载全文。历史保留编辑或删除记录，队列操作不打断当前回复。**Resume queue** 恢复暂停队列；停止当前回复并直接发送新消息尚未实现。
+
 原生会话服务独立于扩展连接，持续运行 Codex app-server 或 Claude stream-json 会话。断线后按游标读取事件，不重发消息；同一消息 ID 不会重复执行。失败或停止后暂停队列，需明确恢复。浏览器工具沿用 chrome-use，绑定当前 profile 和该会话。合成协议测试不代表真实模型、页面操作或隐身检测已验收。
 
 ## 连接你的 Chrome
