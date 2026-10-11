@@ -29,6 +29,7 @@ import {
 } from './agent-window.js';
 import { attachTabById } from './attach-by-id.js';
 import { releaseTab } from './release-tab.js';
+import { removeAgentTab } from './remove-agent-tab.js';
 import { shouldForwardEvent } from './cdp-event-filter.js';
 import { clearDownloads, listDownloads, startDownload } from './download-manager.js';
 import { isRelayTimeoutError, relayUnresolvedOperations, withRelayTimeout } from './relay-timeout.js';
@@ -186,8 +187,8 @@ async function isNativeDuplicateLifecycleEvent(tab) {
   return nativeDuplicateTabs.has(tab.id);
 }
 
-// Shared "agent window" (opt-in via the daemon's `dedicatedWindow` hint). When
-// set, all agent tabs are created in this one separate window — same Chrome
+// Shared "agent window" (on by default: the daemon sends the `dedicatedWindow`
+// hint unless AGENT_BROWSER_DEDICATED_WINDOW turns it off). When set, all agent tabs are created in this one separate window — same Chrome
 // profile (so logins/cookies are shared), but out of the window the user is
 // working in, instead of being interleaved with the user's own tabs. Per-session
 // colored tab groups still apply inside it. The id is persisted in
@@ -373,6 +374,16 @@ async function unmarkOwned(tabId) {
   await loadOwnedTabs();
   if (ownedTabs.delete(tabId)) persistOwnedTabs();
 }
+
+// Closing an agent tab ungroups it first so Chrome keeps no saved tab group;
+// a user's own tab (`tab close --force`) keeps its group (see remove-agent-tab.js).
+const agentTabRemoval = {
+  isAgentTab: (tabId) => ownedTabs.has(tabId),
+  ungroup: (tabId) => chrome.tabs.ungroup(tabId),
+  remove: (tabId) => chrome.tabs.remove(tabId),
+};
+// A native duplicate is always one the agent made, owned yet or not.
+const duplicateTabRemoval = { ...agentTabRemoval, isAgentTab: () => true };
 
 // Deterministic color per group name so a given session keeps the same color.
 const GROUP_COLORS = ['blue', 'cyan', 'green', 'yellow', 'orange', 'red', 'pink', 'purple', 'grey'];
@@ -1243,7 +1254,7 @@ async function handleForwardCdpCommand(msg) {
       focusWindow: (windowId) => chrome.windows.update(windowId, { focused: true }),
       removeTab: async (tabId) => {
         try {
-          await chrome.tabs.remove(tabId);
+          await removeAgentTab(tabId, duplicateTabRemoval);
         } finally {
           nativeDuplicateTabs.delete(tabId);
         }
@@ -1395,7 +1406,7 @@ async function handleForwardCdpCommand(msg) {
     const tabId = tid ? tabForTarget(tid) : null;
     if (!tabId) return { success: false };
     try {
-      await chrome.tabs.remove(tabId);
+      await removeAgentTab(tabId, agentTabRemoval);
     } catch {
       return { success: false };
     }

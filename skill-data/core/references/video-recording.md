@@ -15,6 +15,9 @@ Capture browser automation as video for debugging, documentation, or verificatio
 
 ## Basic Recording
 
+Recording needs `ffmpeg` on `PATH`. Without it, `record start` fails with
+`ffmpeg not found or failed to execute`.
+
 When connected through the Chrome extension relay, recording captures the
 current session-owned real-Chrome tab directly. It does not create a browser
 context, because Chrome rejects that CDP command on extension attachments.
@@ -84,7 +87,9 @@ chrome-use snapshot -i
 chrome-use fill @e1 "demo@example.com"
 chrome-use wait 500
 
-chrome-use fill @e2 "password"
+# Never type a real password into a shell argument: let the vault set an
+# env var for this one command (see authentication.md)
+bwu run --env CU_PW='app.example.com#password' -- chrome-use fill @e2 --from-env CU_PW
 chrome-use wait 500
 
 chrome-use click @e3
@@ -167,12 +172,17 @@ chrome-use record stop
 
 ## Output Format
 
-- Default format: WebM (VP8/VP9 codec)
-- Compatible with all modern browsers and video players
-- Compressed but high quality
+The file extension picks the encoder:
+
+- `.webm`: WebM with VP8 (`libvpx`)
+- anything else, such as `.mp4`: H.264 (`libx264`)
+
+Use `.webm` or `.mp4` for browser playback. Other extensions depend on the
+output container and player support; H.264 alone does not guarantee playback.
+Your `ffmpeg` build must include the matching encoder.
 
 ## Limitations
 
 - Recording adds slight overhead to automation
 - Large recordings can consume significant disk space
-- Some headless environments may have codec limitations
+- Requires `ffmpeg`; minimal builds may lack `libvpx` or `libx264`

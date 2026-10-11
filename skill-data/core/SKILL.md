@@ -1,7 +1,7 @@
 ---
 name: core
 description: Core chrome-use usage guide. Read this before running any chrome-use commands. Covers the snapshot-and-ref workflow, navigating pages, interacting with elements (click, fill, type, select), extracting text and data, taking screenshots, managing tabs, handling forms and auth, waiting for content, running multiple browser sessions in parallel, and troubleshooting common failures. Use when the user asks to interact with a website, fill a form, click something, extract data, take a screenshot, log into a site, test a web app, or automate any browser task.
-allowed-tools: Bash(chrome-use:*), Bash(chrome-use:*), Bash(abs:*), Bash(npx chrome-use:*), Bash(npx chrome-use:*)
+allowed-tools: Bash(chrome-use:*), Bash(npx chrome-use:*)
 ---
 
 # chrome-use core
@@ -55,7 +55,7 @@ remain disabled there. Browser CLI automation is unaffected.
 | Image, visual or canvas state | `screenshot` or `canvas capture` |
 
 When `siteAdapters` appears in JSON or on stderr, check the arguments with
-`site info <name>/<cmd>` and prefer the adapter for matching reads. When a
+`site info <name>/<cmd>` (or `site info <name>` for the whole pack) and prefer the adapter for matching reads. When a
 response carries `siteAdapterSuggestion`, ask the user before saving the steps
 you keep repeating on that site as an adapter (`core/site-adapters`). Adapters
 run as the logged-in user; call only operations within the task.

@@ -41,13 +41,13 @@ A **new browser context** starts without your existing login sessions. Playwrigh
 |---|:---:|:---:|:---:|:---:|
 | Works with **any** agent / CLI (not one app) | ✅ | ✅ | ❌ Claude only | ✅ |
 | Drives your **real, logged-in** Chrome | Configurable; fresh contexts start empty | ✅ | ✅ | ✅ |
-| Connect method / **"Allow remote debugging?" popup** | — (own browser) | `--remote-debugging-port` · version/mode dependent | `chrome.debugger` · no | native messaging · **never** ✅ |
+| Connect method / **"Allow remote debugging?" popup** | — (own browser) | `--remote-debugging-port` · version/mode dependent | `chrome.debugger` · no | native messaging · **never** ✅⁴ |
 | Real-browser fingerprint (CreepJS ~0%)¹ | ❌ automation markers / headless | ✅ | ✅ | ✅ **verified 0%** |
 | **No `Runtime.enable` CDP leak** (rebrowser)² | ❌ leaks | ❌ leaks | — | ✅ **off by default** |
 | Many agents on **one** real Chrome, isolated tab groups³ | ❌ separate browsers | ⚠️ shared tabs, no isolation | ❌ single app | ✅ |
 | Permissions footprint | full control | full CDP | 16 incl. `<all_urls>` | **12, no `<all_urls>`** |
 
-<sub>¹ All three real-Chrome tools score ~0% on CreepJS (it's a real browser); we've measured ours. ² rebrowser's `runtimeEnableLeak`: verified clean on our relay path; Claude in Chrome not independently tested (—). ³ web-access can run parallel sub-agents on one browser, but without per-session isolation; each `--session` here gets its own colored, command-isolated tab group. See [Anti-detection](#anti-detection) for the measured numbers.</sub>
+<sub>¹ All three real-Chrome tools score ~0% on CreepJS (it's a real browser); we've measured ours. ² rebrowser's `runtimeEnableLeak`: verified clean on our relay path; Claude in Chrome not independently tested (—). ³ web-access can run parallel sub-agents on one browser, but without per-session isolation; each `--session` here gets its own colored, command-isolated tab group. ⁴ No consent dialog, but the extension still uses `chrome.debugger`, so Chrome shows its "started debugging this browser" bar while an agent tab is attached. See [Setup](#setup-connect-to-your-chrome) for removing it. See [Anti-detection](#anti-detection) for the measured numbers.</sub>
 
 ## How it works
 
@@ -83,13 +83,13 @@ curl -fsSL https://raw.githubusercontent.com/leeguooooo/chrome-use/main/install.
 irm https://raw.githubusercontent.com/leeguooooo/chrome-use/main/install.ps1 | iex
 ```
 
-Downloads the prebuilt binary for your platform from the latest [GitHub Release](https://github.com/leeguooooo/chrome-use/releases) and installs `chrome-use` (+ the `abs` alias). No npm, no tokens.
+Downloads the prebuilt binary for your platform from the latest [GitHub Release](https://github.com/leeguooooo/chrome-use/releases) and installs `chrome-use`. No npm, no tokens.
 
 <details>
 <summary>Other ways to install</summary>
 
-- **Pin a version:** `AGENT_BROWSER_VERSION=v0.27.0-fork.12 curl -fsSL https://raw.githubusercontent.com/leeguooooo/chrome-use/main/install.sh | sh`
-- **Custom location:** `AGENT_BROWSER_BIN_DIR=$HOME/bin curl -fsSL … | sh`
+- **Pin a version:** `curl -fsSL https://raw.githubusercontent.com/leeguooooo/chrome-use/main/install.sh | AGENT_BROWSER_VERSION=v1.5.188 sh`
+- **Custom location:** `curl -fsSL … | AGENT_BROWSER_BIN_DIR=$HOME/bin sh`
 - **Windows, pin a version or location:** `$env:AGENT_BROWSER_VERSION = 'v1.5.139'` or `$env:AGENT_BROWSER_BIN_DIR = 'D:\tools'` before the `irm … | iex` line. It installs to `%LOCALAPPDATA%\Programs\chrome-use` by default and adds that to your user PATH, keeping the existing entries exactly as they were (opt out with `$env:AGENT_BROWSER_NO_PATH = 1`). No admin rights needed.
 - **Windows, by hand:** download `chrome-use-win32-x64.tar.gz` and its `.sha256` from the [Releases page](https://github.com/leeguooooo/chrome-use/releases), check that `(Get-FileHash chrome-use-win32-x64.tar.gz -Algorithm SHA256).Hash` matches the `.sha256` file, extract with `tar -xzf chrome-use-win32-x64.tar.gz`, and put `chrome-use.exe` on your PATH. Check the hash before running it: an interrupted download still extracts into an `.exe`, which then fails at launch with an access violation (exit code `-1073741819`, `0xC0000005`) rather than anything that says the download was incomplete.
 </details>
@@ -97,7 +97,7 @@ Downloads the prebuilt binary for your platform from the latest [GitHub Release]
 ### Install with Nix
 
 Run it once, no install: `nix run github:leeguooooo/chrome-use -- --help`.
-The flake also ships a home-manager module and a NixOS module (`programs.chrome-use.enable = true`); on NixOS the native-messaging host is registered per-user, so run `chrome-use extension connect` once after switching.
+The flake also ships a home-manager module and a NixOS module (`programs.chrome-use.enable = true`); on NixOS the native-messaging host is registered per-user, so run `chrome-use extension connect` once after switching (it registers the host the same way `extension install` does, then attaches to the extension relay).
 Dev shell: `nix develop` (rust toolchain + node 24 + pnpm + chromium + vhs).
 Full snippets: [install guide](https://chrome-use.leeguoo.com/en/install.html).
 
@@ -106,8 +106,8 @@ Full snippets: [install guide](https://chrome-use.leeguoo.com/en/install.html).
 With a current CLI, the installers install and verify its bundled discovery skill without Node, npx, Git or another download. To install or refresh it manually:
 
 ```bash
-chrome-use skill install
-chrome-use skill install --project
+chrome-use skills install
+chrome-use skills install --project
 ```
 
 Global installation covers `~/.agents/skills`, Claude Code, Codex and Cursor, plus existing Pi, OpenCode, Windsurf, CodeBuddy and Trae configurations. It respects `CLAUDE_CONFIG_DIR` and `XDG_CONFIG_HOME`. Project installation uses `.agents/skills` and `.claude/skills`, plus existing `.pi`, `.windsurf`, `.codebuddy` and `.trae` configurations. Restart your agent or reload its skills afterward. A failed write is an error, even if other destinations succeeded. See [installation details](https://chrome-use.leeguoo.com/en/install.html).
@@ -133,7 +133,7 @@ npx skills add leeguooooo/chrome-use -g
 > Use the `chrome-use` CLI from the shell for every browser task; start with `chrome-use skills get core`. Do not use the built-in Chrome plugin for browser work here.
 > ```
 
-Either way the agent gets the right usage patterns and pre-approved bash permissions for `chrome-use` and `abs`; the skill self-heals a missing binary by re-running the install one-liner above for its platform. Specialized guides (`electron`, `slack`, `agentcore`, …) are served by the binary itself via `chrome-use skills get <name>`, so instructions always match the installed version.
+Either way the agent gets the right usage patterns and pre-approved bash permissions for `chrome-use`; the skill self-heals a missing binary by re-running the install one-liner above for its platform. Specialized guides (`electron`, `slack`, `agentcore`, …) are served by the binary itself via `chrome-use skills get <name>`, so instructions always match the installed version.
 
 The installed discovery skill should direct the agent to `chrome-use skills get core`; it should not carry a second command manual. If an older installed copy contains its own workflow without that handoff, refresh it before comparing core-guide changes.
 
@@ -177,6 +177,8 @@ chrome-use status                 # relay, profile, extension, and session healt
 
 `chrome-use open` then drives your real, logged-in Chrome over **native messaging**: no debug port, no token, and **no "Allow remote debugging?" dialog, ever**. The raw remote-debugging-port alternative (which pops a consent dialog) is described in the [real Chrome guide](https://chrome-use.leeguoo.com/en/real-chrome.html).
 
+`extension install` is the one-time setup. `chrome-use extension connect` (alias `chrome-use reconnect`) re-attaches to an already-installed extension's relay without reinstalling anything. Chrome still shows its "chrome-use started debugging this browser" bar on attached agent tabs; `chrome-use extension connect --silent` removes it by restarting Chrome once with `--silent-debugger-extension-api` (tabs and logins are restored; it refuses when several Chrome instances are running). `--keep-banner` leaves Chrome alone, and without either flag it asks first in an interactive terminal.
+
 Your Chrome profile must have a window open. chrome-use never opens one itself: with no window it stops with `profile not open` (code `profile_not_open`), so open a window in that profile first and rerun. If it cannot tell whether a window is open, it stops with `profile window unavailable` (code `profile_window_unavailable`); unknown means nothing is created. See [Troubleshooting](https://chrome-use.leeguoo.com/en/troubleshooting.html) for the first-tab cleanup codes.
 
 ### Multi-profile Chrome: ChooseBrowser rules
@@ -219,6 +221,8 @@ chrome-use snapshot -i                 # the start of every interaction: interac
 chrome-use click @e3 --observe         # act, and watch for the page's reaction
 chrome-use snapshot -i --diff          # only what changed since the last snapshot
 ```
+
+Interactive snapshots add `context` only to repeated controls with the same role and name when named parent lines do not already distinguish them. Context omits the control’s own name and punctuation, stays within about 100 characters (60 for unnamed controls), and must differ between controls. Unique controls have no context; use a scoped or full snapshot for missing details such as a unique product’s price.
 
 Prefer `snapshot -i -c` for compact controls, scoped reads for a known region, and `--diff` only when the last observation leaves a question. Use `batch` for known action sequences (a step takes its own `--observe`: `batch "fill @e1 Ada" "click @e2 --observe"`; `pick` and `hover` observe like `click`), `script` for bounded observe/decide/act/verify flows, and `form fill --map` for several fields. Verify the requested result at the end: `observed.status: complete` means the capture is complete, not the task, so wait for the page's own final signal (`wait --text`). On a small page (tree at most 4 KB and 60 lines) an observation carries the whole current tree as `observed.snapshot` plus `observed.changes` (`+`/`-` lines only); larger pages keep `delta`. `observed.text` lists visible text lines that changed in any frame (receipts, logs, page counters), never input, textarea, select or editable content, and nothing at all while any password field holds a value (`textStatus: redacted`); a frame it could not read is listed in `textFrames` and makes the observation `partial`. `observed.target` names the tab and target on every JSON reply. An element screenshot is `screenshot <selector> <path>` or `screenshot <path> --selector <selector>`. Add `--with-screenshot <path>` only when pixels answer a question the tree cannot.
 
@@ -270,6 +274,7 @@ For an authorized task, the bundled skill tells the agent to inspect and attempt
 | `chrome-use download @e2 ./video.mp4` | Download with the same cookies as the logged-in browser, without navigating the current tab |
 | `chrome-use network route "*/api/me" --body '{"vip":true}'` | Mock a response, rewrite an outgoing request, or block one |
 | `chrome-use site github/issues epiral/bb-browser --json` | Run a site adapter and get clean JSON from the site's own API |
+| `chrome-use site info github/issues` · `site info github` | Show one adapter's args and domain, or every adapter in a pack with its args and a usage line |
 | `chrome-use tab close t2` · `close` | Close a tab, or end the session and close every tab it created. Both read the tabs back before reporting them closed (`tabsClosed`, `verifiedAbsent: true`); a tab still open or not confirmed gone fails with `close incomplete` and keeps the session and its tab ownership for a retry. `tab close` on the session's last tab ends the session (`sessionClosed: true`). Tabs the session did not create are never closed. Confirming over the relay needs ab-connect 0.5.33+ |
 | `chrome-use session list` · `session stop [name]` | Manage session workers |
 | `chrome-use auth login --bwu [--item <id\|name>]` | Fill the current login page from Bitwarden; handles TOTP and supported passkey second factors |
