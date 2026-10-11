@@ -161,3 +161,28 @@ loading and browser timer receiver defects. This fixture uses a remote-debugging
 port and is not stealth evidence, a physical-toolbar-click test, a real model
 browser task or final post-main-sync acceptance. Evidence is in the task-owned
 SSH fixture directory and bench/panel-extension-check.mjs describes the check.
+
+
+## Release acceptance follow-up
+
+The real extension opened its native side panel on Chrome for Testing
+155.0.8059.39. Real Codex 0.161.0 and Claude Code 2.1.296 each used the existing
+local login and chrome_use MCP to open a loopback fixture and click its button.
+The independent HTTP counter confirmed one click per task. Codex browser calls
+required single-call MCP approvals with visible arguments. Claude required stdio
+permission prompts; approval resolution is correlated with tool_use_id.
+
+Relay detector checks passed with the panel closed, open/idle, holding a synthetic
+running turn, and after confirmed interruption. Sannysoft, CreepJS (0% headless,
+0% stealth), incolumitas, BrowserScan (19 normal rows), worker languages and the
+Cloudflare managed challenge passed in all four states. These browsers had no
+remote-debugging port. Test-only extension-page helpers opened the panel and
+started/stopped the synthetic turn; they are absent from the release ZIP. This is
+not a physical-toolbar-click measurement or a claim that panel resizing is
+unobservable. Functional CDP tests are separate from this detector evidence.
+
+Evidence: task-owned /tmp/chrome-use-panel-browser.gyx3ja on the SSH host,
+panel-stealth-matrix.json, stealth-relay-three.log, stealth-panel-open.log,
+stealth-panel-executing.log, stealth-panel-finished.log and real-result.json.
+The original full specification remains unfinished: attachments, skills,
+schedules, binding the visible tab and Windows write/process support are deferred.

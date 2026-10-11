@@ -12,11 +12,19 @@ Requires extension ab-connect 0.5.36. Chrome Web Store publication follows Googl
 
 ### Bug Fixes
 
+- **Saved tab groups.** Agent-created tabs are ungrouped before closing so Chrome does not retain an empty saved group (#537).
+- **Snapshot context.** Repeated controls receive context only when it helps distinguish them (#540).
+- **Site inspection.** `site info <pack>` works and prints a runnable hint example (#539).
 - **First-open and host compatibility.** A panel opened while connecting loads metadata after confirmation. Browser timer bindings retain their correct receiver. Older native hosts show an upgrade requirement rather than enabling unsupported panel operations. Windows panels remain read-only for agent discovery/configuration viewing until process ownership and private persistence support are verified; existing Windows browser CLI automation is unchanged.
+
+### Improvements
+
+- **Getting started.** Installation, aliases, banners and recording guidance are clearer (#538).
 
 ### Contributors
 
 - @leeguooooo
+- @mpeter
 <!-- release:end -->
 
 ## 1.5.188
