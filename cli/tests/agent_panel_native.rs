@@ -544,6 +544,64 @@ fn both_cli_protocols_keep_conversations_alive_across_native_host_disconnects() 
             .collect();
         assert!(output.contains("synthetic reply: edited-after-failure"));
         assert!(!output.contains("synthetic reply: discard-before-running"));
+        let busy_id = uuid::Uuid::new_v4().to_string();
+        panel_reply(
+            &mut host,
+            &rx,
+            "direct-wait",
+            "conversationSend",
+            json!({"conversationId":id,"messageId":busy_id,"text":"wait"}),
+        );
+        conversation_poll(&mut host, &rx, &id, "running");
+        let ordinary = uuid::Uuid::new_v4().to_string();
+        panel_reply(
+            &mut host,
+            &rx,
+            "ordinary-before-direct",
+            "conversationSend",
+            json!({"conversationId":id,"messageId":ordinary,"text":"ordinary-after-direct"}),
+        );
+        let direct = uuid::Uuid::new_v4().to_string();
+        let ack = panel_reply(
+            &mut host,
+            &rx,
+            "direct-send",
+            "conversationSendDirect",
+            json!({"conversationId":id,"messageId":direct,"text":"direct-after-stop"}),
+        );
+        assert_eq!(ack["result"]["message"]["accepted"], true);
+        let after_direct = conversation_poll(&mut host, &rx, &id, "idle");
+        assert_eq!(after_direct["conversation"]["queuePaused"], true);
+        assert_eq!(after_direct["queuedMessages"][0]["id"], ordinary);
+        let events = after_direct["journal"]["events"].as_array().unwrap();
+        let stopped_at = events
+            .iter()
+            .position(|event| event["kind"] == "terminal" && event["data"]["messageId"] == busy_id)
+            .unwrap();
+        let direct_output = events
+            .iter()
+            .position(|event| event["kind"] == "textDelta" && event["data"]["messageId"] == direct)
+            .unwrap();
+        assert!(
+            stopped_at < direct_output,
+            "Direct text executed before confirmed interruption"
+        );
+        let repeat = panel_reply(
+            &mut host,
+            &rx,
+            "direct-repeat",
+            "conversationSendDirect",
+            json!({"conversationId":id,"messageId":direct,"text":"direct-after-stop"}),
+        );
+        assert_eq!(repeat["result"]["message"]["accepted"], false);
+        panel_reply(
+            &mut host,
+            &rx,
+            "direct-resume-ordinary",
+            "conversationResumeQueue",
+            json!({"conversationId":id}),
+        );
+        let resumed = conversation_poll(&mut host, &rx, &id, "idle");
         let ready_pids: std::collections::HashSet<_> = resumed["journal"]["events"]
             .as_array()
             .unwrap()
@@ -557,6 +615,101 @@ fn both_cli_protocols_keep_conversations_alive_across_native_host_disconnects() 
             "CLI process was restarted between turns"
         );
     }
+    for agent in ["codex", "claude"] {
+        let created = panel_reply(
+            &mut host,
+            &rx,
+            "exit-direct-create",
+            "conversationCreate",
+            json!({"agentId":agent,"executable":fixture}),
+        );
+        let id = created["result"]["conversation"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        cleanup.chats.push(id.clone());
+        panel_reply(
+            &mut host,
+            &rx,
+            "exit-direct-wait",
+            "conversationSend",
+            json!({"conversationId":id,"messageId":uuid::Uuid::new_v4().to_string(),"text":"wait-exit"}),
+        );
+        conversation_poll(&mut host, &rx, &id, "running");
+        let direct = uuid::Uuid::new_v4().to_string();
+        panel_reply(
+            &mut host,
+            &rx,
+            "exit-direct-send",
+            "conversationSendDirect",
+            json!({"conversationId":id,"messageId":direct,"text":"direct-after-process-exit"}),
+        );
+        let done = conversation_poll(&mut host, &rx, &id, "idle");
+        let events = done["journal"]["events"].as_array().unwrap();
+        let exited = events
+            .iter()
+            .position(|event| {
+                event["kind"] == "exited" && event["data"]["processExitConfirmed"] == true
+            })
+            .unwrap();
+        let output = events
+            .iter()
+            .position(|event| event["kind"] == "textDelta" && event["data"]["messageId"] == direct)
+            .unwrap();
+        assert!(
+            exited < output,
+            "New process sent direct text before confirmed old-process exit"
+        );
+        let pids: std::collections::HashSet<_> = events
+            .iter()
+            .filter(|event| event["kind"] == "ready")
+            .map(|event| event["data"]["pid"].as_u64().unwrap())
+            .collect();
+        assert_eq!(
+            pids.len(),
+            2,
+            "Confirmed exit did not start a fresh CLI process"
+        );
+    }
+    let invalid = panel_reply(
+        &mut host,
+        &rx,
+        "direct-invalid-create",
+        "conversationCreate",
+        json!({"agentId":"codex","executable":registry.path().join("missing-synthetic-cli")}),
+    );
+    let invalid_id = invalid["result"]["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    cleanup.chats.push(invalid_id.clone());
+    let invalid_message = uuid::Uuid::new_v4().to_string();
+    let not_started = panel_reply(
+        &mut host,
+        &rx,
+        "direct-invalid-send",
+        "conversationSendDirect",
+        json!({"conversationId":invalid_id,"messageId":invalid_message,"text":"retain this unconfirmed direct message"}),
+    );
+    assert_eq!(
+        not_started["result"]["conversation"]["phase"],
+        "recoveryRequired"
+    );
+    assert_eq!(
+        not_started["result"]["conversation"]["activeMessageId"],
+        invalid_message
+    );
+    let refuse_resume = panel_reply(
+        &mut host,
+        &rx,
+        "direct-invalid-resume",
+        "conversationResumeQueue",
+        json!({"conversationId":invalid_id}),
+    );
+    assert!(refuse_resume["error"]
+        .as_str()
+        .unwrap()
+        .contains("unconfirmed"));
     let other_profile = "native-other-profile-fixture";
     let _other_cleanup = ServiceFixture {
         root: registry.path().into(),

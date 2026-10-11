@@ -244,3 +244,15 @@ in the acceptance map so delayed sends cannot restore old queue entries.
 A changed/dequeued message is refused. Queue events keep transcript audit notes;
 they do not claim the message ran. Editing keeps the composer draft intact.
 Lost mutation replies are unconfirmed and never automatically retried.
+
+conversationSendDirect accepts a durable message ID and records pending direct
+intent before requesting interruption. Its ACK confirms acceptance, not stopping
+or execution. The old turn must complete/interrupt or the owned process must
+exit before begin_next can select that message ahead of the ordinary queue.
+Ordinary messages stay paused after the direct turn. A failed terminal result
+requires explicit resume; processUnconfirmed or recovered busy state refuses
+resume entirely. Repeated IDs are deduplicated and a second pending direct ID
+is refused. Queue edit/remove can replace or cancel the pending intent before
+execution. The native service can restart the CLI after confirmed exit, retaining
+its backend session identity; startup failure reports recoveryRequired rather
+than dropping the selected message or pretending it ran.

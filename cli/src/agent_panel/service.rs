@@ -377,7 +377,9 @@ impl Engine {
                         false,
                     ),
                 );
-                self.chat(id)?.phase = Phase::WaitingInput;
+                if self.chat(id)?.phase != Phase::Stopping {
+                    self.chat(id)?.phase = Phase::WaitingInput;
+                }
             }
             "requestResolved" => {
                 let key = serde_json::to_string(&notice.data["requestId"])
@@ -438,7 +440,7 @@ impl Engine {
             _ => {}
         }
         self.record(id, notice.kind, notice.data)?;
-        if notice.kind == "terminal" {
+        if ["terminal", "exited"].contains(&notice.kind) {
             let next = self.chat(id)?.begin_next();
             if next.is_some() {
                 self.persist(id)?;
@@ -647,21 +649,52 @@ async fn dispatch(
                 json!({"schemaVersion":1,"conversation":chat.summary(),"message":{"id":p.message_id,"known":known,"status":status}}),
             )
         }
-        "conversationSend" => {
+        "conversationSend" | "conversationSendDirect" => {
             let p: Send = serde_json::from_value(params.clone())
                 .map_err(|_| "conversationSend requires conversationId, messageId and text")?;
             let mut e = engine.lock().await;
-            let added = e.chat(&p.conversation_id)?.accept(Message {
+            let direct = operation == "conversationSendDirect";
+            let interrupt = if direct && e.chat(&p.conversation_id)?.phase.busy() {
+                Some(
+                    e.jobs
+                        .get(&p.conversation_id)
+                        .ok_or("Backend is unavailable; stop cannot be confirmed")?
+                        .sender
+                        .clone(),
+                )
+            } else {
+                None
+            };
+            let message = Message {
                 id: p.message_id.clone(),
                 text: p.text.clone(),
-            })?;
+            };
+            let added = if direct {
+                e.chat(&p.conversation_id)?.accept_direct(message)?
+            } else {
+                e.chat(&p.conversation_id)?.accept(message)?
+            };
             e.persist(&p.conversation_id)?;
             if added {
                 e.record(
                     &p.conversation_id,
                     "user",
-                    json!({"messageId":p.message_id,"text":p.text}),
+                    json!({"messageId":p.message_id,"text":p.text,"direct":direct}),
                 )?;
+            }
+            if added {
+                if let Some(sender) = interrupt {
+                    e.chat(&p.conversation_id)?.phase = Phase::Stopping;
+                    e.persist(&p.conversation_id)?;
+                    if sender.try_send(BackendCommand::Interrupt).is_err() {
+                        let chat = e.chat(&p.conversation_id)?;
+                        chat.phase = Phase::RecoveryRequired;
+                        chat.last_error =
+                            Some("Direct message saved but stop dispatch is unconfirmed".into());
+                        e.persist(&p.conversation_id)?;
+                        return Err("Direct message saved but stop dispatch is unconfirmed; read its state without resending".into());
+                    }
+                }
             }
             let next = e.chat(&p.conversation_id)?.begin_next();
             e.persist(&p.conversation_id)?;
@@ -670,9 +703,15 @@ async fn dispatch(
                 if let Err(error) = start(engine, &p.conversation_id, message).await {
                     let mut e = engine.lock().await;
                     let chat = e.chat(&p.conversation_id)?;
-                    chat.phase = Phase::Failed;
+                    chat.phase = if direct {
+                        Phase::RecoveryRequired
+                    } else {
+                        Phase::Failed
+                    };
                     chat.queue_paused = true;
-                    chat.active = None;
+                    if !direct {
+                        chat.active = None;
+                    }
                     chat.last_error = Some(error);
                     e.persist(&p.conversation_id)?;
                 }
@@ -687,7 +726,16 @@ async fn dispatch(
                 .map_err(|_| "Conversation control requires only conversationId")?;
             let mut e = engine.lock().await;
             if operation == "conversationResumeQueue" {
-                e.chat(&p.conversation_id)?.queue_paused = false;
+                let chat = e.chat(&p.conversation_id)?;
+                if chat.phase == Phase::RecoveryRequired {
+                    return Err(
+                        "The previous outcome is unconfirmed; the queue cannot resume".into(),
+                    );
+                }
+                chat.queue_paused = false;
+                if !chat.phase.busy() && chat.direct_message_id.is_some() {
+                    chat.direct_ready = true;
+                }
                 let next = e.chat(&p.conversation_id)?.begin_next();
                 e.persist(&p.conversation_id)?;
                 let summary = e.chat(&p.conversation_id)?.summary();
@@ -798,139 +846,154 @@ fn validate_reply(method: &str, original: &Value, result: &Value) -> Result<(), 
     }
 }
 
-async fn start(engine: &Arc<Mutex<Engine>>, id: &str, message: Message) -> Result<(), String> {
-    let mut e = engine.lock().await;
-    if let Some(job) = e.jobs.get(id) {
-        let sender = job.sender.clone();
+fn start<'a>(
+    engine: &'a Arc<Mutex<Engine>>,
+    id: &'a str,
+    message: Message,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + std::marker::Send + 'a>>
+{
+    Box::pin(async move {
+        let mut e = engine.lock().await;
+        if let Some(job) = e.jobs.get(id) {
+            let sender = job.sender.clone();
+            drop(e);
+            return sender
+                .send(BackendCommand::Start(message))
+                .await
+                .map_err(|_| {
+                    "Backend process became unavailable before receiving the turn".into()
+                });
+        }
+        if e.jobs.len() >= 4 {
+            let idle = e
+                .jobs
+                .keys()
+                .filter(|key| {
+                    e.chats
+                        .get(*key)
+                        .is_some_and(|c| !c.phase.busy() && c.phase != Phase::RecoveryRequired)
+                })
+                .min_by_key(|key| e.chats.get(*key).map(|c| c.updated).unwrap_or(0))
+                .cloned();
+            if let Some(idle) = idle {
+                let sender = e
+                    .jobs
+                    .get(&idle)
+                    .ok_or("Idle backend disappeared")?
+                    .sender
+                    .clone();
+                sender
+                    .try_send(BackendCommand::Shutdown)
+                    .map_err(|_| "Idle backend shutdown was not dispatched")?;
+                drop(e);
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+                loop {
+                    let locked = engine.lock().await;
+                    if !locked.jobs.contains_key(&idle) {
+                        e = locked;
+                        break;
+                    }
+                    drop(locked);
+                    if tokio::time::Instant::now() > deadline {
+                        return Err("Idle backend shutdown has not been confirmed".into());
+                    }
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                }
+            } else {
+                return Err(
+                    "Four conversations are running; wait or stop one before starting another"
+                        .into(),
+                );
+            }
+        }
+        let context = DiscoveryContext::current()?;
+        let chat = e.chat(id)?.clone();
+        let executable = chat
+            .executable
+            .clone()
+            .or_else(|| {
+                context.executable(if chat.agent_id == "codex" {
+                    "codex"
+                } else {
+                    "claude"
+                })
+            })
+            .ok_or("The selected local agent CLI is not installed")?;
+        if !super::is_executable(&executable, cfg!(windows)) {
+            return Err("Selected agent program is not an executable file".into());
+        }
+        let workspace = e.store.directory.join(id).join("workspace");
+        private_tree(&workspace)?;
+        let profile = e.profile.clone();
+        let generation = {
+            let running = e.chat(id)?;
+            running.generation += 1;
+            running.generation
+        };
+        e.persist(id)?;
+        let (commands, receive) = mpsc::channel(32);
+        let (events, mut notices) = mpsc::channel(256);
+        e.jobs.insert(
+            id.into(),
+            Job {
+                generation,
+                sender: commands.clone(),
+            },
+        );
+        let setup = Setup {
+            agent_id: chat.agent_id,
+            executable,
+            workspace,
+            profile,
+            browser_session: format!("panel-{id}"),
+            backend_session: chat.session_id,
+            model: chat.requested_model,
+            mcp_executable: std::env::current_exe()
+                .map_err(|_| "Cannot locate browser tools executable")?,
+        };
         drop(e);
-        return sender
+        let owner = engine.clone();
+        let chat_id = id.to_string();
+        tokio::spawn(async move {
+            backend::run(setup, receive, events).await;
+        });
+        tokio::spawn(async move {
+            while let Some(notice) = notices.recv().await {
+                let mut e = owner.lock().await;
+                let next = e.notice(&chat_id, generation, notice);
+                match next {
+                    Ok(Some(message)) => {
+                        drop(e);
+                        if let Err(error) = start(&owner, &chat_id, message).await {
+                            let mut e = owner.lock().await;
+                            if let Some(chat) = e.chats.get_mut(&chat_id) {
+                                chat.phase = Phase::RecoveryRequired;
+                                chat.queue_paused = true;
+                                chat.last_error = Some(error);
+                            }
+                            let _ = e.persist(&chat_id);
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        if let Some(chat) = e.chats.get_mut(&chat_id) {
+                            chat.phase = Phase::RecoveryRequired;
+                            chat.queue_paused = true;
+                            chat.last_error = Some(error);
+                        }
+                        let _ = e.persist(&chat_id);
+                        if let Some(job) = e.jobs.get(&chat_id) {
+                            let _ = job.sender.try_send(BackendCommand::Shutdown);
+                        }
+                    }
+                }
+            }
+        });
+        commands
             .send(BackendCommand::Start(message))
             .await
-            .map_err(|_| "Backend process became unavailable before receiving the turn".into());
-    }
-    if e.jobs.len() >= 4 {
-        let idle = e
-            .jobs
-            .keys()
-            .filter(|key| {
-                e.chats
-                    .get(*key)
-                    .is_some_and(|c| !c.phase.busy() && c.phase != Phase::RecoveryRequired)
-            })
-            .min_by_key(|key| e.chats.get(*key).map(|c| c.updated).unwrap_or(0))
-            .cloned();
-        if let Some(idle) = idle {
-            let sender = e
-                .jobs
-                .get(&idle)
-                .ok_or("Idle backend disappeared")?
-                .sender
-                .clone();
-            sender
-                .try_send(BackendCommand::Shutdown)
-                .map_err(|_| "Idle backend shutdown was not dispatched")?;
-            drop(e);
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-            loop {
-                let locked = engine.lock().await;
-                if !locked.jobs.contains_key(&idle) {
-                    e = locked;
-                    break;
-                }
-                drop(locked);
-                if tokio::time::Instant::now() > deadline {
-                    return Err("Idle backend shutdown has not been confirmed".into());
-                }
-                tokio::time::sleep(Duration::from_millis(30)).await;
-            }
-        } else {
-            return Err(
-                "Four conversations are running; wait or stop one before starting another".into(),
-            );
-        }
-    }
-    let context = DiscoveryContext::current()?;
-    let chat = e.chat(id)?.clone();
-    let executable = chat
-        .executable
-        .clone()
-        .or_else(|| {
-            context.executable(if chat.agent_id == "codex" {
-                "codex"
-            } else {
-                "claude"
-            })
-        })
-        .ok_or("The selected local agent CLI is not installed")?;
-    if !super::is_executable(&executable, cfg!(windows)) {
-        return Err("Selected agent program is not an executable file".into());
-    }
-    let workspace = e.store.directory.join(id).join("workspace");
-    private_tree(&workspace)?;
-    let profile = e.profile.clone();
-    let generation = {
-        let running = e.chat(id)?;
-        running.generation += 1;
-        running.generation
-    };
-    e.persist(id)?;
-    let (commands, receive) = mpsc::channel(32);
-    let (events, mut notices) = mpsc::channel(256);
-    e.jobs.insert(
-        id.into(),
-        Job {
-            generation,
-            sender: commands.clone(),
-        },
-    );
-    let setup = Setup {
-        agent_id: chat.agent_id,
-        executable,
-        workspace,
-        profile,
-        browser_session: format!("panel-{id}"),
-        backend_session: chat.session_id,
-        model: chat.requested_model,
-        mcp_executable: std::env::current_exe()
-            .map_err(|_| "Cannot locate browser tools executable")?,
-    };
-    drop(e);
-    let owner = engine.clone();
-    let chat_id = id.to_string();
-    tokio::spawn(async move {
-        backend::run(setup, receive, events).await;
-    });
-    tokio::spawn(async move {
-        while let Some(notice) = notices.recv().await {
-            let mut e = owner.lock().await;
-            let next = e.notice(&chat_id, generation, notice);
-            match next {
-                Ok(Some(message)) => {
-                    if let Some(job) = e.jobs.get(&chat_id) {
-                        let sender = job.sender.clone();
-                        drop(e);
-                        let _ = sender.send(BackendCommand::Start(message)).await;
-                    }
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    if let Some(chat) = e.chats.get_mut(&chat_id) {
-                        chat.phase = Phase::RecoveryRequired;
-                        chat.queue_paused = true;
-                        chat.last_error = Some(error);
-                    }
-                    let _ = e.persist(&chat_id);
-                    if let Some(job) = e.jobs.get(&chat_id) {
-                        let _ = job.sender.try_send(BackendCommand::Shutdown);
-                    }
-                }
-            }
-        }
-    });
-    commands
-        .send(BackendCommand::Start(message))
-        .await
-        .map_err(|_| "Backend process closed before accepting the turn".into())
+            .map_err(|_| "Backend process closed before accepting the turn".into())
+    })
 }
 
 pub fn run(args: &[String]) -> Result<(), String> {

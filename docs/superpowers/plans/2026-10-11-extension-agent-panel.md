@@ -78,14 +78,20 @@ entry/sender acceptance still require verification.
 Queue edit/remove and bounded previews are now implemented, with fresh
 replacement IDs, original-text conflict checks and accepted-ID tombstones.
 Tiller AgentChat.swift distinguishes queue resume from pendingDirect (Ctrl+Enter
-stops first); our separate direct-send flow remains required. The sidebar keeps
+stops first); our direct-send flow now persists a single priority intent and waits for
+terminal/owned-process-exit confirmation. Ordinary queued messages remain
+paused. Duplicate/second intents and unconfirmed recovery are refused. The sidebar keeps
 edits inside the queue row rather than merging them into the composer draft.
 Remote native fixtures verify both adapters execute edited text, do not execute
 removed text and retain exact pre-restart user IDs/texts. Queue checks pass in
 59 Rust tests, 3 native integration tests and 280 extension tests; remote fmt and
 clippy pass. These do not establish rendered queue controls or real-model use.
-Direct-send, attachments, catalogs and remaining items below still require
-implementation/acceptance.
+Direct-send protocol fixtures cover both backends, including confirmed exit
+and process replacement, priority ordering, duplicate intent, paused ordinary
+queues and failed startup retaining its message identity. Restart recovery is
+covered by state tests. The direct work passes 64 Rust state/configuration tests,
+3 native integration tests and 281 extension tests, plus remote fmt/clippy. Real CLI/account, rendered direct/queue controls,
+attachments, catalogs and remaining items still require implementation/acceptance.
 
 - [ ] Toolbar opens the native side panel; retain connection/setup access.
 - [ ] Persistent chats, stream rendering, tool outcomes and readable failures.

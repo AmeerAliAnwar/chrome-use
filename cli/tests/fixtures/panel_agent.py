@@ -49,7 +49,7 @@ for line in sys.stdin:
             text = message["params"]["input"][0]["text"]
             emit({"id": message["id"], "result": {"turn": {"id": turn}}})
             emit({"method": "turn/started", "params": {"threadId": session, "turn": {"id": turn}}})
-            if text == "wait":
+            if text in ("wait", "wait-exit"):
                 continue
             if text == "approval":
                 pending = 17
@@ -59,6 +59,8 @@ for line in sys.stdin:
                 time.sleep(0.4)
             complete("synthetic reply: " + text, "failed" if text == "fail" else "completed")
         elif method == "turn/interrupt":
+            time.sleep(0.2)
+            if text == "wait-exit": sys.exit(0)
             emit({"id": message["id"], "result": {}})
             complete("synthetic stop", "interrupted")
         elif method is None and message.get("id") == pending:
@@ -70,12 +72,14 @@ for line in sys.stdin:
             subtype = message["request"]["subtype"]
             emit({"type": "control_response", "response": {"subtype": "success", "request_id": message["request_id"], "response": {}}})
             if subtype == "interrupt" and turn is not None:
+                time.sleep(0.2)
+                if text == "wait-exit": sys.exit(0)
                 complete("synthetic stop", "interrupted")
         elif message.get("type") == "user":
             text = message["message"]["content"]
             turn = message["uuid"]
             emit({"type": "system", "subtype": "init", "session_id": session, "model": "synthetic-claude-model"})
-            if text == "wait":
+            if text in ("wait", "wait-exit"):
                 continue
             if text == "approval":
                 pending = "fixture-permission"

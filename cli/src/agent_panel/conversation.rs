@@ -75,6 +75,12 @@ pub(super) struct Conversation {
     pub active: Option<Message>,
     pub queue: VecDeque<Message>,
     pub queue_paused: bool,
+    #[serde(default)]
+    pub direct_message_id: Option<String>,
+    #[serde(default)]
+    pub direct_ready: bool,
+    #[serde(default)]
+    pub active_direct: bool,
     pub accepted: BTreeMap<String, String>,
     pub next_sequence: u64,
     pub last_error: Option<String>,
@@ -112,6 +118,9 @@ impl Conversation {
             active: None,
             queue: VecDeque::new(),
             queue_paused: false,
+            direct_message_id: None,
+            direct_ready: false,
+            active_direct: false,
             accepted: BTreeMap::new(),
             next_sequence: 1,
             last_error: None,
@@ -119,7 +128,7 @@ impl Conversation {
         })
     }
     pub(super) fn summary(&self) -> Value {
-        json!({"id":self.id,"agentId":self.agent_id,"title":self.title,"created":self.created,"updated":self.updated,"phase":self.phase,"generation":self.generation,"model":self.model,"requestedModel":self.requested_model,"queued":self.queue.len(),"queuePaused":self.queue_paused,"activeMessageId":self.active.as_ref().map(|m|&m.id),"lastError":self.last_error,"lastSequence":self.next_sequence.saturating_sub(1),"target":{"mode":"agentSession","session":format!("panel-{}",self.id)}})
+        json!({"id":self.id,"agentId":self.agent_id,"title":self.title,"created":self.created,"updated":self.updated,"phase":self.phase,"generation":self.generation,"model":self.model,"requestedModel":self.requested_model,"queued":self.queue.len(),"queuePaused":self.queue_paused,"directMessageId":self.direct_message_id,"activeMessageId":self.active.as_ref().map(|m|&m.id),"lastError":self.last_error,"lastSequence":self.next_sequence.saturating_sub(1),"target":{"mode":"agentSession","session":format!("panel-{}",self.id)}})
     }
     pub(super) fn queue_snapshot(&self) -> Value {
         Value::Array(
@@ -127,7 +136,7 @@ impl Conversation {
                 .iter()
                 .map(|message| {
                     let text: String = message.text.chars().take(1024).collect();
-                    json!({"id":message.id,"truncated":text.len()!=message.text.len(),"text":text})
+                    json!({"id":message.id,"truncated":text.len()!=message.text.len(),"text":text,"direct":self.direct_message_id.as_ref()==Some(&message.id)})
                 })
                 .collect(),
         )
@@ -166,14 +175,46 @@ impl Conversation {
         Ok(true)
     }
     pub(super) fn begin_next(&mut self) -> Option<Message> {
-        if self.phase.busy() || self.queue_paused || self.phase == Phase::RecoveryRequired {
+        if self.phase.busy() || self.phase == Phase::RecoveryRequired {
             return None;
         }
-        let next = self.queue.pop_front()?;
+        let next = if let Some(id) = &self.direct_message_id {
+            if !self.direct_ready {
+                return None;
+            }
+            let index = self.queue.iter().position(|m| &m.id == id)?;
+            self.direct_message_id = None;
+            self.direct_ready = false;
+            self.active_direct = true;
+            self.queue.remove(index)?
+        } else {
+            if self.queue_paused {
+                return None;
+            }
+            self.active_direct = false;
+            self.queue.pop_front()?
+        };
         self.active = Some(next.clone());
         self.phase = Phase::Starting;
         self.last_error = None;
         Some(next)
+    }
+    pub(super) fn accept_direct(&mut self, message: Message) -> Result<bool, String> {
+        if self.accepted.contains_key(&message.id) {
+            return self.accept(message);
+        }
+        if self.direct_message_id.is_some() {
+            return Err("A direct message is already waiting for stop confirmation".into());
+        }
+        let ready = !self.phase.busy();
+        let id = message.id.clone();
+        let accepted = self.accept(message)?;
+        self.direct_message_id = Some(id);
+        self.direct_ready = ready;
+        // Ordinary queued messages remain paused after a direct turn. The user
+        // resumes them explicitly instead of accidentally restarting old work.
+        self.queue_paused = true;
+        Ok(accepted)
     }
     pub(super) fn edit_queued(
         &mut self,
@@ -206,6 +247,9 @@ impl Conversation {
             replacement.id.clone(),
             hex::encode(Sha256::digest(replacement.text.as_bytes())),
         );
+        if self.direct_message_id.as_deref() == Some(id) {
+            self.direct_message_id = Some(replacement.id.clone());
+        }
         self.queue[index] = replacement;
         self.updated = now();
         Ok(())
@@ -220,6 +264,10 @@ impl Conversation {
             return Err("Queued message changed; read its current state".into());
         }
         self.queue.remove(index);
+        if self.direct_message_id.as_deref() == Some(id) {
+            self.direct_message_id = None;
+            self.direct_ready = false;
+        }
         self.updated = now();
         Ok(())
     }
@@ -238,7 +286,15 @@ impl Conversation {
             "failed" => Phase::Failed,
             _ => return Err("Unknown backend terminal status".into()),
         };
-        self.queue_paused = outcome != "completed";
+        self.queue_paused = outcome != "completed"
+            || self.direct_message_id.is_some()
+            || (self.active_direct && self.queue_paused);
+        if self.active_direct && outcome == "completed" && self.queue.is_empty() {
+            self.queue_paused = false;
+        }
+        self.direct_ready =
+            self.direct_message_id.is_some() && ["completed", "interrupted"].contains(&outcome);
+        self.active_direct = false;
         self.last_error = error;
         self.active = None;
         self.updated = now();
@@ -512,6 +568,83 @@ mod tests {
         assert!(serde_json::to_vec(&snapshot).unwrap().len() < 450000);
         assert_eq!(snapshot[0]["truncated"], true);
         assert_eq!(c.queue[0].text.len(), 32768);
+    }
+    #[test]
+    fn direct_message_waits_for_confirmation_and_leaves_ordinary_queue_paused() {
+        let mut c = Conversation::new("codex", None, None).unwrap();
+        c.accept(message("active")).unwrap();
+        c.begin_next();
+        let ordinary = message("ordinary");
+        c.accept(ordinary.clone()).unwrap();
+        let direct = message("direct");
+        assert!(c.accept_direct(direct.clone()).unwrap());
+        assert!(!c.accept_direct(direct.clone()).unwrap());
+        assert!(c.begin_next().is_none());
+        c.terminal(0, "interrupted", None).unwrap();
+        assert_eq!(c.begin_next().unwrap().id, direct.id);
+        c.terminal(0, "completed", None).unwrap();
+        assert!(c.queue_paused);
+        assert!(c.begin_next().is_none());
+        c.queue_paused = false;
+        assert_eq!(c.begin_next().unwrap().id, ordinary.id);
+    }
+    #[test]
+    fn failed_or_recovered_turn_never_automatically_sends_pending_direct_text() {
+        let mut c = Conversation::new("claude", None, None).unwrap();
+        c.accept(message("active")).unwrap();
+        c.begin_next();
+        c.accept_direct(message("direct")).unwrap();
+        assert!(c.accept_direct(message("another direct")).is_err());
+        c.terminal(0, "failed", None).unwrap();
+        assert!(c.begin_next().is_none());
+        c.phase = Phase::RecoveryRequired;
+        c.direct_ready = true;
+        assert!(c.begin_next().is_none());
+        assert_eq!(c.queue.len(), 1);
+    }
+    #[test]
+    fn deleting_or_editing_pending_direct_text_updates_its_immutable_identity() {
+        let mut c = Conversation::new("codex", None, None).unwrap();
+        let old = message("old direct");
+        c.accept_direct(old.clone()).unwrap();
+        let new = message("new direct");
+        c.edit_queued(&old.id, &old.text, new.clone()).unwrap();
+        assert_eq!(c.direct_message_id.as_ref(), Some(&new.id));
+        c.remove_queued(&new.id, &new.text).unwrap();
+        assert!(c.direct_message_id.is_none());
+        assert!(!c.direct_ready);
+        assert!(c.begin_next().is_none());
+    }
+    #[test]
+    fn restart_keeps_direct_intent_but_does_not_replay_it_after_an_unconfirmed_turn() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("chats")).unwrap();
+        let mut c = Conversation::new("codex", None, None).unwrap();
+        c.accept(message("active")).unwrap();
+        c.begin_next();
+        let direct = message("direct after stop");
+        c.accept_direct(direct.clone()).unwrap();
+        c.phase = Phase::Stopping;
+        store.create(&c).unwrap();
+        let mut restored = store.load(&c.id).unwrap();
+        assert_eq!(restored.phase, Phase::RecoveryRequired);
+        assert_eq!(restored.direct_message_id, Some(direct.id));
+        assert!(restored.begin_next().is_none());
+        assert_eq!(restored.queue.len(), 1);
+    }
+    #[test]
+    fn completion_race_releases_direct_intent_but_an_empty_direct_turn_does_not_pause_new_work() {
+        let mut c = Conversation::new("codex", None, None).unwrap();
+        c.accept(message("old active")).unwrap();
+        c.begin_next();
+        let direct = message("direct");
+        c.accept_direct(direct.clone()).unwrap();
+        c.terminal(0, "completed", None).unwrap();
+        assert_eq!(c.begin_next().unwrap().id, direct.id);
+        c.terminal(0, "completed", None).unwrap();
+        assert!(!c.queue_paused);
+        c.accept(message("new work")).unwrap();
+        assert_eq!(c.begin_next().unwrap().text, "new work");
     }
     #[test]
     fn stale_edit_and_removal_never_change_active_or_other_queued_messages() {

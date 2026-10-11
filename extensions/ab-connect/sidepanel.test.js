@@ -146,3 +146,24 @@ test('a truncated queue preview cannot be changed until its full text is read', 
   assert.equal(input.value,full); assert.equal(input.readOnly,false);
   assert.equal(f.calls.filter(c=>c.operation==='conversationQueueEdit').length,0); f.panel.close();
 });
+
+test('direct sending is acknowledged as waiting for stop, and cannot replace a pending direct message', async () => {
+  const reply=deferred();
+  let current=chat('a','running');
+  const f=await fixture({conversationSendDirect:()=>reply.promise,conversationRead:async()=>({success:true,result:{conversation:current,journal:{events:[],cursor:0,more:false},queuedMessages:current.directMessageId?[{id:current.directMessageId,text:'send after stop',truncated:false,direct:true}]:[]}})});
+  f.panel.select('a');await settle();f.nodes.get('message').value='send after stop';
+  const sending=f.panel.send(true);await settle();
+  assert.equal(f.nodes.get('sendDirect').disabled,true);
+  const request=f.calls.find(c=>c.operation==='conversationSendDirect');
+  assert.ok(f.writes.some(w=>w.ab_panel_pending?.a===request.params.messageId));
+  current={...chat('a','stopping'),directMessageId:request.params.messageId,queuePaused:true,queued:1};
+  reply.resolve({success:true,result:{conversation:current}});
+  await sending;
+  assert.equal(f.nodes.get('phase').textContent,'Waiting for stop confirmation');
+  assert.equal(f.nodes.get('sendDirect').disabled,true);
+  f.nodes.get('message').value='do not replace the first direct message';
+  await assert.rejects(f.panel.send(true),/already waiting/);
+  assert.equal(f.calls.filter(c=>c.operation==='conversationStop').length,0);
+  assert.equal(f.calls.filter(c=>c.operation==='conversationSendDirect').length,1);
+  f.panel.close();
+});

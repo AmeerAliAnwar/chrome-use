@@ -427,6 +427,7 @@ pub fn handle_for_profile(
         | "conversationCreate"
         | "conversationRead"
         | "conversationSend"
+        | "conversationSendDirect"
         | "conversationMessageStatus"
         | "conversationQueueEdit"
         | "conversationQueueMessageRead"

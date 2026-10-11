@@ -4,7 +4,7 @@ const busyPhases = new Set(['starting', 'running', 'waitingInput', 'stopping']);
 const fieldLabels = { model: 'Model', provider: 'Provider', effort: 'Reasoning effort', serviceTier: 'Service tier', smallModel: 'Small model', opusModel: 'Opus model', sonnetModel: 'Sonnet model', haikuModel: 'Haiku model' };
 
 export function createPanel({ document, runtime, storage, schedule = setTimeout, cancel = clearTimeout }) {
-  const ids = ['connection', 'notice', 'refresh', 'settings', 'chatTab', 'agentsTab', 'chatView', 'agentsView', 'conversation', 'newChat', 'newOptions', 'agent', 'model', 'executable', 'phase', 'effectiveModel', 'transcript', 'empty', 'latest', 'requests', 'composer', 'message', 'queue', 'queuedMessages', 'resume', 'stop', 'send', 'discover', 'agentList', 'configuration', 'configTitle', 'configPath', 'configWarnings', 'configForm', 'configFields', 'configPreview', 'configDiff', 'applyConfig', 'discardConfig', 'restoreConfig', 'configResult'];
+  const ids = ['connection', 'notice', 'refresh', 'settings', 'chatTab', 'agentsTab', 'chatView', 'agentsView', 'conversation', 'newChat', 'newOptions', 'agent', 'model', 'executable', 'phase', 'effectiveModel', 'transcript', 'empty', 'latest', 'requests', 'composer', 'message', 'queue', 'queuedMessages', 'resume', 'stop', 'sendDirect', 'send', 'discover', 'agentList', 'configuration', 'configTitle', 'configPath', 'configWarnings', 'configForm', 'configFields', 'configPreview', 'configDiff', 'applyConfig', 'discardConfig', 'restoreConfig', 'configResult'];
   const nodes = Object.fromEntries(ids.map(id => [id, document.getElementById(id)]));
   let selected = '', selectionEpoch = 0, connectionEpoch = 0, connected = false, closed = false;
   let timeline = new PanelTimeline(), conversations = [], conversation = null, timer = null, polling = false;
@@ -56,6 +56,9 @@ export function createPanel({ document, runtime, storage, schedule = setTimeout,
     nodes.resume.disabled = !connected || conversation?.phase === 'recoveryRequired';
     nodes.stop.disabled = !connected || !busyPhases.has(conversation?.phase) || conversation?.phase === 'stopping';
     nodes.send.disabled = !connected || sending || Boolean(pending) || conversation?.phase === 'recoveryRequired';
+    nodes.sendDirect.hidden = !busyPhases.has(conversation?.phase) && !conversation?.queuePaused;
+    nodes.sendDirect.disabled = nodes.send.disabled || Boolean(conversation?.directMessageId);
+    nodes.sendDirect.textContent = busyPhases.has(conversation?.phase) ? 'Stop & send' : 'Send now';
     nodes.send.textContent = busyPhases.has(conversation?.phase) ? 'Queue' : 'Send';
     nodes.send.setAttribute('aria-label', busyPhases.has(conversation?.phase) ? 'Queue message' : 'Send message');
   }
@@ -172,7 +175,7 @@ export function createPanel({ document, runtime, storage, schedule = setTimeout,
     for (const message of messages) {
       if (queuedNodes.has(message.id)) continue;
       const container = element('details', undefined, 'queued-message');
-      container.append(element('summary', `Queued: ${message.text.split('\n')[0].slice(0, 100)}`));
+      container.append(element('summary', `${message.direct ? 'Send after stop' : 'Queued'}: ${message.text.split('\n')[0].slice(0, 100)}`));
       let expectedText = message.truncated ? null : message.text;
       const input = element('textarea'); input.readOnly = message.truncated === true; input.value = message.text; input.maxLength = 32768; input.setAttribute('aria-label', 'Edit queued message');
       const actions = element('div', undefined, 'actions'); const status = element('p', '', 'hint');
@@ -233,8 +236,9 @@ export function createPanel({ document, runtime, storage, schedule = setTimeout,
       loop();
     }, busyPhases.has(conversation?.phase) || pendingMessages.has(selected) ? 600 : 1800);
   }
-  async function send() {
+  async function send(direct = false) {
     if (!connected || sending || pendingMessages.has(selected) || conversation?.phase === 'recoveryRequired' || !nodes.message.value.trim()) return;
+    if (direct && conversation?.directMessageId) throw new Error('A direct message is already waiting for stop confirmation.');
     sending = true; clearError(); controls(); const text = nodes.message.value;
     try {
       if (!selected) {
@@ -245,7 +249,7 @@ export function createPanel({ document, runtime, storage, schedule = setTimeout,
       }
       const id = selected, pending = { id: crypto.randomUUID(), text }; pendingMessages.set(id, pending); controls();
       try { await savePending(); } catch (failure) { pendingMessages.delete(id); throw failure; }
-      const result = await api('conversationSend', { conversationId: id, messageId: pending.id, text });
+      const result = await api(direct ? 'conversationSendDirect' : 'conversationSend', { conversationId: id, messageId: pending.id, text });
       if (selected === id) { conversation = result.conversation; if (nodes.message.value === text) nodes.message.value = ''; }
       pendingMessages.delete(id); drafts.delete(id); await savePending(); await list(); await poll();
     } finally { sending = false; controls(); }
@@ -298,7 +302,8 @@ export function createPanel({ document, runtime, storage, schedule = setTimeout,
     await poll(); loop();
   }
   nodes.composer.addEventListener('submit', event => { event.preventDefault(); void send().catch(error); });
-  nodes.message.addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); void send().catch(error); } });
+  nodes.message.addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); void send(event.ctrlKey || event.metaKey).catch(error); } });
+  nodes.sendDirect.addEventListener('click', () => void send(true).catch(error));
   nodes.conversation.addEventListener('change', () => select(nodes.conversation.value));
   nodes.newChat.addEventListener('click', () => { nodes.conversation.value = ''; select(''); });
   nodes.refresh.addEventListener('click', () => void refresh().catch(error));

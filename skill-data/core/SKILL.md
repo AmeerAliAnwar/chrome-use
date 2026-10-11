@@ -27,7 +27,10 @@ currently visible page. The panel's Settings button opens connection options.
 Queued messages can be edited or removed only while still queued and matching
 the original text. Edits use a new ID; superseded IDs stay deduplicated. Long
 previews need a full-message read before changes. Queue operations preserve
-the running turn and do not prove interruption or direct sending.
+the running turn. Stop & send or Ctrl/Cmd+Enter is a separate direct-send
+operation: it waits for terminal/owned-process-exit confirmation and leaves
+ordinary queued messages paused. Unconfirmed or recovered turns cannot release
+a pending direct message automatically.
 
 ## Start with the cheapest useful evidence
 
