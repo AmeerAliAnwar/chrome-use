@@ -198,3 +198,37 @@ idle, OS-lock release and startup of the new binary. A journal fixture checks
 forward cursors across appends and rejects observed external corruption. Panel
 fixtures prove explicit same-ID/text retry and warning reset without resending.
 Extension 0.5.37 carries the recovery controls; 0.5.36 upload succeeded, but Google refused submission because the sidePanel permission justification was missing. This field was then supplied in the Developer Dashboard.
+
+
+## Published release closure
+
+v1.5.189 was published at 2026-10-11T21:10:47Z (October 12 JST) from
+8bdfcf84f1899dfe807c5850f458e07f1e66211f. All seven platform release jobs passed.
+Downloaded all seven public archives and matched each SHA-256 sidecar. The
+published macOS ARM64 binary reports 1.5.189, passes strict code-signature
+verification and carries the updated core skill's recovery/data-handling text.
+Marketplace sync completed and its chrome-use entry reads 1.5.189.
+
+The full cross-platform/browser workflow passed on f989f50f; its source tree
+matched the merged release commit exactly. The main workflow also passed.
+Windows native acceptance verifies read-only configuration, denied writes/process
+operations, unchanged configuration bytes and no agent-panel persistence.
+
+Extension 0.5.37 was uploaded manually through the native file picker and
+submitted by the merged publish workflow after the missing sidePanel permission
+justification was saved. The API returned submitted_state PENDING_REVIEW and
+published_state PUBLISHED for the older 0.5.35. A subsequent dashboard refresh
+showed the 0.5.37 row as Pending review. Store purpose, download/storage
+permission descriptions, data disclosures and local-agent privacy details were
+saved before submission; the live privacy page includes the new data flow.
+The exact submitted ZIP SHA-256 is
+6cf1b8aca06db4486fd062028992df949d0edc8cbf2fb835b0c305d33e08c91d.
+Google review/publication remains external; submission does not mean 0.5.37 is
+already available in the store. The original advanced full specification remains
+paused and is not marked complete.
+
+Release: https://github.com/leeguooooo/chrome-use/releases/tag/v1.5.189
+Release build: https://github.com/leeguooooo/chrome-use/actions/runs/38174635466
+Full acceptance: https://github.com/leeguooooo/chrome-use/actions/runs/38172746406
+Store submission: https://github.com/leeguooooo/chrome-use/actions/runs/38172160952
+Marketplace sync: https://github.com/leeguooooo/plugins/actions/runs/38187493294
