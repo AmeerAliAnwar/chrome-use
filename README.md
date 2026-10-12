@@ -20,6 +20,12 @@
   <sub>Point it at a page in your <b>real</b> Chrome → get structured data in one command. <a href="assets/demo.tape">(regenerate: <code>vhs assets/demo.tape</code>)</a></sub>
 </p>
 
+<p align="center">
+  <a href="https://github.com/leeguooooo/chrome-use/releases/download/film-why-chrome-use/why-chrome-use-en.mp4"><img src="assets/video-poster-en.webp" alt="Watch: Why chrome-use, a 5-minute video" width="820"></a>
+  <br>
+  <sub><b>Why chrome-use, in 5 minutes:</b> <a href="https://github.com/leeguooooo/chrome-use/releases/download/film-why-chrome-use/why-chrome-use-en.mp4">English (MP4)</a> · <a href="https://github.com/leeguooooo/chrome-use/releases/download/film-why-chrome-use/why-chrome-use-zh.mp4">中文 (MP4)</a></sub>
+</p>
+
 **chrome-use** drives your real, logged-in Chrome from any AI agent. It shares your existing login sessions and uses your existing browser profile; public detector results are documented, not a guarantee for every website. Part of the `*-use` family ([iphone-use](https://github.com/leeguooooo/iphone-use) drives your real iPhone; [bitwarden-use](https://github.com/leeguooooo/bitwarden-use) pulls passwords/2FA/passkeys from your Bitwarden vault so an agent can log in with credentials; chrome-use drives your real Chrome).
 
 <sub>Originally based on [vercel-labs/agent-browser](https://github.com/vercel-labs/agent-browser) (Apache-2.0); now a standalone project. The stealth/extension-relay architecture, anti-detection, humanize, multi-agent isolation, and CLI have diverged substantially.</sub>
